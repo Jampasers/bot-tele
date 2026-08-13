@@ -1,51 +1,70 @@
-import { Bot, Context, InlineKeyboard } from "grammy";
+import { Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
 import { HydratedDocument } from "mongoose";
 
 // ============================================================================
-//  TYPES
+//  EXPORTS used by other plugins
+//  ─ CB_CATALOG      : callback_data string the smsbower plugin references for
+//                      its own "Back to Catalog" button.
+//  ─ buildCatalogText / buildCatalogKeyboard : smsbower renders the catalog
+//                      view when navigating back, so these must stay exported.
 // ============================================================================
 
 /**
- * Strongly-typed callback_data strings used throughout this plugin.
- * Keeping them as a const enum prevents typos and makes exhaustive
- * switch-cases possible.
+ * The catalog callback_data string.
+ * Exported so the smsbower plugin can wire its "Back to Catalog" button
+ * without duplicating the literal string.
  */
-const enum CB {
-  Info    = "menu_info",
-  Catalog = "menu_catalog",
-  Topup   = "menu_topup",
-  Help    = "menu_help",
-  Back    = "menu_back",
+export const CB_CATALOG = "menu_catalog" as const;
 
-  // OTP service sub-actions (inside the catalog sub-menu)
-  OtpWhatsApp = "otp_whatsapp",
-  OtpTelegram = "otp_telegram",
+// ============================================================================
+//  REPLY KEYBOARD — Main Menu (persistent bottom bar)
+// ============================================================================
+
+/**
+ * Builds the persistent Reply Keyboard shown after /start.
+ *
+ * Reply Keyboard buttons send plain text messages when tapped, which are
+ * caught by `bot.hears()` handlers below.
+ *
+ * `.resized()` makes Telegram shrink the keyboard to the minimum height
+ * needed for the buttons — prevents it looking like a huge blank slab.
+ */
+function buildMainMenuReplyKeyboard(): Keyboard {
+  return new Keyboard()
+    .text("👤 Info User").text("🛍️ Catalog").row()
+    .text("💳 Topup").text("❓ Help")
+    .resized();
 }
 
 // ============================================================================
-//  HELPER — Currency formatter
+//  INLINE KEYBOARDS — Sub-menus (message-level, overlaid on the message)
 // ============================================================================
 
 /**
- * Formats a numeric balance as a locale-aware currency string.
- * Example: 15000 → "Rp 15,000"
+ * Catalog inline keyboard — top-level product categories.
  *
- * Adjust locale / currency to match your target market.
+ * Exported so the smsbower plugin can redraw this keyboard when the user
+ * navigates "Back to Catalog" from the OTP service picker.
  */
+export function buildCatalogKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("💬 OTP SMS (Virtual Number)", "product_otp");
+}
+
+// ============================================================================
+//  MESSAGE BUILDERS — pure functions, no side-effects
+// ============================================================================
+
 function formatBalance(amount: number): string {
   return new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: "IDR",
+    style:                 "currency",
+    currency:              "IDR",
     maximumFractionDigits: 0,
   }).format(amount);
 }
 
-/**
- * Formats a Date object as a short, human-readable string.
- * Example: 2024-08-13T14:00:00Z → "13 Aug 2024"
- */
 function formatDate(date: Date): string {
   return new Intl.DateTimeFormat("en-GB", {
     day:   "2-digit",
@@ -54,46 +73,13 @@ function formatDate(date: Date): string {
   }).format(date);
 }
 
-// ============================================================================
-//  KEYBOARD BUILDERS
-//  Each builder returns a fully assembled InlineKeyboard for its view.
-//  Separating keyboards from message text keeps handler code clean.
-// ============================================================================
-
-/** Main-menu keyboard — 4 rows as specified. */
-function buildMainMenuKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("👤 Info User",     CB.Info).text("🛒 Catalog", CB.Catalog).row()
-    .text("💳 Topup Balance", CB.Topup).row()
-    .text("🎧 Help / Support", CB.Help);
-}
-
-/** Back-button keyboard — reused by every sub-menu. */
-function buildBackKeyboard(): InlineKeyboard {
-  return new InlineKeyboard().text("🔙 Back to Main Menu", CB.Back);
-}
-
-/** Catalog sub-menu keyboard — OTP services + back button. */
-function buildCatalogKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("🟢 WhatsApp",  CB.OtpWhatsApp)
-    .text("🔵 Telegram",  CB.OtpTelegram).row()
-    .text("🔙 Back to Main Menu", CB.Back);
-}
-
-// ============================================================================
-//  MESSAGE BUILDERS
-//  Pure functions that return HTML-formatted strings.
-//  Keeping them separate makes i18n / templating straightforward later.
-// ============================================================================
-
-function buildMainMenuText(user: HydratedDocument<IUser>): string {
+function buildWelcomeText(user: HydratedDocument<IUser>): string {
   const handle = user.username ? `@${user.username}` : `#${user.telegramId}`;
   return (
     `🤖 <b>Main Menu</b>\n\n` +
     `👋 Welcome back, <b>${user.firstName}</b> (${handle})\n\n` +
     `🪙 <b>Balance:</b> ${formatBalance(user.balance)}\n\n` +
-    `<i>Select an option below to get started.</i>`
+    `<i>Use the buttons below to navigate.</i>`
   );
 }
 
@@ -115,13 +101,16 @@ function buildInfoText(user: HydratedDocument<IUser>): string {
   );
 }
 
-function buildCatalogText(): string {
+/**
+ * Catalog landing page text.
+ * Exported so the smsbower plugin can redraw this message when navigating back.
+ */
+export function buildCatalogText(): string {
   return (
-    `🛒 <b>OTP Catalog</b>\n` +
+    `🛍️ <b>Catalog</b>\n` +
     `${"─".repeat(28)}\n\n` +
-    `Select an OTP service to begin the purchase flow.\n\n` +
-    `🟢 <b>WhatsApp</b>  — phone verification OTP\n` +
-    `🔵 <b>Telegram</b>  — account activation OTP\n\n` +
+    `Choose a product category:\n\n` +
+    `💬 <b>OTP SMS</b> — Rent a virtual number to receive a one-time code.\n\n` +
     `<i>More services coming soon!</i>`
   );
 }
@@ -138,32 +127,25 @@ function buildTopupText(): string {
 
 function buildHelpText(): string {
   return (
-    `🎧 <b>Help & Support</b>\n` +
+    `❓ <b>Help & Support</b>\n` +
     `${"─".repeat(28)}\n\n` +
     `Having trouble? We're here to help!\n\n` +
-    `📩 <b>Email:</b>   support@example.com\n` +
+    `📩 <b>Email:</b>    support@example.com\n` +
     `💬 <b>Telegram:</b> <a href="https://t.me/support">@support</a>\n` +
-    `🕐 <b>Hours:</b>   Mon–Fri, 09:00–18:00 WIB\n\n` +
+    `🕐 <b>Hours:</b>    Mon–Fri, 09:00–18:00 WIB\n\n` +
     `<i>Average response time: under 2 hours.</i>`
   );
 }
 
 // ============================================================================
-//  DB HELPER — Find-or-create pattern
+//  DB HELPER
 // ============================================================================
 
-/**
- * Looks up an existing user by telegramId.
- * If not found, creates a new document with default balance/totalOrders.
- * Returns the hydrated Mongoose document either way.
- */
 async function findOrCreateUser(
   telegramId: string,
-  firstName: string,
-  username?: string
+  firstName:  string,
+  username?:  string
 ): Promise<HydratedDocument<IUser>> {
-  // `findOneAndUpdate` with `upsert: true` is atomic — safe against race conditions
-  // that could occur if a user fires two commands simultaneously.
   const user = await User.findOneAndUpdate(
     { telegramId },
     {
@@ -175,54 +157,42 @@ async function findOrCreateUser(
         totalOrders: 0,
       },
     },
-    {
-      upsert:    true,  // create the doc if it doesn't exist
-      new:       true,  // return the document after the operation
-      runValidators: true,
-    }
+    { upsert: true, new: true, runValidators: true }
   );
-
-  // findOneAndUpdate with upsert + new always returns a document.
-  // This assertion is safe — we throw rather than silently returning null.
-  if (!user) throw new Error(`findOrCreateUser: unexpected null for id ${telegramId}`);
+  if (!user) throw new Error(`findOrCreateUser: null for id ${telegramId}`);
   return user;
 }
 
 // ============================================================================
-//  PLUGIN DEFINITION
+//  PLUGIN
 // ============================================================================
 
 const panelPlugin: Plugin = {
   name:    "panel",
-  version: "1.0.0",
+  version: "2.0.0",
 
-  // /start is the canonical entry point — always keep it first in the menu.
   commands: [
-    {
-      command: "start",
-      description: "Open the main menu",
-    },
+    { command: "start", description: "Open the main menu" },
   ],
 
   register(bot: Bot<Context>): void {
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  /start  — Entry point: fetch/create user → send Main Menu
-    // ─────────────────────────────────────────────────────────────────────────
+    // ── /start ────────────────────────────────────────────────────────────────
+    // Sends the welcome message AND attaches the persistent Reply Keyboard.
+    // The Reply Keyboard stays until explicitly removed — the user always has
+    // the main-menu buttons available without needing to type /start again.
     bot.command("start", async (ctx) => {
       const from = ctx.from;
-      if (!from) return; // Telegram always sets `from` for message updates
+      if (!from) return;
 
       try {
         const user = await findOrCreateUser(
-          String(from.id),
-          from.first_name,
-          from.username
+          String(from.id), from.first_name, from.username
         );
 
-        await ctx.reply(buildMainMenuText(user), {
+        await ctx.reply(buildWelcomeText(user), {
           parse_mode:   "HTML",
-          reply_markup: buildMainMenuKeyboard(),
+          reply_markup: buildMainMenuReplyKeyboard(),
         });
       } catch (err) {
         console.error("[panel] /start error:", err);
@@ -230,123 +200,78 @@ const panelPlugin: Plugin = {
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  menu_info — Edit message → User stats view
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.Info, async (ctx) => {
-      // ALWAYS answer the callback query first to clear the loading spinner.
-      await ctx.answerCallbackQuery();
-
+    // ── 👤 Info User (bot.hears) ──────────────────────────────────────────────
+    // Reply Keyboards send plain text — bot.hears() matches the exact button label.
+    bot.hears("👤 Info User", async (ctx) => {
       const from = ctx.from;
+      if (!from) return;
+
       try {
         const user = await findOrCreateUser(
-          String(from.id),
-          from.first_name,
-          from.username
+          String(from.id), from.first_name, from.username
         );
-
-        await ctx.editMessageText(buildInfoText(user), {
-          parse_mode:   "HTML",
-          reply_markup: buildBackKeyboard(),
-        });
+        // Reply with a fresh message — no inline keyboard needed here.
+        await ctx.reply(buildInfoText(user), { parse_mode: "HTML" });
       } catch (err) {
-        console.error("[panel] menu_info error:", err);
-        await ctx.answerCallbackQuery({ text: "❌ Error loading info." });
+        console.error("[panel] hears:Info User error:", err);
+        await ctx.reply("❌ Could not load your info. Please try again.");
       }
     });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    //  menu_catalog — Edit message → OTP catalog view
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.Catalog, async (ctx) => {
-      await ctx.answerCallbackQuery();
+    // ── 🛍️ Catalog (bot.hears) ───────────────────────────────────────────────
+    // Sends the catalog as a new message with an Inline Keyboard for deeper
+    // navigation. Sub-menus always live in Inline Keyboards so the persistent
+    // bottom bar stays accessible at all times.
+    bot.hears("🛍️ Catalog", async (ctx) => {
+      try {
+        await ctx.reply(buildCatalogText(), {
+          parse_mode:   "HTML",
+          reply_markup: buildCatalogKeyboard(),
+        });
+      } catch (err) {
+        console.error("[panel] hears:Catalog error:", err);
+        await ctx.reply("❌ Could not load the catalog. Please try again.");
+      }
+    });
 
+    // ── 💳 Topup (bot.hears) ─────────────────────────────────────────────────
+    bot.hears("💳 Topup", async (ctx) => {
+      try {
+        await ctx.reply(buildTopupText(), { parse_mode: "HTML" });
+      } catch (err) {
+        console.error("[panel] hears:Topup error:", err);
+        await ctx.reply("❌ Could not load topup info. Please try again.");
+      }
+    });
+
+    // ── ❓ Help (bot.hears) ───────────────────────────────────────────────────
+    bot.hears("❓ Help", async (ctx) => {
+      try {
+        await ctx.reply(buildHelpText(), { parse_mode: "HTML" });
+      } catch (err) {
+        console.error("[panel] hears:Help error:", err);
+        await ctx.reply("❌ Could not load help info. Please try again.");
+      }
+    });
+
+    // ── menu_catalog (callbackQuery) ──────────────────────────────────────────
+    // The smsbower plugin registers its own CB_CATALOG listener, but we keep
+    // this handler here so that any inline "Back to Catalog" button works even
+    // if the smsbower plugin isn't loaded (e.g. during development).
+    bot.callbackQuery(CB_CATALOG, async (ctx) => {
+      await ctx.answerCallbackQuery();
       try {
         await ctx.editMessageText(buildCatalogText(), {
           parse_mode:   "HTML",
           reply_markup: buildCatalogKeyboard(),
         });
       } catch (err) {
-        console.error("[panel] menu_catalog error:", err);
-      }
-    });
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  OTP service handlers — Stub: reply with a "coming soon" alert.
-    //  Replace these with your actual OTP purchasing flow when ready.
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.OtpWhatsApp, async (ctx) => {
-      await ctx.answerCallbackQuery({
-        text:       "🟢 WhatsApp OTP — Coming soon!",
-        show_alert: true, // shows as a popup, not just a toast
-      });
-    });
-
-    bot.callbackQuery(CB.OtpTelegram, async (ctx) => {
-      await ctx.answerCallbackQuery({
-        text:       "🔵 Telegram OTP — Coming soon!",
-        show_alert: true,
-      });
-    });
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  menu_topup — Edit message → Topup instructions view
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.Topup, async (ctx) => {
-      await ctx.answerCallbackQuery();
-
-      try {
-        await ctx.editMessageText(buildTopupText(), {
-          parse_mode:   "HTML",
-          reply_markup: buildBackKeyboard(),
-        });
-      } catch (err) {
-        console.error("[panel] menu_topup error:", err);
-      }
-    });
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  menu_help — Edit message → Help & Support view
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.Help, async (ctx) => {
-      await ctx.answerCallbackQuery();
-
-      try {
-        await ctx.editMessageText(buildHelpText(), {
-          parse_mode:   "HTML",
-          reply_markup: buildBackKeyboard(),
-        });
-      } catch (err) {
-        console.error("[panel] menu_help error:", err);
-      }
-    });
-
-    // ─────────────────────────────────────────────────────────────────────────
-    //  menu_back — Edit message → return to Main Menu
-    // ─────────────────────────────────────────────────────────────────────────
-    bot.callbackQuery(CB.Back, async (ctx) => {
-      await ctx.answerCallbackQuery();
-
-      const from = ctx.from;
-      try {
-        const user = await findOrCreateUser(
-          String(from.id),
-          from.first_name,
-          from.username
-        );
-
-        // Restore both the message text AND the keyboard atomically.
-        await ctx.editMessageText(buildMainMenuText(user), {
-          parse_mode:   "HTML",
-          reply_markup: buildMainMenuKeyboard(),
-        });
-      } catch (err) {
-        console.error("[panel] menu_back error:", err);
+        console.error("[panel] menu_catalog callback error:", err);
       }
     });
 
     console.log(
-      "   → /start (main menu), menu_info, menu_catalog, menu_topup, menu_help, menu_back registered"
+      "   → /start (Reply Keyboard) | hears: 👤 Info User, 🛍️ Catalog, 💳 Topup, ❓ Help | callbackQuery: menu_catalog"
     );
   },
 };

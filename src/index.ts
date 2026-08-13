@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createBot } from "./core/bot.js";
 import { connectDatabase, disconnectDatabase } from "./core/db.js";
+import { SMSBowerService } from "./services/smsbower.js";
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -39,8 +40,15 @@ async function main(): Promise<void> {
   console.log("🔗  Connecting to MongoDB…");
   await connectDatabase();
 
-  // Step 2: Create the bot and load all plugins.
+  // Step 2: Pre-fetch SMSBower countries + services into the in-memory cache.
+  // This runs once at startup so every keyboard render is instant (no API call
+  // per user interaction). If the fetch fails the bot still starts — the plugin
+  // will show empty lists rather than crashing.
+  await SMSBowerService.loadData();
+
+  // Step 3: Create the bot and load all plugins.
   // Plugins can import Mongoose models freely — the connection is already open.
+  // The SMSBower cache is already populated — keyboards build correctly.
   const bot = await createBot(BOT_TOKEN as string);
 
   // ---------------------------------------------------------------------------
