@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables — NEVER commit this!
+.env
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.vscode/settings.json

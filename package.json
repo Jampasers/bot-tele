@@ -1,0 +1,36 @@
+{
+  "name": "grammy-plugin-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A modular, plugin-based Telegram bot powered by grammY and TypeScript.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "grammy",
+    "typescript",
+    "plugin"
+  ],
+  "allowScripts": {
+    "esbuild": true
+  },
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "grammy": "^1.27.0",
+    "mongoose": "^9.9.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "rimraf": "^6.0.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.23.12",
+    "typescript": "^5.5.4"
+  }
+}
