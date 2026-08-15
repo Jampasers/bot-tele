@@ -74,6 +74,28 @@ async function main(): Promise<void> {
   process.once("SIGINT", () => void shutdown("SIGINT"));
   process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
+  // Gracefully log and survive transient network errors (e.g. Telegram TCP drops).
+  // Without this, an unhandled error in an update handler crashes the whole process.
+  bot.catch((err) => {
+    const msg = err.message ?? String(err);
+    // Suppress the noisy "stream reading error" / "connection aborted" logs —
+    // grammY reconnects automatically; no action needed.
+    if (
+      msg.includes("stream reading error") ||
+      msg.includes("connection was aborted") ||
+      msg.includes("ECONNRESET") ||
+      msg.includes("ETIMEDOUT")
+    ) {
+      console.warn("⚠️  Transient network error (auto-reconnecting):", msg.split("\n")[0]);
+      return;
+    }
+    if (msg.includes("query is too old") || msg.includes("message is not modified")) {
+      console.warn("⚠️  Benign Telegram update warning:", msg.split("\n")[0]);
+      return;
+    }
+    console.error("❌  Unhandled bot error:", err);
+  });
+
   // Step 3: Start long-polling.
   await bot.start({
     onStart: (botInfo) => {

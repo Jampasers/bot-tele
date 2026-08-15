@@ -1,6 +1,7 @@
 import { Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
+import { SmsConfig } from "../../models/SmsConfig.js";
 import { HydratedDocument } from "mongoose";
 
 // ============================================================================
@@ -31,7 +32,7 @@ export const CB_CATALOG = "menu_catalog" as const;
  * `.resized()` makes Telegram shrink the keyboard to the minimum height
  * needed for the buttons — prevents it looking like a huge blank slab.
  */
-function buildMainMenuReplyKeyboard(): Keyboard {
+export function buildMainMenuReplyKeyboard(): Keyboard {
   return new Keyboard()
     .text("👤 Info User").text("🛍️ Catalog").row()
     .text("💳 Topup").text("❓ Help")
@@ -48,9 +49,18 @@ function buildMainMenuReplyKeyboard(): Keyboard {
  * Exported so the smsbower plugin can redraw this keyboard when the user
  * navigates "Back to Catalog" from the OTP service picker.
  */
-export function buildCatalogKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("💬 OTP SMS (Virtual Number)", "product_otp");
+export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
+  const config = await SmsConfig.getOrCreate();
+  const kb = new InlineKeyboard();
+
+  if (config.enabled !== false) {
+    kb.text("💬 OTP SMS (Virtual Number)", "product_otp");
+  } else {
+    kb.text("💬 OTP SMS (🔴 Nonaktif)", "product_otp_disabled");
+  }
+
+  kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
+  return kb;
 }
 
 // ============================================================================
@@ -73,7 +83,7 @@ function formatDate(date: Date): string {
   }).format(date);
 }
 
-function buildWelcomeText(user: HydratedDocument<IUser>): string {
+export function buildWelcomeText(user: HydratedDocument<IUser>): string {
   const handle = user.username ? `@${user.username}` : `#${user.telegramId}`;
   return (
     `🤖 <b>Main Menu</b>\n\n` +
@@ -105,13 +115,19 @@ function buildInfoText(user: HydratedDocument<IUser>): string {
  * Catalog landing page text.
  * Exported so the smsbower plugin can redraw this message when navigating back.
  */
-export function buildCatalogText(): string {
+export async function buildCatalogText(): Promise<string> {
+  const config = await SmsConfig.getOrCreate();
+  const otpDesc = config.enabled !== false
+    ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
+    : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
+
   return (
-    `🛍️ <b>Catalog</b>\n` +
+    `🛍️ <b>Catalog Layanan</b>\n` +
     `${"─".repeat(28)}\n\n` +
-    `Choose a product category:\n\n` +
-    `💬 <b>OTP SMS</b> — Rent a virtual number to receive a one-time code.\n\n` +
-    `<i>More services coming soon!</i>`
+    `Pilih kategori produk yang ingin dibeli:\n\n` +
+    otpDesc +
+    `📦 <b>Produk Digital</b> — Akun premium, lisensi, voucher, & produk digital instan.\n\n` +
+    `<i>Stok dan pesanan diproses otomatis 24/7.</i>`
   );
 }
 
@@ -120,7 +136,7 @@ function buildTopupText(): string {
     `💳 <b>Topup Balance</b>\n` +
     `${"─".repeat(28)}\n\n` +
     `To add funds to your account, please contact our admin:\n\n` +
-    `👤 <a href="https://t.me/admin">@admin</a>\n\n` +
+    `👤 <a href="https://t.me/myoneandonlyaccount">@myoneandonlyaccount</a>\n\n` +
     `<i>Automated payment gateway coming soon.</i>`
   );
 }
@@ -131,8 +147,8 @@ function buildHelpText(): string {
     `${"─".repeat(28)}\n\n` +
     `Having trouble? We're here to help!\n\n` +
     `📩 <b>Email:</b>    support@example.com\n` +
-    `💬 <b>Telegram:</b> <a href="https://t.me/support">@support</a>\n` +
-    `🕐 <b>Hours:</b>    Mon–Fri, 09:00–18:00 WIB\n\n` +
+    `💬 <b>Telegram:</b> <a href="https://t.me/myoneandonlyaccount">@myoneandonlyaccount</a>\n` +
+    `🕐 <b>Hours:</b>    Mon–Fri, 09:30–22:00 WIB\n\n` +
     `<i>Average response time: under 2 hours.</i>`
   );
 }
@@ -141,7 +157,7 @@ function buildHelpText(): string {
 //  DB HELPER
 // ============================================================================
 
-async function findOrCreateUser(
+export async function findOrCreateUser(
   telegramId: string,
   firstName:  string,
   username?:  string
@@ -157,7 +173,7 @@ async function findOrCreateUser(
         totalOrders: 0,
       },
     },
-    { upsert: true, new: true, runValidators: true }
+    { upsert: true, returnDocument: "after", runValidators: true }
   );
   if (!user) throw new Error(`findOrCreateUser: null for id ${telegramId}`);
   return user;
@@ -224,9 +240,9 @@ const panelPlugin: Plugin = {
     // bottom bar stays accessible at all times.
     bot.hears("🛍️ Catalog", async (ctx) => {
       try {
-        await ctx.reply(buildCatalogText(), {
+        await ctx.reply(await buildCatalogText(), {
           parse_mode:   "HTML",
-          reply_markup: buildCatalogKeyboard(),
+          reply_markup: await buildCatalogKeyboard(),
         });
       } catch (err) {
         console.error("[panel] hears:Catalog error:", err);
@@ -261,13 +277,40 @@ const panelPlugin: Plugin = {
     bot.callbackQuery(CB_CATALOG, async (ctx) => {
       await ctx.answerCallbackQuery();
       try {
-        await ctx.editMessageText(buildCatalogText(), {
+        const isMedia = ctx.msg && (!("text" in ctx.msg) || !ctx.msg.text);
+        if (isMedia) {
+          try { await ctx.deleteMessage(); } catch { /* ignore */ }
+          await ctx.reply(await buildCatalogText(), {
+            parse_mode:   "HTML",
+            reply_markup: await buildCatalogKeyboard(),
+          });
+          return;
+        }
+
+        await ctx.editMessageText(await buildCatalogText(), {
           parse_mode:   "HTML",
-          reply_markup: buildCatalogKeyboard(),
+          reply_markup: await buildCatalogKeyboard(),
         });
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.description?.includes("message is not modified")) return;
+        if (err?.description?.includes("there is no text in the message to edit")) {
+          try { await ctx.deleteMessage(); } catch { /* ignore */ }
+          await ctx.reply(await buildCatalogText(), {
+            parse_mode:   "HTML",
+            reply_markup: await buildCatalogKeyboard(),
+          }).catch(() => {});
+          return;
+        }
         console.error("[panel] menu_catalog callback error:", err);
       }
+    });
+
+    // ── product_otp_disabled (callbackQuery) ──────────────────────────────────
+    bot.callbackQuery("product_otp_disabled", async (ctx) => {
+      await ctx.answerCallbackQuery({
+        text: "⚠️ Layanan OTP SMS sedang dinonaktifkan / maintenance oleh admin.",
+        show_alert: true,
+      });
     });
 
     console.log(

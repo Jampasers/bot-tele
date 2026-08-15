@@ -17,17 +17,27 @@
     "plugin"
   ],
   "allowScripts": {
-    "esbuild": true
+    "esbuild": true,
+    "puppeteer": true
   },
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.6",
     "dotenv": "^16.4.5",
     "grammy": "^1.27.0",
-    "mongoose": "^9.9.2"
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
+    "mongoose": "^9.9.2",
+    "pngjs": "^7.0.0",
+    "puppeteer": "^25.7.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@types/jpeg-js": "^0.3.0",
     "@types/node": "^22.0.0",
+    "@types/pngjs": "^6.0.5",
+    "@types/qrcode": "^1.5.6",
     "rimraf": "^6.0.1",
     "ts-node": "^10.9.2",
     "tsx": "^4.23.12",
