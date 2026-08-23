@@ -57,15 +57,25 @@ export interface CachedService {
   name: string;
 }
 
+export interface ProviderDetail {
+  providerId: number | string;
+  price: number;
+  count: number;
+}
+
 /**
  * Price+stock entry for a specific service/country pair.
  * Returned by `SMSBowerService.getPricesForCountry()`.
  */
 export interface ServicePrice {
-  /** Raw base cost from SMSBower (in their internal credit unit). */
+  /** Raw base cost from SMSBower (lowest price available in USD). */
   cost:  number;
-  /** Number of available numbers in stock (may be 0). */
+  /** Number of available numbers in stock across all providers. */
   count: number;
+  /** Comma-separated list of top 3 cheapest provider IDs (e.g. "1329,2272,3178"). */
+  providerIds?: string | undefined;
+  /** Detailed provider breakdown sorted by price ascending. */
+  providers?: ProviderDetail[] | undefined;
 }
 
 /**
@@ -99,13 +109,97 @@ function buildUrl(params: Record<string, string>): string {
  */
 async function get(params: Record<string, string>): Promise<string> {
   const url = buildUrl(params);
-  const res = await fetch(url);
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!res.ok) {
     throw new Error(
       `SMSBower HTTP error: ${res.status} ${res.statusText}`
     );
   }
   return res.text();
+}
+
+// ── Provider Data Parser for getPricesV3 ─────────────────────────────────────
+
+/**
+ * Parses provider pricing objects returned by getPricesV3.
+ * Calculates:
+ * - `cost`: lowest available price in USD
+ * - `count`: total available stock across all providers
+ * - `providerIds`: comma-separated string of the 3 cheapest provider IDs with stock
+ * - `providers`: full list of providers sorted by price ascending
+ */
+export function parseProvidersData(providersObj: unknown): ServicePrice | null {
+  if (!providersObj || typeof providersObj !== "object") return null;
+
+  const directObj = providersObj as Record<string, unknown>;
+
+  // Check if it's already a flat object { cost, count } or { price, count } without sub-providers
+  const hasDirectCost = "cost" in directObj || "price" in directObj;
+  const isDirectNumber = typeof directObj["cost"] === "number" || typeof directObj["price"] === "number";
+  const keys = Object.keys(directObj);
+  const isProviderMap = keys.some((k) => /^\d+$/.test(k) && typeof directObj[k] === "object");
+
+  if (hasDirectCost && isDirectNumber && !isProviderMap) {
+    const rawCost = directObj["price"] ?? directObj["cost"];
+    const cost = typeof rawCost === "number" ? rawCost : parseFloat(String(rawCost ?? "0"));
+    const count = typeof directObj["count"] === "number" ? directObj["count"] : parseInt(String(directObj["count"] ?? "0"), 10);
+    const pid = directObj["provider_id"] ?? directObj["providerId"];
+    const providerIds = pid !== undefined ? String(pid) : undefined;
+    if (!isNaN(cost) && cost > 0) {
+      return {
+        cost,
+        count: isNaN(count) || count < 0 ? 0 : count,
+        providerIds,
+      };
+    }
+  }
+
+  const providerList: ProviderDetail[] = [];
+  let totalStock = 0;
+
+  for (const [key, val] of Object.entries(directObj)) {
+    if (typeof val !== "object" || val === null) continue;
+    const v = val as Record<string, unknown>;
+    const rawPrice = v["price"] ?? v["cost"];
+    const rawCount = v["count"];
+    const rawPid   = v["provider_id"] ?? v["providerId"] ?? key;
+
+    const price = typeof rawPrice === "number" ? rawPrice : parseFloat(String(rawPrice ?? "0"));
+    const count = typeof rawCount === "number" ? rawCount : parseInt(String(rawCount ?? "0"), 10);
+    const pid   = typeof rawPid === "number" || typeof rawPid === "string" ? rawPid : key;
+
+    if (!isNaN(price) && price > 0) {
+      const validCount = isNaN(count) || count < 0 ? 0 : count;
+      totalStock += validCount;
+      providerList.push({
+        providerId: pid,
+        price,
+        count: validCount,
+      });
+    }
+  }
+
+  if (providerList.length === 0) return null;
+
+  // Filter providers that have stock (> 0)
+  const withStock = providerList.filter((p) => p.count > 0);
+  const candidates = withStock.length > 0 ? withStock : providerList;
+
+  // Sort ascending by price (cheapest first)
+  candidates.sort((a, b) => a.price - b.price);
+
+  const cheapest = candidates[0];
+  if (!cheapest) return null;
+
+  const lowestPrice = cheapest.price;
+  const top3Ids = candidates.slice(0, 3).map((p) => String(p.providerId)).join(",");
+
+  return {
+    cost: lowestPrice,
+    count: totalStock,
+    providerIds: top3Ids,
+    providers: candidates,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -217,7 +311,7 @@ export class SMSBowerService {
         action:  "getServicesList",
       }).toString();
 
-      const svcRes  = await fetch(svcUrl);
+      const svcRes  = await fetch(svcUrl, { signal: AbortSignal.timeout(8000) });
       const svcText = await svcRes.text();
       console.log(`   📄  Raw services response (first 200 chars): ${svcText.substring(0, 200)}`);
 
@@ -286,7 +380,7 @@ export class SMSBowerService {
         action:  "getCountries",
       }).toString();
 
-      const ctrRes  = await fetch(ctrUrl);
+      const ctrRes  = await fetch(ctrUrl, { signal: AbortSignal.timeout(8000) });
       const ctrJson = await ctrRes.json() as unknown;
 
       // The API returns either an object or an array — handle both.
@@ -330,14 +424,14 @@ export class SMSBowerService {
    * Returns price + stock info for every service in the given country,
    * using an in-memory cache so pagination is instant after the first load.
    *
-   * API action : `getPrices`
-   * Response   : `{ [serviceCode]: { [countryId]: { cost: number, count: number } } }`
+   * API action : `getPricesV3`
+   * Response   : `{ [countryId]: { [serviceCode]: { [providerId]: { count, price, provider_id } } } }`
    *
    * The result is cached in `SMSBowerService.priceCache` keyed by countryId.
    * Call `priceCache.clear()` (done automatically by `loadData()`) to invalidate.
    *
    * @param countryId - SMSBower numeric country ID string, e.g. "6".
-   * @returns `CountryPriceMap` — Map<serviceCode, {cost, count}>.
+   * @returns `CountryPriceMap` — Map<serviceCode, {cost, count, providerIds, providers}>.
    */
   static async getPricesForCountry(countryId: string): Promise<CountryPriceMap> {
     // Cache hit — return immediately without any network call.
@@ -352,11 +446,11 @@ export class SMSBowerService {
 
       const url = `${BASE_URL}?` + new URLSearchParams({
         api_key: apiKey,
-        action:  "getPrices",
+        action:  "getPricesV3",
         country: countryId,
       }).toString();
 
-      const res  = await fetch(url);
+      const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
       const text = await res.text();
 
       // Attempt JSON parse. SMSBower may return plain-text on error.
@@ -371,49 +465,41 @@ export class SMSBowerService {
           root = root["prices"] as Record<string, unknown>;
         }
 
-        // Shape A (SMS-Activate / SMSBower standard): { [countryId]: { [serviceCode]: { cost, count } } }
+        // Shape A (getPricesV3 standard): { [countryId]: { [serviceCode]: { [providerId]: { count, price, provider_id } } } }
         if (root[countryId] && typeof root[countryId] === "object" && !Array.isArray(root[countryId])) {
           const servicesMap = root[countryId] as Record<string, unknown>;
           for (const [svcCode, entry] of Object.entries(servicesMap)) {
             if (typeof entry !== "object" || entry === null) continue;
-            const e = entry as Record<string, unknown>;
-            const cost  = typeof e["cost"]  === "number" ? e["cost"]  : parseFloat(String(e["cost"]  ?? "0"));
-            const count = typeof e["count"] === "number" ? e["count"] : parseInt(String(e["count"] ?? "0"), 10);
-            if (!isNaN(cost)) {
-              priceMap.set(svcCode, { cost, count });
+            const parsed = parseProvidersData(entry);
+            if (parsed && parsed.cost > 0) {
+              priceMap.set(svcCode, parsed);
             }
           }
         }
 
-        // Shape B fallback: { [serviceCode]: { [countryId]: { cost, count } } } or direct { [serviceCode]: { cost, count } }
+        // Shape B fallback: { [serviceCode]: { [countryId]: ... } } or direct { [serviceCode]: ... }
         if (priceMap.size === 0) {
           for (const [svcCode, val] of Object.entries(root)) {
             if (typeof val !== "object" || val === null || Array.isArray(val)) continue;
             const obj = val as Record<string, unknown>;
 
-            // Subshape B1: nested by country
             if (obj[countryId] && typeof obj[countryId] === "object") {
-              const e = obj[countryId] as Record<string, unknown>;
-              const cost  = typeof e["cost"]  === "number" ? e["cost"]  : parseFloat(String(e["cost"]  ?? "0"));
-              const count = typeof e["count"] === "number" ? e["count"] : parseInt(String(e["count"] ?? "0"), 10);
-              if (!isNaN(cost)) {
-                priceMap.set(svcCode, { cost, count });
+              const parsed = parseProvidersData(obj[countryId]);
+              if (parsed && parsed.cost > 0) {
+                priceMap.set(svcCode, parsed);
               }
-            }
-            // Subshape B2: direct { cost, count }
-            else if ("cost" in obj || "count" in obj) {
-              const cost  = typeof obj["cost"]  === "number" ? obj["cost"]  : parseFloat(String(obj["cost"]  ?? "0"));
-              const count = typeof obj["count"] === "number" ? obj["count"] : parseInt(String(obj["count"] ?? "0"), 10);
-              if (!isNaN(cost)) {
-                priceMap.set(svcCode, { cost, count });
+            } else {
+              const parsed = parseProvidersData(obj);
+              if (parsed && parsed.cost > 0) {
+                priceMap.set(svcCode, parsed);
               }
             }
           }
         }
 
-        console.log(`   💰  Prices loaded for country ${countryId}: ${priceMap.size} services.`);
+        console.log(`   💰  getPricesV3 loaded for country ${countryId}: ${priceMap.size} services.`);
       } else {
-        console.warn(`   ⚠️  getPrices for country ${countryId}: unexpected response — ${text.substring(0, 100)}`);
+        console.warn(`   ⚠️  getPricesV3 for country ${countryId}: unexpected response — ${text.substring(0, 100)}`);
       }
     } catch (err) {
       console.error(`   ⚠️  getPricesForCountry(${countryId}) failed:`, err);
@@ -424,6 +510,122 @@ export class SMSBowerService {
     return priceMap;
   }
 
+  // ── getPricesByService ───────────────────────────────────────────────────
+
+  /**
+   * Fetches prices for a single service across all countries via getPricesV3.
+   *
+   * @param serviceCode - SMSBower service code, e.g. "wa".
+   * @returns Map<countryId, ServicePrice>
+   */
+  static async getPricesByService(serviceCode: string): Promise<Map<string, ServicePrice>> {
+    const resultMap = new Map<string, ServicePrice>();
+
+    try {
+      const apiKey = process.env["SMSBOWER_API_KEY"];
+      if (!apiKey) throw new Error("SMSBOWER_API_KEY is not set.");
+
+      const url = `${BASE_URL}?` + new URLSearchParams({
+        api_key: apiKey,
+        action:  "getPricesV3",
+        service: serviceCode,
+      }).toString();
+
+      const res  = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const text = await res.text();
+
+      let data: unknown;
+      try { data = JSON.parse(text); } catch { data = null; }
+
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        let root = data as Record<string, unknown>;
+        if (root["data"] && typeof root["data"] === "object" && !Array.isArray(root["data"])) {
+          root = root["data"] as Record<string, unknown>;
+        } else if (root["prices"] && typeof root["prices"] === "object" && !Array.isArray(root["prices"])) {
+          root = root["prices"] as Record<string, unknown>;
+        }
+
+        for (const [countryId, val] of Object.entries(root)) {
+          if (typeof val !== "object" || val === null || Array.isArray(val)) continue;
+          const obj = val as Record<string, unknown>;
+
+          // Format 1: { [countryId]: { [serviceCode]: { [providerId]: ... } } }
+          if (obj[serviceCode] && typeof obj[serviceCode] === "object") {
+            const parsed = parseProvidersData(obj[serviceCode]);
+            if (parsed && parsed.cost > 0) {
+              resultMap.set(countryId, parsed);
+            }
+          }
+          // Format 2: { [countryId]: { [providerId]: ... } }
+          else {
+            const parsed = parseProvidersData(obj);
+            if (parsed && parsed.cost > 0) {
+              resultMap.set(countryId, parsed);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`   ⚠️  getPricesByService(${serviceCode}) failed:`, err);
+    }
+
+    return resultMap;
+  }
+
+  // ── getServicePrice ──────────────────────────────────────────────────────
+
+  /**
+   * Returns price + stock for a specific service/country pair.
+   */
+  static async getServicePrice(serviceCode: string, countryId: string): Promise<ServicePrice | null> {
+    const cached = SMSBowerService.priceCache.get(countryId)?.get(serviceCode);
+    if (cached && cached.cost > 0) return cached;
+
+    const prices = await SMSBowerService.getPricesForCountry(countryId);
+    return prices.get(serviceCode) ?? null;
+  }
+
+  // ── Finders & Resolvers ──────────────────────────────────────────────────
+
+  /**
+   * Resolves a country by ID, full name, or partial name (case-insensitive).
+   */
+  static findCountry(query: string): CachedCountry | undefined {
+    if (!query) return undefined;
+    const q = query.trim().toLowerCase();
+
+    // 1. Exact ID
+    const byId = SMSBowerService.allCountries.find((c) => c.id === q);
+    if (byId) return byId;
+
+    // 2. Exact name
+    const byName = SMSBowerService.allCountries.find((c) => c.name.toLowerCase() === q);
+    if (byName) return byName;
+
+    // 3. Partial name
+    return SMSBowerService.allCountries.find((c) => c.name.toLowerCase().includes(q));
+  }
+
+  /**
+   * Resolves a service by code, full name, or partial name (case-insensitive).
+   */
+  static findService(query: string): CachedService | undefined {
+    if (!query) return undefined;
+    const q = query.trim().toLowerCase();
+
+    // 1. Exact Code
+    const byCode = SMSBowerService.allServices.find((s) => s.code.toLowerCase() === q);
+    if (byCode) return byCode;
+
+    // 2. Exact name
+    const byName = SMSBowerService.allServices.find((s) => s.name.toLowerCase() === q);
+    if (byName) return byName;
+
+    // 3. Partial name
+    return SMSBowerService.allServices.find((s) => s.name.toLowerCase().includes(q));
+  }
+
+
   // ── getBalance ─────────────────────────────────────────────────────────────
 
   /**
@@ -431,20 +633,30 @@ export class SMSBowerService {
    * API response format: `ACCESS_BALANCE:<amount>`
    */
   async getBalance(): Promise<number> {
-    const raw = await get({ action: "getBalance" });
+    const raw = (await get({ action: "getBalance" })).trim();
 
     // Expected format: "ACCESS_BALANCE:123.45"
     const match = raw.match(/^ACCESS_BALANCE:(.+)$/);
-    if (!match || !match[1]) {
-      throw new Error(`getBalance: unexpected response "${raw}"`);
+    if (match && match[1]) {
+      const balance = parseFloat(match[1].trim());
+      if (!isNaN(balance)) {
+        return balance;
+      }
     }
 
-    const balance = parseFloat(match[1]);
-    if (isNaN(balance)) {
-      throw new Error(`getBalance: non-numeric balance value "${match[1]}"`);
+    // Fallback: check if JSON format was returned
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (typeof parsed["balance"] === "number") return parsed["balance"];
+      if (typeof parsed["balance"] === "string") {
+        const num = parseFloat(parsed["balance"]);
+        if (!isNaN(num)) return num;
+      }
+    } catch {
+      // not json
     }
 
-    return balance;
+    throw new Error(`getBalance: unexpected response "${raw}"`);
   }
 
   // ── getNumber ──────────────────────────────────────────────────────────────
@@ -452,18 +664,23 @@ export class SMSBowerService {
   /**
    * Requests a virtual number for the given service.
    *
-   * @param service - SMSBower service code (e.g. "wa", "tg", "ni", "fr").
-   * @param country - Country code string. Defaults to "6" (Indonesia).
+   * @param service     - SMSBower service code (e.g. "wa", "tg", "ni", "fr").
+   * @param country     - Country code string. Defaults to "6" (Indonesia).
+   * @param maxPrice    - Optional maximum base cost willing to pay. If set,
+   *                      passes `maxPrice` to `getNumberV2` so SMSBower will not
+   *                      assign a number that exceeds this price threshold.
+   * @param providerIds - Optional comma-separated provider IDs (e.g. "1329,2272,3178").
    *
    * **Success** — API returns a JSON object:
    * ```json
-   * { "activationId": "123", "phoneNumber": "628xxx", "activationCost": "500" }
+   * { "activationId": 561611085, "phoneNumber": "628xxx", "activationCost": "0.007" }
    * ```
    *
    * **Failure** — API returns a plain-text error code, e.g.:
-   * - `NO_BALANCE`  — provider account has insufficient funds
-   * - `NO_NUMBERS`  — no stock available for the requested service/country
-   * - `BAD_KEY`     — the API key is invalid
+   * - `NO_BALANCE`          — provider account has insufficient funds
+   * - `NO_NUMBERS`          — no stock available for the requested service/country
+   * - `MAX_PRICE_EXCEEDED`  — number price exceeds maxPrice threshold
+   * - `BAD_KEY`             — the API key is invalid
    *
    * This method translates every known error code into a descriptive message
    * before attempting JSON parsing, so callers always receive a clean Error
@@ -471,14 +688,25 @@ export class SMSBowerService {
    */
   async getNumber(
     service: string,
-    country: string = "6"
+    country: string = "6",
+    maxPrice?: number,
+    providerIds?: string
   ): Promise<GetNumberResult> {
     // ── 1. Always read as text first ─────────────────────────────────────────
-    const text = await get({
+    const params: Record<string, string> = {
       action: "getNumberV2",
       service,
       country,
-    });
+    };
+    if (typeof maxPrice === "number" && maxPrice > 0) {
+      params["maxPrice"] = String(maxPrice);
+    }
+    if (providerIds && providerIds.trim().length > 0) {
+      params["providerIds"] = providerIds.trim();
+    }
+
+    const rawText = await get(params);
+    const text = rawText.trim();
 
     // ── 2. Check for known plain-text error codes BEFORE touching JSON ────────
     //       Order matters: most specific checks go first.
@@ -488,8 +716,32 @@ export class SMSBowerService {
     if (text === "NO_NUMBERS") {
       throw new Error("Stok nomor untuk layanan/negara ini sedang kosong.");
     }
+    if (text === "MAX_PRICE_EXCEEDED" || text.includes("MAX_PRICE")) {
+      throw new Error("Harga nomor dari provider melebihi batas harga maksimal (stok harga terdaftar habis).");
+    }
     if (text === "BAD_KEY") {
       throw new Error("API Key SMSBower salah atau tidak valid.");
+    }
+    if (text === "BAD_ACTION") {
+      throw new Error("Aksi API tidak valid.");
+    }
+    if (text === "BAD_SERVICE" || text === "WRONG_SERVICE") {
+      throw new Error("Layanan tidak valid atau tidak tersedia.");
+    }
+    if (text === "NO_ACTIVATION") {
+      throw new Error("Aktivasi tidak ditemukan.");
+    }
+
+    // Check if plain-text ACCESS_NUMBER format was returned (e.g. ACCESS_NUMBER:12345:628123456)
+    if (text.startsWith("ACCESS_NUMBER:")) {
+      const parts = text.split(":");
+      if (parts.length >= 3 && parts[1] && parts[2]) {
+        return {
+          activationId: parts[1].trim(),
+          phoneNumber: parts[2].trim(),
+          activationCost: 0,
+        };
+      }
     }
 
     // ── 3. Attempt JSON parsing ───────────────────────────────────────────────
@@ -505,23 +757,50 @@ export class SMSBowerService {
       throw new Error(`API Error: ${text}`);
     }
 
+    // Check if API returned an error structure in JSON format
+    if (data["status"] === "error" || data["error"]) {
+      const errMsg = String(data["message"] || data["error"] || data["msg"] || JSON.stringify(data));
+      throw new Error(`API Error: ${errMsg}`);
+    }
+
     // ── 4. Validate the expected shape ────────────────────────────────────────
+    // Handle both string and number representations from provider APIs
+    const rawActivationId = data["activationId"] ?? data["id"];
+    const rawPhoneNumber  = data["phoneNumber"] ?? data["phone"] ?? data["number"];
+    const rawCost         = data["activationCost"] ?? data["cost"];
+
     if (
-      typeof data["activationId"]  !== "string" ||
-      typeof data["phoneNumber"]   !== "string"
+      (typeof rawActivationId !== "string" && typeof rawActivationId !== "number") ||
+      (typeof rawPhoneNumber !== "string" && typeof rawPhoneNumber !== "number")
     ) {
       throw new Error(
         `getNumber: unexpected response shape: ${JSON.stringify(data)}`
       );
     }
 
+    const activationId = String(rawActivationId).trim();
+    const phoneNumber  = String(rawPhoneNumber).trim();
+    const parsedCost   = parseFloat(rawCost !== undefined && rawCost !== null ? String(rawCost) : "0");
+    const activationCost = isNaN(parsedCost) ? 0 : parsedCost;
+
+    if (!activationId || !phoneNumber) {
+      throw new Error(
+        `getNumber: unexpected response shape: ${JSON.stringify(data)}`
+      );
+    }
+
+    // Extra safety guard: If maxPrice is set and returned activationCost exceeds it
+    if (typeof maxPrice === "number" && maxPrice > 0 && activationCost > maxPrice + 0.001) {
+      await this.setStatus(activationId, "8").catch(() => {});
+      throw new Error("Harga nomor dari provider melebihi batas harga maksimal, aktivasi dibatalkan otomatis.");
+    }
+
     return {
-      activationId:   data["activationId"]  as string,
-      phoneNumber:    data["phoneNumber"]   as string,
-      activationCost: parseFloat((data["activationCost"] as string | number | undefined)?.toString() ?? "0"),
+      activationId,
+      phoneNumber,
+      activationCost,
     };
   }
-
 
   // ── getStatus ──────────────────────────────────────────────────────────────
 
@@ -530,16 +809,22 @@ export class SMSBowerService {
    *
    * Possible raw API responses:
    * - `"STATUS_WAIT_CODE"`        → waiting for SMS
+   * - `"STATUS_WAIT_RETRY"`       → waiting for SMS retry
+   * - `"STATUS_WAIT_RESEND"`      → waiting for resend
    * - `"STATUS_OK:<code>"`        → OTP received
    * - `"STATUS_CANCEL"`           → activation cancelled
    */
   async getStatus(activationId: string): Promise<ActivationStatus> {
-    const raw = await get({
+    const raw = (await get({
       action: "getStatus",
       id:     activationId,
-    });
+    })).trim();
 
-    if (raw === "STATUS_WAIT_CODE") {
+    if (
+      raw === "STATUS_WAIT_CODE" ||
+      raw === "STATUS_WAIT_RETRY" ||
+      raw === "STATUS_WAIT_RESEND"
+    ) {
       return { kind: "WAIT_CODE" };
     }
 
@@ -549,7 +834,7 @@ export class SMSBowerService {
 
     const okMatch = raw.match(/^STATUS_OK:(.+)$/);
     if (okMatch?.[1]) {
-      return { kind: "OK", code: okMatch[1] };
+      return { kind: "OK", code: okMatch[1].trim() };
     }
 
     throw new Error(`getStatus: unknown response "${raw}"`);
@@ -563,6 +848,7 @@ export class SMSBowerService {
    * Common status values:
    * - `"8"` — cancel the activation (refund the number)
    * - `"3"` — manually mark the SMS as received (rarely needed)
+   * - `"6"` — complete activation
    *
    * @param activationId - The activation to update.
    * @param status       - Numeric status code as a string.
@@ -574,7 +860,7 @@ export class SMSBowerService {
       status,
     });
     // Return the raw response so callers can inspect it if needed.
-    return raw;
+    return raw.trim();
   }
 }
 

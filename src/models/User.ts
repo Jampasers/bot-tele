@@ -1,7 +1,7 @@
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
-// 1. TypeScript interface — the shape of a User document in application code.
+// 1. TypeScript Interface
 // ---------------------------------------------------------------------------
 
 /**
@@ -26,6 +26,23 @@ export interface IUser {
 
   /** Lifetime count of completed orders placed by this user. */
   totalOrders: number;
+
+  /**
+   * Telegram ID of the user who referred this user.
+   * Null/undefined if user registered without a referral link.
+   */
+  referredBy?: string;
+
+  /**
+   * Pending affiliate commission balance earned through referrals.
+   * Can be withdrawn to main `balance` by the user.
+   */
+  affiliateBalance: number;
+
+  /**
+   * Lifetime total affiliate commissions earned (historical, never decremented on withdrawal).
+   */
+  totalEarnedAffiliate: number;
 
   /** Timestamp set automatically by Mongoose on first insert. */
   createdAt: Date;
@@ -68,6 +85,21 @@ const userSchema = new Schema<IUser>(
       type: Number,
       default: 0,
       min: [0, "totalOrders cannot be negative"],
+    },
+    referredBy: {
+      type: String,
+      default: undefined,
+      trim: true,
+    },
+    affiliateBalance: {
+      type: Number,
+      default: 0,
+      min: [0, "affiliateBalance cannot be negative"],
+    },
+    totalEarnedAffiliate: {
+      type: Number,
+      default: 0,
+      min: [0, "totalEarnedAffiliate cannot be negative"],
     },
   },
   {

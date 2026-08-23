@@ -1,7 +1,11 @@
 import "dotenv/config";
+import { run } from "@grammyjs/runner";
 import { createBot } from "./core/bot.js";
 import { connectDatabase, disconnectDatabase } from "./core/db.js";
 import { SMSBowerService } from "./services/smsbower.js";
+import { scheduleDailyBackup } from "./services/backup.js";
+import { ImapOtpService } from "./services/imapOtp.js";
+import { CurrencyService } from "./services/currency.js";
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -35,51 +39,23 @@ async function main(): Promise<void> {
   console.log("═══════════════════════════════════════\n");
 
   // Step 1: Connect to the database FIRST.
-  // Plugins that query the DB at registration time (rare but possible) are
-  // safe to do so only after this line resolves.
   console.log("🔗  Connecting to MongoDB…");
   await connectDatabase();
 
-  // Step 2: Pre-fetch SMSBower countries + services into the in-memory cache.
-  // This runs once at startup so every keyboard render is instant (no API call
-  // per user interaction). If the fetch fails the bot still starts — the plugin
-  // will show empty lists rather than crashing.
-  await SMSBowerService.loadData();
+  // Step 2: Pre-fetch SMSBower countries + services and realtime currency rate.
+  await Promise.all([
+    SMSBowerService.loadData(),
+    CurrencyService.getUsdRate().then((rate) => {
+      console.log(`💱  Kurs Realtime aktif: 1 USD = Rp ${Math.round(rate).toLocaleString("id-ID")}`);
+    }).catch(() => {}),
+  ]);
 
   // Step 3: Create the bot and load all plugins.
-  // Plugins can import Mongoose models freely — the connection is already open.
-  // The SMSBower cache is already populated — keyboards build correctly.
   const bot = await createBot(BOT_TOKEN as string);
 
-  // ---------------------------------------------------------------------------
-  // Graceful shutdown
-  // Sequence: stop polling → close DB → exit.
-  // Closing the DB after the bot ensures no in-flight handler is still
-  // awaiting a database query when the connection is torn down.
-  // ---------------------------------------------------------------------------
-  const shutdown = async (signal: string): Promise<void> => {
-    console.log(`\n⚡  Received ${signal}. Shutting down gracefully…`);
-
-    // 1. Stop accepting new Telegram updates.
-    await bot.stop();
-    console.log("🛑  Bot stopped.");
-
-    // 2. Flush pending Mongoose operations and close the connection pool.
-    await disconnectDatabase();
-
-    console.log("✅  Shutdown complete. Goodbye!");
-    process.exit(0);
-  };
-
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
-
   // Gracefully log and survive transient network errors (e.g. Telegram TCP drops).
-  // Without this, an unhandled error in an update handler crashes the whole process.
   bot.catch((err) => {
     const msg = err.message ?? String(err);
-    // Suppress the noisy "stream reading error" / "connection aborted" logs —
-    // grammY reconnects automatically; no action needed.
     if (
       msg.includes("stream reading error") ||
       msg.includes("connection was aborted") ||
@@ -96,12 +72,44 @@ async function main(): Promise<void> {
     console.error("❌  Unhandled bot error:", err);
   });
 
-  // Step 3: Start long-polling.
-  await bot.start({
-    onStart: (botInfo) => {
-      console.log(`✅  Bot @${botInfo.username} is online and polling!\n`);
-    },
+  // Step 4: Start IMAP OTP Child Process Worker.
+  ImapOtpService.start(bot.api).catch((imapErr) => {
+    console.warn("⚠️  IMAP service background start error:", imapErr);
   });
+
+  // Step 5: Initialize bot info & start high-concurrency runner.
+  await bot.init();
+  const botInfo = bot.botInfo;
+  console.log(`✅  Bot @${botInfo.username} is online and polling (Concurrent Runner active)! 🚀\n`);
+  scheduleDailyBackup(bot.api);
+
+  const runner = run(bot);
+
+  // ---------------------------------------------------------------------------
+  // Graceful shutdown
+  // Sequence: stop runner → stop IMAP child process → close DB → exit.
+  // ---------------------------------------------------------------------------
+  const shutdown = async (signal: string): Promise<void> => {
+    console.log(`\n⚡  Received ${signal}. Shutting down gracefully…`);
+
+    // 1. Stop runner if active.
+    if (runner.isRunning()) {
+      await runner.stop();
+      console.log("🛑  Bot runner stopped.");
+    }
+
+    // 2. Stop IMAP worker process.
+    await ImapOtpService.stop();
+
+    // 3. Flush pending Mongoose operations and close the connection pool.
+    await disconnectDatabase();
+
+    console.log("✅  Shutdown complete. Goodbye!");
+    process.exit(0);
+  };
+
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 main().catch((err) => {

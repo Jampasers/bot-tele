@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "check:imap": "tsx src/scripts/inspectImap.ts",
     "build": "tsc",
     "start": "node dist/index.js"
   },
@@ -23,18 +24,26 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@grammyjs/runner": "^2.0.3",
     "@napi-rs/canvas": "^1.0.6",
+    "adm-zip": "^0.6.0",
+    "archiver": "^8.0.0",
     "dotenv": "^16.4.5",
     "grammy": "^1.27.0",
+    "imapflow": "^1.7.1",
     "jpeg-js": "^0.4.4",
     "jsqr": "^1.4.0",
+    "mailparser": "^3.9.15",
     "mongoose": "^9.9.2",
     "pngjs": "^7.0.0",
     "puppeteer": "^25.7.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/archiver": "^8.0.0",
     "@types/jpeg-js": "^0.3.0",
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.0.0",
     "@types/pngjs": "^6.0.5",
     "@types/qrcode": "^1.5.6",

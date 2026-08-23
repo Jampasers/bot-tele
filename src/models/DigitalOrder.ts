@@ -23,8 +23,35 @@ export interface IDigitalOrder {
   /** Total price paid in IDR */
   price: number;
 
+  /** Unit price paid per item in IDR */
+  unitPrice?: number | undefined;
+
+  /** Wholesale discount amount saved in IDR */
+  discountAmount?: number | undefined;
+
+  /** Wholesale tier minimum quantity applied (if any) */
+  bulkTierMinQty?: number | undefined;
+
   /** The delivered stock content/credential */
   itemContent: string;
+
+  /** Optional custom note / delivery message at time of purchase */
+  deliveryMessage?: string | undefined;
+
+  /** Snapshot: warranty duration value (0 = no warranty) */
+  warrantyDuration?: number | undefined;
+
+  /** Snapshot: warranty unit */
+  warrantyUnit?: "HOURS" | "DAYS" | "WEEKS" | "MONTHS" | "NONE" | undefined;
+
+  /** Calculated expiry timestamp for warranty */
+  warrantyExpiresAt?: Date | undefined;
+
+  /** Maximum allowed warranty claims for this order */
+  maxClaims?: number | undefined;
+
+  /** Number of claims filed against this order */
+  claimsCount?: number | undefined;
 
   /** When the order was completed */
   createdAt: Date;
@@ -72,10 +99,54 @@ const digitalOrderSchema = new Schema<IDigitalOrder>(
       required: true,
       min: 0,
     },
+    unitPrice: {
+      type: Number,
+      min: 0,
+      default: undefined,
+    },
+    discountAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    bulkTierMinQty: {
+      type: Number,
+      min: 0,
+      default: undefined,
+    },
     itemContent: {
       type: String,
       required: true,
       trim: true,
+    },
+    deliveryMessage: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    warrantyDuration: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    warrantyUnit: {
+      type: String,
+      enum: ["HOURS", "DAYS", "WEEKS", "MONTHS", "NONE"],
+      default: "NONE",
+    },
+    warrantyExpiresAt: {
+      type: Date,
+      index: true,
+    },
+    maxClaims: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+    claimsCount: {
+      type: Number,
+      default: 0,
+      min: 0,
     },
     createdAt: {
       type: Date,

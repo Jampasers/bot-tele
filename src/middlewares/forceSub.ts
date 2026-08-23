@@ -1,5 +1,6 @@
 import { Context, MiddlewareFn } from "grammy";
 import { ForceSubService } from "../services/forceSub.js";
+import { isAdmin } from "../core/admin.js";
 import {
   buildWelcomeText,
   buildMainMenuReplyKeyboard,
@@ -17,14 +18,13 @@ export const forceSubMiddleware: MiddlewareFn<Context> = async (ctx, next) => {
   }
 
   // 2. Admin bypass — Admin can always use all bot features and commands.
-  const adminId = process.env["ADMIN_ID"];
-  if (adminId && String(ctx.from.id) === adminId) {
+  if (isAdmin(ctx)) {
     return next();
   }
 
   // 3. Handle the "Saya Sudah Bergabung" verification button.
   if (ctx.callbackQuery?.data === "forcesub_check") {
-    const check = await ForceSubService.checkUserJoined(ctx.api, ctx.from.id);
+    const check = await ForceSubService.checkUserJoined(ctx.api, ctx.from.id, true);
 
     if (!check.isMember) {
       await ctx.answerCallbackQuery({

@@ -1,20 +1,46 @@
 import { Types } from "mongoose";
-import { DigitalProduct, IDigitalProduct, DigitalProductDocument } from "../models/DigitalProduct.js";
+import { DigitalProduct, IDigitalProduct, DigitalProductDocument, WarrantyUnit, IBulkDiscountTier } from "../models/DigitalProduct.js";
 import { DigitalStock, IDigitalStock, DigitalStockDocument } from "../models/DigitalStock.js";
 import { DigitalOrder, IDigitalOrder, DigitalOrderDocument } from "../models/DigitalOrder.js";
 import { User } from "../models/User.js";
+import { RestockAlert } from "../models/RestockAlert.js";
+import { WarrantyService } from "./warranty.js";
+import type { Api } from "grammy";
 
 // ============================================================================
 //  DTOs & Return Types
 // ============================================================================
+
+export interface BulkPricingResult {
+  unitPrice: number;
+  totalPrice: number;
+  normalPrice: number;
+  normalTotalPrice: number;
+  discountAmount: number;
+  discountPercent: number;
+  appliedTier?: IBulkDiscountTier | undefined;
+  nextTier?:
+    | {
+        tier: IBulkDiscountTier;
+        neededQty: number;
+        pricePerUnit: number;
+        discountPercent: number;
+      }
+    | undefined;
+}
 
 export interface ProductWithStock {
   id: string;
   name: string;
   category: string;
   description: string;
+  deliveryMessage?: string;
   price: number;
+  bulkDiscounts?: IBulkDiscountTier[];
   isActive: boolean;
+  warrantyDuration?: number;
+  warrantyUnit?: WarrantyUnit;
+  maxClaims?: number;
   stockCount: number;
   soldCount: number;
   createdAt: Date;
@@ -29,6 +55,7 @@ export type PurchaseResult =
       productName: string;
       quantity: number;
       price: number;
+      deliveryMessage?: string;
     }
   | {
       success: false;
@@ -42,21 +69,146 @@ export type PurchaseResult =
 
 export class DigitalProductService {
   /**
+   * Computes effective wholesale / bulk pricing for a given quantity.
+   */
+  static calculatePricing(
+    product: { price: number; bulkDiscounts?: IBulkDiscountTier[] | undefined },
+    quantity: number
+  ): BulkPricingResult {
+    const safeQty = Math.max(1, Math.floor(quantity));
+    const normalPrice = Math.max(0, product.price);
+    const normalTotalPrice = normalPrice * safeQty;
+
+    const tiers = Array.isArray(product.bulkDiscounts)
+      ? [...product.bulkDiscounts]
+          .filter((t) => t && typeof t.minQty === "number" && t.minQty >= 2 && typeof t.pricePerUnit === "number" && t.pricePerUnit >= 0)
+          .sort((a, b) => a.minQty - b.minQty)
+      : [];
+
+    // Find all matching tiers where safeQty >= tier.minQty
+    const matchingTiers = tiers.filter((t) => safeQty >= t.minQty);
+    const appliedTier = matchingTiers.length > 0 ? matchingTiers[matchingTiers.length - 1] : undefined;
+
+    let unitPrice = normalPrice;
+    if (appliedTier && appliedTier.pricePerUnit < normalPrice) {
+      unitPrice = appliedTier.pricePerUnit;
+    }
+
+    const totalPrice = unitPrice * safeQty;
+    const discountAmount = Math.max(0, normalTotalPrice - totalPrice);
+    const discountPercent =
+      normalPrice > 0 ? Math.round(((normalPrice - unitPrice) / normalPrice) * 100) : 0;
+
+    // Find next tier for upselling
+    const nextTiers = tiers.filter((t) => t.minQty > safeQty && t.pricePerUnit < unitPrice);
+    const nextTierDoc = nextTiers.length > 0 ? nextTiers[0] : undefined;
+    let nextTier: BulkPricingResult["nextTier"] = undefined;
+    if (nextTierDoc) {
+      const nextDiscPct =
+        normalPrice > 0
+          ? Math.round(((normalPrice - nextTierDoc.pricePerUnit) / normalPrice) * 100)
+          : 0;
+      nextTier = {
+        tier: nextTierDoc,
+        neededQty: nextTierDoc.minQty - safeQty,
+        pricePerUnit: nextTierDoc.pricePerUnit,
+        discountPercent: nextDiscPct,
+      };
+    }
+
+    return {
+      unitPrice,
+      totalPrice,
+      normalPrice,
+      normalTotalPrice,
+      discountAmount,
+      discountPercent,
+      appliedTier: appliedTier && appliedTier.pricePerUnit < normalPrice ? appliedTier : undefined,
+      nextTier,
+    };
+  }
+
+  /**
+   * Adds or updates a bulk discount tier for a product.
+   */
+  static async addBulkDiscountTier(
+    productId: string,
+    minQty: number,
+    pricePerUnit: number
+  ): Promise<DigitalProductDocument | null> {
+    if (!Types.ObjectId.isValid(productId)) return null;
+
+    const safeMinQty = Math.max(2, Math.floor(minQty));
+    const safePrice = Math.max(0, Math.floor(pricePerUnit));
+
+    const product = await DigitalProduct.findById(productId);
+    if (!product) return null;
+
+    const currentTiers: IBulkDiscountTier[] = (product.bulkDiscounts || []).filter(
+      (t) => t.minQty !== safeMinQty
+    );
+
+    currentTiers.push({ minQty: safeMinQty, pricePerUnit: safePrice });
+    currentTiers.sort((a, b) => a.minQty - b.minQty);
+
+    product.bulkDiscounts = currentTiers;
+    return await product.save();
+  }
+
+  /**
+   * Removes a specific bulk discount tier by minQty.
+   */
+  static async removeBulkDiscountTier(
+    productId: string,
+    minQty: number
+  ): Promise<DigitalProductDocument | null> {
+    if (!Types.ObjectId.isValid(productId)) return null;
+
+    const product = await DigitalProduct.findById(productId);
+    if (!product) return null;
+
+    product.bulkDiscounts = (product.bulkDiscounts || []).filter((t) => t.minQty !== minQty);
+    return await product.save();
+  }
+
+  /**
+   * Clears all bulk discount tiers for a product.
+   */
+  static async clearBulkDiscounts(productId: string): Promise<DigitalProductDocument | null> {
+    if (!Types.ObjectId.isValid(productId)) return null;
+    return await DigitalProduct.findByIdAndUpdate(
+      productId,
+      { $set: { bulkDiscounts: [] } },
+      { new: true }
+    );
+  }
+
+  /**
    * Creates a new digital product.
    */
   static async createProduct(data: {
     name: string;
     category?: string;
     description?: string;
+    deliveryMessage?: string;
     price: number;
+    bulkDiscounts?: IBulkDiscountTier[];
     isActive?: boolean;
+    warrantyDuration?: number;
+    warrantyUnit?: WarrantyUnit;
+    maxClaims?: number;
   }): Promise<DigitalProductDocument> {
     return await DigitalProduct.create({
       name: data.name.trim(),
       category: (data.category || "Umum").trim(),
       description: data.description?.trim() || "",
+      deliveryMessage: data.deliveryMessage?.trim() || "",
       price: Math.max(0, Math.round(data.price)),
+      bulkDiscounts: (data.bulkDiscounts || []).sort((a, b) => a.minQty - b.minQty),
       isActive: data.isActive ?? true,
+      warrantyDuration: Math.max(0, data.warrantyDuration ?? 0),
+      warrantyUnit: data.warrantyUnit ?? "NONE",
+      maxClaims: Math.max(0, data.maxClaims ?? 1),
     });
   }
 
@@ -145,8 +297,13 @@ export class DigitalProductService {
         name: p.name,
         category: p.category,
         description: p.description || "",
+        deliveryMessage: p.deliveryMessage || "",
         price: p.price,
+        bulkDiscounts: p.bulkDiscounts || [],
         isActive: p.isActive,
+        warrantyDuration: p.warrantyDuration ?? 0,
+        warrantyUnit: p.warrantyUnit ?? "NONE",
+        maxClaims: p.maxClaims ?? 1,
         stockCount: unsoldMap.get(pidStr) ?? 0,
         soldCount: soldMap.get(pidStr) ?? 0,
         createdAt: p.createdAt,
@@ -173,8 +330,13 @@ export class DigitalProductService {
       name: p.name,
       category: p.category,
       description: p.description || "",
+      deliveryMessage: p.deliveryMessage || "",
       price: p.price,
+      bulkDiscounts: p.bulkDiscounts || [],
       isActive: p.isActive,
+      warrantyDuration: p.warrantyDuration ?? 0,
+      warrantyUnit: p.warrantyUnit ?? "NONE",
+      maxClaims: p.maxClaims ?? 1,
       stockCount,
       soldCount,
       createdAt: p.createdAt,
@@ -186,7 +348,11 @@ export class DigitalProductService {
    * Bulk adds stock items from multi-line text.
    * Splits on newlines, trims each item, ignores empty lines.
    */
-  static async addStockBulk(productId: string, rawText: string): Promise<{ added: number; lines: string[] }> {
+  static async addStockBulk(
+    productId: string,
+    rawText: string,
+    api?: Api
+  ): Promise<{ added: number; lines: string[] }> {
     if (!Types.ObjectId.isValid(productId)) {
       throw new Error("Invalid product ID");
     }
@@ -213,6 +379,39 @@ export class DigitalProductService {
     }));
 
     await DigitalStock.insertMany(docs);
+
+    // ── Restock Alert Notifications ─────────────────────────────────────────
+    if (api) {
+      try {
+        const alerts = await RestockAlert.find({ productId: product._id }).lean();
+        if (alerts.length > 0) {
+          const notifyText =
+            `🔔 <b>Stok Kembali Tersedia!</b>\n\n` +
+            `📦 Produk yang kamu pantau sudah restock:\n` +
+            `<b>${product.name}</b>\n\n` +
+            `<i>Segera beli sebelum kehabisan! Klik tombol di bawah untuk melihat katalog.</i>`;
+
+          const { InlineKeyboard } = await import("grammy");
+          const kb = new InlineKeyboard().text("🛍️ Lihat Produk", "product_digital");
+
+          for (const alert of alerts) {
+            api.sendMessage(alert.chatId, notifyText, {
+              parse_mode: "HTML",
+              reply_markup: kb,
+            }).catch((err) =>
+              console.error(`[digitalProduct] Restock notify failed for ${alert.userId}:`, err)
+            );
+          }
+
+          // Delete resolved alerts
+          await RestockAlert.deleteMany({ productId: product._id });
+          console.log(`[digitalProduct] Restock: notified ${alerts.length} user(s) for ${product.name}`);
+        }
+      } catch (err) {
+        console.error("[digitalProduct] Restock alert error:", err);
+      }
+    }
+
     return { added: docs.length, lines };
   }
 
@@ -256,11 +455,12 @@ export class DigitalProductService {
    * Executes a safe atomic purchase of a digital product for a user:
    * 1. Validates quantity (must be positive integer >= 1).
    * 2. Validates product exists and is active.
-   * 3. Checks user balance against total price (price * quantity).
-   * 4. Atomically acquires N unsold stock items (FIFO).
-   * 5. Deducts user balance and increments totalOrders.
-   * 6. Creates DigitalOrder record.
-   * 7. Returns order and delivered stock content.
+   * 3. Calculates effective wholesale / bulk price based on quantity.
+   * 4. Checks user balance against total price.
+   * 5. Atomically acquires N unsold stock items (FIFO).
+   * 6. Deducts user balance and increments totalOrders.
+   * 7. Creates DigitalOrder record.
+   * 8. Returns order and delivered stock content.
    */
   static async purchaseProduct(
     productId: string,
@@ -302,7 +502,8 @@ export class DigitalProductService {
       };
     }
 
-    const totalPrice = product.price * safeQty;
+    const pricing = DigitalProductService.calculatePricing(product, safeQty);
+    const totalPrice = pricing.totalPrice;
 
     // Check user balance
     const user = await User.findOne({ telegramId });
@@ -416,17 +617,40 @@ export class DigitalProductService {
         ? acquiredItems[0]!.content
         : acquiredItems.map((item, idx) => `[Item #${idx + 1}]\n${item.content}`).join("\n\n");
 
+    // Compute warranty expiry
+    const now = new Date();
+    const warrantyExpiresAt = WarrantyService.calculateExpiryDate(
+      now,
+      product.warrantyDuration,
+      product.warrantyUnit
+    );
+
     // Create DigitalOrder document
-    const order = await DigitalOrder.create({
+    const orderData: any = {
       orderId,
       userId: telegramId,
       productId: product._id,
       productName: product.name,
       quantity: safeQty,
       price: totalPrice,
+      unitPrice: pricing.unitPrice,
+      discountAmount: pricing.discountAmount,
       itemContent: formattedContent,
-      createdAt: new Date(),
-    });
+      deliveryMessage: product.deliveryMessage || "",
+      warrantyDuration: product.warrantyDuration ?? 0,
+      warrantyUnit: product.warrantyUnit ?? "NONE",
+      maxClaims: product.maxClaims ?? 1,
+      claimsCount: 0,
+      createdAt: now,
+    };
+    if (pricing.appliedTier) {
+      orderData.bulkTierMinQty = pricing.appliedTier.minQty;
+    }
+    if (warrantyExpiresAt) {
+      orderData.warrantyExpiresAt = warrantyExpiresAt;
+    }
+
+    const order = await DigitalOrder.create(orderData);
 
     return {
       success: true,
@@ -435,6 +659,7 @@ export class DigitalProductService {
       productName: product.name,
       quantity: safeQty,
       price: totalPrice,
+      deliveryMessage: product.deliveryMessage || "",
     };
   }
 

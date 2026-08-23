@@ -1,6 +1,9 @@
 import { Bot, Context } from "grammy";
+import { sequentialize } from "@grammyjs/runner";
 import { loadPlugins } from "./pluginLoader.js";
 import { forceSubMiddleware } from "../middlewares/forceSub.js";
+import { rateLimitMiddleware } from "../middlewares/rateLimit.js";
+import { maintenanceMiddleware } from "../middlewares/maintenance.js";
 
 /**
  * Creates the grammY Bot instance and wires up the dynamic plugin loader.
@@ -35,7 +38,19 @@ export async function createBot(token: string): Promise<Bot<Context>> {
     );
   });
 
-  // Wajib Join Channel (Force Subscription) middleware
+  // 0. Concurrency Sequencer — ensures updates from the same user/chat are processed
+  // in order, while updates from different users are processed concurrently in parallel.
+  bot.use(
+    sequentialize((ctx) => ctx.chat?.id?.toString() || ctx.from?.id?.toString())
+  );
+
+  // 1. Rate Limiter — drop spam before anything else runs
+  bot.use(rateLimitMiddleware);
+
+  // 2. Maintenance Mode — block non-admin users when bot is under maintenance
+  bot.use(maintenanceMiddleware);
+
+  // 3. Wajib Join Channel (Force Subscription) middleware
   bot.use(forceSubMiddleware);
 
   // Dynamically load and register all plugins from src/plugins/.

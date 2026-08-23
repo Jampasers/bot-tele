@@ -9,6 +9,16 @@ let cachedConfig: IBotConfig | null = null;
 let lastCacheTime = 0;
 const CACHE_TTL_MS = 10_000; // Cache config for 10 seconds to minimize DB hits
 
+interface MemberCacheEntry {
+  isMember: boolean;
+  expiresAt: number;
+}
+
+// In-memory member status cache to eliminate repetitive getChatMember calls
+const memberCache = new Map<string, MemberCacheEntry>();
+const MEMBER_CACHE_SUCCESS_TTL_MS = 180_000; // 3 minutes cache for verified members
+const MEMBER_CACHE_FAIL_TTL_MS = 10_000;     // 10 seconds cache for non-members
+
 export class ForceSubService {
   /**
    * Retrieves the current bot configuration from cache or MongoDB.
@@ -32,15 +42,31 @@ export class ForceSubService {
     await config.save();
     cachedConfig = config;
     lastCacheTime = Date.now();
+    // Clear member cache on config changes
+    memberCache.clear();
     return config;
   }
 
   /**
+   * Invalidates membership cache for a specific user.
+   */
+  static invalidateUserCache(userId: number | string): void {
+    const numericUserId = Number(userId);
+    for (const key of memberCache.keys()) {
+      if (key.endsWith(`:${numericUserId}`)) {
+        memberCache.delete(key);
+      }
+    }
+  }
+
+  /**
    * Checks if a user has joined the required Telegram channel.
+   * Uses high-performance in-memory cache unless bypassCache is explicitly set.
    */
   static async checkUserJoined(
     api: Api,
-    userId: number | string
+    userId: number | string,
+    bypassCache: boolean = false
   ): Promise<{
     isMember: boolean;
     channelName: string;
@@ -62,35 +88,42 @@ export class ForceSubService {
 
     const channelIdentifier = config.forceSubChannel.trim();
     const numericUserId = Number(userId);
+    const cacheKey = `${channelIdentifier}:${numericUserId}`;
+    const now = Date.now();
 
+    // 1. Check in-memory membership cache (0ms instant lookup)
+    if (!bypassCache) {
+      const cached = memberCache.get(cacheKey);
+      if (cached && now < cached.expiresAt) {
+        return {
+          isMember: cached.isMember,
+          channelName: config.forceSubName,
+          channelLink: config.forceSubLink,
+          channelId: channelIdentifier,
+        };
+      }
+    }
+
+    // 2. Perform live check against Telegram API
     try {
       const member = await api.getChatMember(channelIdentifier, numericUserId);
 
       // Statuses that represent active membership
       const validStatuses = ["creator", "administrator", "member"];
-      if (validStatuses.includes(member.status)) {
-        return {
-          isMember: true,
-          channelName: config.forceSubName,
-          channelLink: config.forceSubLink,
-          channelId: channelIdentifier,
-        };
+      let isMember = validStatuses.includes(member.status);
+
+      if (!isMember && member.status === "restricted") {
+        isMember = (member as any).is_member !== false;
       }
 
-      if (member.status === "restricted") {
-        // Restricted member is still in the chat unless is_member is false
-        const isStillMember = (member as any).is_member !== false;
-        return {
-          isMember: isStillMember,
-          channelName: config.forceSubName,
-          channelLink: config.forceSubLink,
-          channelId: channelIdentifier,
-        };
-      }
+      // Store in memory cache
+      memberCache.set(cacheKey, {
+        isMember,
+        expiresAt: now + (isMember ? MEMBER_CACHE_SUCCESS_TTL_MS : MEMBER_CACHE_FAIL_TTL_MS),
+      });
 
-      // "left" or "kicked"
       return {
-        isMember: false,
+        isMember,
         channelName: config.forceSubName,
         channelLink: config.forceSubLink,
         channelId: channelIdentifier,
@@ -102,7 +135,6 @@ export class ForceSubService {
         errMsg
       );
 
-      // If the bot itself is not an admin in the channel, Telegram will throw CHAT_ADMIN_REQUIRED or similar.
       if (
         errMsg.includes("CHAT_ADMIN_REQUIRED") ||
         errMsg.includes("chat not found") ||

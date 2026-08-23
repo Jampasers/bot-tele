@@ -4,10 +4,26 @@ import { User } from "../../models/User.js";
 import { Order } from "../../models/Order.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
 import { TopupSession, ITopupSession } from "../../models/TopupSession.js";
-import { smsBower, SMSBowerService, CachedCountry, CachedService, CountryPriceMap } from "../../services/smsbower.js";
+import {
+  smsBower,
+  SMSBowerService,
+  CachedCountry,
+  CachedService,
+  CountryPriceMap,
+} from "../../services/smsbower.js";
 import { TestimonialService } from "../../services/testimonial.js";
-import { generateQris, checkSessionSettlement, getUniquePaymentAmount } from "../../services/payment/index.js";
-import { CB_CATALOG, buildCatalogText, buildCatalogKeyboard } from "../panel/index.js";
+import { ActivityLogService } from "../../services/activityLog.js";
+import {
+  generateQris,
+  checkSessionSettlement,
+  getUniquePaymentAmount,
+} from "../../services/payment/index.js";
+import {
+  CB_CATALOG,
+  buildCatalogText,
+  buildCatalogKeyboard,
+} from "../panel/index.js";
+import { CurrencyService } from "../../services/currency.js";
 
 // ============================================================================
 //  CONFIGURATION
@@ -28,7 +44,35 @@ type Service = CachedService; // { code: string; name: string }
 const countries = (): readonly Country[] => SMSBowerService.cachedCountries;
 
 /** Live accessor — reads the in-memory cache populated by loadData(). */
-const services  = (): readonly Service[]  => SMSBowerService.cachedServices;
+const services = (): readonly Service[] => SMSBowerService.cachedServices;
+
+// ============================================================================
+//  SEARCH STATE MANAGEMENT
+// ============================================================================
+
+export type UserSearchMode =
+  | { type: "COUNTRY" }
+  | { type: "SERVICE"; countryId: string };
+
+/** Active prompt state for users currently waiting to type search keywords. */
+const userSearchModeState = new Map<string, UserSearchMode>();
+
+/** Stored active search query for country pagination per user. */
+const userCtrySearchQuery = new Map<string, string>();
+
+/** Stored active search query for service pagination per user. */
+const userSrvSearchQuery = new Map<
+  string,
+  { countryId: string; query: string }
+>();
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 // ============================================================================
 //  PAGINATION
@@ -38,8 +82,8 @@ const services  = (): readonly Service[]  => SMSBowerService.cachedServices;
 const ITEMS_PER_PAGE = 10;
 
 interface PageResult<T> {
-  items:      readonly T[];  // the slice for this page
-  totalPages: number;        // total number of pages
+  items: readonly T[]; // the slice for this page
+  totalPages: number; // total number of pages
 }
 
 /**
@@ -51,15 +95,15 @@ interface PageResult<T> {
  * const { items, totalPages } = paginate(countries, 0, ITEMS_PER_PAGE);
  */
 function paginate<T>(
-  array:    readonly T[],
-  page:     number,
-  pageSize: number = ITEMS_PER_PAGE
+  array: readonly T[],
+  page: number,
+  pageSize: number = ITEMS_PER_PAGE,
 ): PageResult<T> {
   const totalPages = Math.max(1, Math.ceil(array.length / pageSize));
-  const safePage   = Math.max(0, Math.min(page, totalPages - 1));
-  const start      = safePage * pageSize;
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = safePage * pageSize;
   return {
-    items:      array.slice(start, start + pageSize),
+    items: array.slice(start, start + pageSize),
     totalPages,
   };
 }
@@ -69,55 +113,78 @@ function paginate<T>(
 // ============================================================================
 
 /** How often to ask SMSBower "did the OTP arrive yet?" */
-const POLL_INTERVAL_MS = 10_000;           // 10 seconds
+const POLL_INTERVAL_MS = 10_000; // 10 seconds
 
 /** Auto-cancel the order after this much waiting. */
 const ORDER_TIMEOUT_MS = 10 * 60 * 1_000; // 10 minutes
 
 /** How often to poll Midtrans for QRIS payment confirmation. */
-const QRIS_POLL_INTERVAL_MS = 10_000;      // 10 seconds
+const QRIS_POLL_INTERVAL_MS = 10_000; // 10 seconds
 
 /** Give up waiting for QRIS payment after this long (Midtrans QR = 15 min). */
-const QRIS_TIMEOUT_MS = 14 * 60 * 1_000;  // 14 minutes
+const QRIS_TIMEOUT_MS = 14 * 60 * 1_000; // 14 minutes
 
 // ============================================================================
-//  PRICING HELPER
+//  PRICING HELPERS
+//  SMSBower returns base costs in USD (e.g. 0.05, 0.12).
+//  CurrencyService converts USD -> IDR with realtime exchange rates and
+//  calculates:
+//  1. sellingPriceIdr : IDR price charged to user (base IDR + markup)
+//  2. maxPriceUsd     : USD maximum price threshold sent to SMSBower API
 // ============================================================================
 
 /**
- * Calculates the final selling price the user will be charged.
+ * Calculates the final selling price in IDR the user will be charged.
  *
- * @param baseCost    The raw activation cost returned by SMSBower (in credits).
- * @param markupType  "fixed" | "percentage"
- * @param markupValue The markup amount (flat units or percent).
- * @returns           Final price, rounded to the nearest whole number.
- *
- * @example
- * applyMarkup(1000, "fixed",      500)  // → 1500
- * applyMarkup(1000, "percentage",  10)  // → 1100  (1000 + 10%)
+ * @param baseCostUsd The raw activation cost returned by SMSBower in USD (e.g. 0.05).
+ * @param markupType  "fixed" (in IDR) | "percentage"
+ * @param markupValue The markup amount (IDR flat units or percent).
+ * @param usdRate     Realtime USD to IDR rate.
+ * @returns           Final price in IDR, rounded to the nearest Rupiah.
  */
 function applyMarkup(
-  baseCost:    number,
-  markupType:  "fixed" | "percentage",
-  markupValue: number
+  baseCostUsd: number,
+  markupType: "fixed" | "percentage",
+  markupValue: number,
+  usdRate?: number,
 ): number {
-  if (markupType === "percentage") {
-    return Math.round(baseCost + baseCost * (markupValue / 100));
-  }
-  return Math.round(baseCost + markupValue); // "fixed"
+  return CurrencyService.calculatePricing(
+    baseCostUsd,
+    markupType,
+    markupValue,
+    usdRate,
+  ).sellingPriceIdr;
 }
 
 /**
- * Formats a credit amount as a Rupiah string.
- * Credits are in IDR units (1 credit = Rp1).
+ * Calculates the maximum base price in USD we are willing to accept from SMSBower API.
+ * Formula: baseCostUsd + (0.5 * markupUsd)
+ * Preserves at least 50% profit margin while tolerating minor upstream price adjustments.
+ */
+function calculateMaxPrice(
+  baseCostUsd: number,
+  markupType: "fixed" | "percentage",
+  markupValue: number,
+  usdRate?: number,
+): number {
+  return CurrencyService.calculatePricing(
+    baseCostUsd,
+    markupType,
+    markupValue,
+    usdRate,
+  ).maxPriceUsd;
+}
+
+/**
+ * Formats a credit/rupiah amount as an Indonesian Rupiah string.
  *
  * @example
  * formatPrice(3500)  // → "Rp3.500"
  * formatPrice(12000) // → "Rp12.000"
  */
-function formatPrice(credits: number): string {
+function formatPrice(amount: number): string {
   // Indonesian locale uses period as thousands separator.
-  return "Rp" + credits.toLocaleString("id-ID");
+  return "Rp" + Math.round(amount).toLocaleString("id-ID");
 }
 
 // ============================================================================
@@ -129,8 +196,8 @@ function formatPrice(credits: number): string {
  * Returns the keyboard for chaining.
  */
 function rowsOf2(
-  kb:    InlineKeyboard,
-  items: ReadonlyArray<{ label: string; data: string }>
+  kb: InlineKeyboard,
+  items: ReadonlyArray<{ label: string; data: string }>,
 ): InlineKeyboard {
   items.forEach(({ label, data }, i) => {
     kb.text(label, data);
@@ -150,11 +217,11 @@ function rowsOf2(
  * @param nextCb      callback_data for the Next button.
  */
 function appendPaginationRow(
-  kb:         InlineKeyboard,
-  page:       number,
+  kb: InlineKeyboard,
+  page: number,
   totalPages: number,
-  prevCb:     string,
-  nextCb:     string
+  prevCb: string,
+  nextCb: string,
 ): void {
   const hasPrev = page > 0;
   const hasNext = page < totalPages - 1;
@@ -169,24 +236,38 @@ function appendPaginationRow(
 // ─────────────────────────────────────────────────────────────────────────────
 //  Country keyboard  (Step 1)
 //  callback_data per button : setcountry_<countryId>
-//  pagination callback_data : ctry_pg_<page>
+//  pagination callback_data : ctry_pg_<page> / ctry_spg_<page>
 //  Back button              : menu_catalog  (CB_CATALOG)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function buildCountryKeyboard(page: number): InlineKeyboard {
-  const { items, totalPages } = paginate(countries(), page);
+function buildCountryKeyboard(
+  page: number,
+  customList?: readonly Country[],
+): InlineKeyboard {
+  const list = customList ?? countries();
+  const { items, totalPages } = paginate(list, page);
   const kb = new InlineKeyboard();
 
   rowsOf2(
     kb,
-    items.map((c) => ({ label: c.name, data: `setcountry_${c.id}` }))
+    items.map((c) => ({ label: c.name, data: `setcountry_${c.id}` })),
   );
 
   appendPaginationRow(
-    kb, page, totalPages,
-    `ctry_pg_${page - 1}`,
-    `ctry_pg_${page + 1}`
+    kb,
+    page,
+    totalPages,
+    customList ? `ctry_spg_${page - 1}` : `ctry_pg_${page - 1}`,
+    customList ? `ctry_spg_${page + 1}` : `ctry_pg_${page + 1}`,
   );
+
+  if (customList) {
+    kb.text("🔍 Cari Ulang", "ctry_search")
+      .text("🌍 Semua Negara", "ctry_pg_0")
+      .row();
+  } else {
+    kb.text("🔍 Cari Negara", "ctry_search").row();
+  }
 
   kb.text("🔙 Back to Catalog", CB_CATALOG);
   return kb;
@@ -195,7 +276,7 @@ function buildCountryKeyboard(page: number): InlineKeyboard {
 // ─────────────────────────────────────────────────────────────────────────────
 //  Service keyboard  (Step 2)
 //  callback_data per button : buy_<countryId>_<serviceCode>
-//  pagination callback_data : srv_pg_<countryId>_<page>
+//  pagination callback_data : srv_pg_<countryId>_<page> / srv_spg_<countryId>_<page>
 //  Back button              : ctry_pg_0  (return to country list page 0)
 //
 //  Each button label: "<Service Name> - <FinalPrice>"  e.g. "WhatsApp - Rp3.500"
@@ -203,20 +284,25 @@ function buildCountryKeyboard(page: number): InlineKeyboard {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function buildServiceKeyboard(
-  countryId:  string,
-  page:       number
+  countryId: string,
+  page: number,
+  customList?: readonly Service[],
 ): Promise<InlineKeyboard> {
-  const allServices = services();
-  const totalPages  = Math.max(1, Math.ceil(allServices.length / ITEMS_PER_PAGE));
-  const safePage    = Math.max(0, Math.min(page, totalPages - 1));
-  const start       = safePage * ITEMS_PER_PAGE;
-  const end         = start + ITEMS_PER_PAGE;
-  const chunk       = allServices.slice(start, end);
+  const allServices = customList ?? services();
+  const totalPages = Math.max(
+    1,
+    Math.ceil(allServices.length / ITEMS_PER_PAGE),
+  );
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const start = safePage * ITEMS_PER_PAGE;
+  const end = start + ITEMS_PER_PAGE;
+  const chunk = allServices.slice(start, end);
 
-  // ─ Fetch prices (cached after first call) + markup config in parallel.
-  const [priceMap, config] = await Promise.all([
+  // ─ Fetch prices (cached after first call) + markup config + realtime USD rate in parallel.
+  const [priceMap, config, usdRate] = await Promise.all([
     SMSBowerService.getPricesForCountry(countryId),
     SmsConfig.getOrCreate(),
+    CurrencyService.getUsdRate(),
   ]);
 
   const kb = new InlineKeyboard();
@@ -228,8 +314,13 @@ async function buildServiceKeyboard(
 
     let label: string;
     if (priceEntry && priceEntry.cost > 0) {
-      const selling = applyMarkup(priceEntry.cost, config.markupType, config.markupValue);
-      const stock   = priceEntry.count > 0 ? "" : " ⚠️";
+      const selling = applyMarkup(
+        priceEntry.cost,
+        config.markupType,
+        config.markupValue,
+        usdRate,
+      );
+      const stock = priceEntry.count > 0 ? "" : " ⚠️";
       label = `${svc.name}${stock} • ${formatPrice(selling)}`;
     } else {
       // No price data — show name only, price will be shown on confirmation.
@@ -243,9 +334,23 @@ async function buildServiceKeyboard(
   const hasPrev = safePage > 0;
   const hasNext = safePage < totalPages - 1;
   if (hasPrev || hasNext) {
-    if (hasPrev) kb.text("⬅️ Prev", `srv_pg_${countryId}_${safePage - 1}`);
-    if (hasNext) kb.text("Next ➡️", `srv_pg_${countryId}_${safePage + 1}`);
+    const prevCb = customList
+      ? `srv_spg_${countryId}_${safePage - 1}`
+      : `srv_pg_${countryId}_${safePage - 1}`;
+    const nextCb = customList
+      ? `srv_spg_${countryId}_${safePage + 1}`
+      : `srv_pg_${countryId}_${safePage + 1}`;
+    if (hasPrev) kb.text("⬅️ Prev", prevCb);
+    if (hasNext) kb.text("Next ➡️", nextCb);
     kb.row();
+  }
+
+  if (customList) {
+    kb.text("🔍 Cari Ulang", `srv_search_${countryId}`)
+      .text("📱 Semua Layanan", `setcountry_${countryId}`)
+      .row();
+  } else {
+    kb.text("🔍 Cari Layanan", `srv_search_${countryId}`).row();
   }
 
   kb.text("🔙 Back to Countries", "ctry_pg_0");
@@ -254,30 +359,54 @@ async function buildServiceKeyboard(
 
 /** Active-order keyboard — only a Cancel button. */
 function buildCancelKeyboard(activationId: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("❌ Cancel Order", `cancel_${activationId}`);
+  return new InlineKeyboard().text("❌ Cancel Order", `cancel_${activationId}`);
 }
 
 // ============================================================================
 //  MESSAGE BUILDERS — pure functions, no side-effects
 // ============================================================================
 
-function buildCountryText(page: number, totalPages: number): string {
+function buildCountryText(
+  page: number,
+  totalPages: number,
+  searchQuery?: string,
+  totalFound?: number,
+): string {
   const pageInfo = totalPages > 1 ? ` (page ${page + 1}/${totalPages})` : "";
+  if (searchQuery) {
+    return (
+      `🔍 <b>Hasil Pencarian Negara</b>${pageInfo}\n` +
+      `${"─".repeat(28)}\n\n` +
+      `Kata kunci: <code>${escapeHtml(searchQuery)}</code>\n` +
+      `Ditemukan: <b>${totalFound ?? 0}</b> negara\n\n` +
+      `<i>Pilih negara yang Anda inginkan:</i>`
+    );
+  }
   return (
     `🌍 <b>Select a Country</b>${pageInfo}\n` +
     `${"─".repeat(28)}\n\n` +
-    `Choose the country you want to receive an OTP from:\n\n` +
-    `<i>Powered by SMSBower</i>`
+    `Choose the country you want to receive an OTP from:\n\n`
   );
 }
 
 function buildServiceText(
   countryName: string,
-  page:        number,
-  totalPages:  number
+  page: number,
+  totalPages: number,
+  searchQuery?: string,
+  totalFound?: number,
 ): string {
   const pageInfo = totalPages > 1 ? ` (page ${page + 1}/${totalPages})` : "";
+  if (searchQuery) {
+    return (
+      `🔍 <b>Hasil Pencarian Layanan</b>${pageInfo}\n` +
+      `${"─".repeat(28)}\n\n` +
+      `🌍 Country: <b>${countryName}</b>\n` +
+      `Kata kunci: <code>${escapeHtml(searchQuery)}</code>\n` +
+      `Ditemukan: <b>${totalFound ?? 0}</b> layanan\n\n` +
+      `<i>Pilih layanan yang Anda inginkan:</i>`
+    );
+  }
   return (
     `📱 <b>Select a Service</b>${pageInfo}\n` +
     `${"─".repeat(28)}\n\n` +
@@ -287,26 +416,18 @@ function buildServiceText(
 }
 
 function buildPendingText(
-  phoneNumber:  string,
-  serviceName:  string,
-  countryName:  string,
+  phoneNumber: string,
+  serviceName: string,
+  countryName: string,
   sellingPrice: number,
-  baseCost:     number,
-  markupType:   "fixed" | "percentage",
-  markupValue:  number
 ): string {
-  const markupLine =
-    markupType === "percentage"
-      ? `+${markupValue}% markup`
-      : `+${markupValue} markup`;
   return (
     `⏳ <b>Waiting for OTP</b>\n` +
-    `${"\u2500".repeat(28)}\n\n` +
+    `${"─".repeat(28)}\n\n` +
     `📱 <b>Number:</b>   <code>+${phoneNumber}</code>\n` +
     `🔧 <b>Service:</b>  ${serviceName}\n` +
     `🌍 <b>Country:</b>  ${countryName}\n` +
-    `💰 <b>Cost:</b>     <b>${sellingPrice}</b> credits ` +
-    `<i>(base ${baseCost} + ${markupLine})</i>\n\n` +
+    `💰 <b>Cost:</b>     <b>${formatPrice(sellingPrice)}</b>\n\n` +
     `Use the number above to request your OTP.\n` +
     `I'll send the code here automatically within <b>10 minutes</b>.\n\n` +
     `<i>Checking every 10 seconds…</i>`
@@ -316,7 +437,7 @@ function buildPendingText(
 function buildSuccessText(
   phoneNumber: string,
   serviceName: string,
-  code:        string
+  code: string,
 ): string {
   return (
     `✅ <b>OTP Received!</b>\n` +
@@ -331,19 +452,19 @@ function buildSuccessText(
 
 function buildCanceledText(
   phoneNumber: string,
-  reason:      "user" | "timeout"
+  reason: "user" | "timeout",
 ): string {
   const why =
     reason === "timeout"
-      ? "⏰ Order timed out after 10 minutes."
-      : "❌ You cancelled the order.";
+      ? "⏰ Waktu sewa habis (timeout 10 menit tidak ada SMS masuk)."
+      : "❌ Pesanan telah dibatalkan.";
   return (
-    `🚫 <b>Order Cancelled</b>\n` +
+    `🚫 <b>Pesanan Dibatalkan</b>\n` +
     `${"─".repeat(28)}\n\n` +
-    `📱 <b>Number:</b> <code>+${phoneNumber}</code>\n\n` +
+    `📱 <b>Nomor:</b> <code>+${phoneNumber}</code>\n\n` +
     `${why}\n` +
-    `Your balance has been refunded.\n\n` +
-    `<i>Use /start to return to the main menu.</i>`
+    `💰 <b>Saldo kamu telah dikembalikan otomatis.</b>\n\n` +
+    `<i>Gunakan /start atau menu utama untuk bertransaksi kembali.</i>`
   );
 }
 
@@ -382,17 +503,17 @@ function clearQrisPoll(orderId: string): void {
  * On expiry/timeout: marks session EXPIRED and notifies the user.
  */
 function startQrisPolling(
-  bot:         Bot<Context>,
-  sessionId:   string,
-  orderId:     string,
-  telegramId:  string,
-  chatId:      number,
-  messageId:   number,
-  amountIDR:   number,
+  bot: Bot<Context>,
+  sessionId: string,
+  orderId: string,
+  telegramId: string,
+  chatId: number,
+  messageId: number,
+  amountIDR: number,
   serviceCode: string,
-  countryId:   string,
+  countryId: string,
   serviceName: string,
-  countryName: string
+  countryName: string,
 ): void {
   const startedAt = Date.now();
 
@@ -401,7 +522,21 @@ function startQrisPolling(
       // ── Timeout guard ────────────────────────────────────────────────────
       if (Date.now() - startedAt >= QRIS_TIMEOUT_MS) {
         clearQrisPoll(orderId);
-        await TopupSession.findByIdAndUpdate(sessionId, { status: "EXPIRED" });
+        const expiredSession = await TopupSession.findByIdAndUpdate(
+          sessionId,
+          { status: "EXPIRED" },
+          { new: true },
+        );
+        if (expiredSession) {
+          ActivityLogService.logTopupCancelled(bot.api, {
+            session: expiredSession,
+            reason: "Waktu Pembayaran QRIS Habis (14 Menit)",
+            user: { telegramId },
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog topup expired error:", err),
+          );
+        }
+
         try {
           await bot.api.editMessageCaption(chatId, messageId, {
             caption:
@@ -411,13 +546,16 @@ function startQrisPolling(
             parse_mode: "HTML",
           });
         } catch {
-          await bot.api.editMessageText(
-            chatId, messageId,
-            `⌛ <b>QRIS Kedaluwarsa</b>\n\n` +
-            `QR code untuk pembayaran <b>${formatPrice(amountIDR)}</b> sudah tidak berlaku.\n\n` +
-            `<i>Silakan klik tombol beli lagi untuk mendapatkan QR baru.</i>`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
+          await bot.api
+            .editMessageText(
+              chatId,
+              messageId,
+              `⌛ <b>QRIS Kedaluwarsa</b>\n\n` +
+                `QR code untuk pembayaran <b>${formatPrice(amountIDR)}</b> sudah tidak berlaku.\n\n` +
+                `<i>Silakan klik tombol beli lagi untuk mendapatkan QR baru.</i>`,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
         }
         return;
       }
@@ -435,14 +573,35 @@ function startQrisPolling(
         clearQrisPoll(orderId);
 
         // Credit the exact amount to the user's balance
-        await User.findOneAndUpdate(
+        const updatedUser = await User.findOneAndUpdate(
           { telegramId },
-          { $inc: { balance: amountIDR } }
+          { $inc: { balance: amountIDR } },
+          { new: true },
+        ).lean();
+
+        const settledSession = await TopupSession.findByIdAndUpdate(
+          sessionId,
+          {
+            status: "SETTLED",
+            matchedTransactionId: matchedTx.transactionId,
+          },
+          { new: true },
         );
-        await TopupSession.findByIdAndUpdate(sessionId, {
-          status: "SETTLED",
-          matchedTransactionId: matchedTx.transactionId,
-        });
+
+        if (settledSession) {
+          ActivityLogService.logTopupSettled(bot.api, {
+            session: settledSession,
+            txId: matchedTx.transactionId,
+            user: {
+              telegramId,
+              firstName: updatedUser?.firstName,
+              username: updatedUser?.username,
+            },
+            newBalance: updatedUser?.balance,
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog topup settled error:", err),
+          );
+        }
 
         // Notify user
         try {
@@ -454,19 +613,28 @@ function startQrisPolling(
             parse_mode: "HTML",
           });
         } catch {
-          await bot.api.editMessageText(
-            chatId, messageId,
-            `✅ <b>Pembayaran Diterima!</b>\n\n` +
-            `💰 <b>${formatPrice(amountIDR)}</b> telah ditambahkan ke saldo kamu.\n\n` +
-            `⏳ Sedang memproses pembelian <b>${serviceName}</b> otomatis…`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
+          await bot.api
+            .editMessageText(
+              chatId,
+              messageId,
+              `✅ <b>Pembayaran Diterima!</b>\n\n` +
+                `💰 <b>${formatPrice(amountIDR)}</b> telah ditambahkan ke saldo kamu.\n\n` +
+                `⏳ Sedang memproses pembelian <b>${serviceName}</b> otomatis…`,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
         }
 
         // Auto-execute the pending purchase
-        await executePurchase(bot, chatId, messageId, telegramId, serviceCode, countryId);
+        await executePurchase(
+          bot,
+          chatId,
+          messageId,
+          telegramId,
+          serviceCode,
+          countryId,
+        );
       }
-
     } catch (err) {
       console.error(`[smsbower] QRIS poll error for ${orderId}:`, err);
     }
@@ -486,12 +654,12 @@ function startQrisPolling(
  * Refunds the selling price if the provider API fails.
  */
 async function executePurchase(
-  bot:         Bot<Context>,
-  chatId:      number,
-  messageId:   number,
-  telegramId:  string,
+  bot: Bot<Context>,
+  chatId: number,
+  messageId: number,
+  telegramId: string,
   serviceCode: string,
-  countryId:   string
+  countryId: string,
 ): Promise<void> {
   const service = findService(serviceCode);
   const country = findCountry(countryId);
@@ -499,96 +667,172 @@ async function executePurchase(
   // Re-fetch the user to get the current (post-credit) balance and validate.
   const dbUser = await User.findOne({ telegramId }).lean();
   if (!dbUser || !service || !country) {
-    await bot.api.sendMessage(
-      chatId,
-      `❌ <b>Gagal memproses pembelian.</b>\n<i>Data pengguna atau layanan tidak ditemukan.</i>`,
-      { parse_mode: "HTML" }
-    ).catch(() => {});
+    await bot.api
+      .sendMessage(
+        chatId,
+        `❌ <b>Gagal memproses pembelian.</b>\n<i>Data pengguna atau layanan tidak ditemukan.</i>`,
+        { parse_mode: "HTML" },
+      )
+      .catch(() => {});
     return;
   }
 
-  const config       = await SmsConfig.getOrCreate();
-  const sellingPrice = applyMarkup(
-    SMSBowerService.priceCache.get(countryId)?.get(serviceCode)?.cost ?? 0,
+  // Get base cost in USD and providerIds from cache, or fetch fresh from API if not yet cached or 0
+  let priceEntry = SMSBowerService.priceCache.get(countryId)?.get(serviceCode);
+  if (!priceEntry || priceEntry.cost <= 0) {
+    const freshPrices = await SMSBowerService.getPricesForCountry(countryId);
+    priceEntry = freshPrices.get(serviceCode);
+  }
+
+  const baseCostUsd = priceEntry?.cost ?? 0;
+  const providerIds = priceEntry?.providerIds;
+
+  const [config, usdRate] = await Promise.all([
+    SmsConfig.getOrCreate(),
+    CurrencyService.getUsdRate(),
+  ]);
+
+  const pricing = CurrencyService.calculatePricing(
+    baseCostUsd,
     config.markupType,
-    config.markupValue
+    config.markupValue,
+    usdRate,
   );
+  const sellingPrice = pricing.sellingPriceIdr;
+  const maxPriceUsd = pricing.maxPriceUsd;
+
+  if (baseCostUsd <= 0 || sellingPrice <= 0) {
+    await bot.api
+      .sendMessage(
+        chatId,
+        `⚠️ <b>Harga/stok layanan tidak tersedia saat ini.</b>\n\n` +
+          `<i>Silakan coba beberapa saat lagi atau pilih layanan/negara lain.</i>`,
+        { parse_mode: "HTML" },
+      )
+      .catch(() => {});
+    return;
+  }
 
   if (dbUser.balance < sellingPrice) {
-    await bot.api.sendMessage(
-      chatId,
-      `⚠️ <b>Saldo masih kurang.</b>\n\n` +
-      `Saldo: <b>${formatPrice(dbUser.balance)}</b>\n` +
-      `Harga: <b>${formatPrice(sellingPrice)}</b>\n\n` +
-      `<i>Silakan top up saldo terlebih dahulu.</i>`,
-      { parse_mode: "HTML" }
-    ).catch(() => {});
+    await bot.api
+      .sendMessage(
+        chatId,
+        `⚠️ <b>Saldo masih kurang.</b>\n\n` +
+          `Saldo: <b>${formatPrice(dbUser.balance)}</b>\n` +
+          `Harga: <b>${formatPrice(sellingPrice)}</b>\n\n` +
+          `<i>Silakan top up saldo terlebih dahulu.</i>`,
+        { parse_mode: "HTML" },
+      )
+      .catch(() => {});
     return;
   }
 
   // Deduct balance atomically.
   await User.findOneAndUpdate(
     { telegramId },
-    { $inc: { balance: -sellingPrice } }
+    { $inc: { balance: -sellingPrice } },
   );
 
   let activationId = "";
-  let phoneNumber  = "";
-  let baseCost     = 0;
+  let phoneNumber = "";
 
   try {
-    const result = await smsBower.getNumber(serviceCode, countryId);
-    activationId  = result.activationId;
-    phoneNumber   = result.phoneNumber;
-    baseCost      = result.activationCost;
+    // Pass maxPriceUsd (in USD) and providerIds (top 3 cheapest providers)
+    const result = await smsBower.getNumber(
+      serviceCode,
+      countryId,
+      maxPriceUsd > 0 ? maxPriceUsd : undefined,
+      providerIds,
+    );
+    activationId = result.activationId;
+    phoneNumber = result.phoneNumber;
   } catch (err) {
     // Provider failed — refund balance immediately
     await User.findOneAndUpdate(
       { telegramId },
-      { $inc: { balance: sellingPrice } }
+      { $inc: { balance: sellingPrice } },
     );
-    const reason = err instanceof Error ? err.message : "Layanan tidak tersedia.";
-    await bot.api.sendMessage(
-      chatId,
-      `❌ <b>Stok kosong/gagal, saldo telah dikembalikan ke akun lu.</b>\n\n` +
-      `<i>Alasan: ${reason}</i>\n` +
-      `💰 Saldo <b>${formatPrice(sellingPrice)}</b> aman di akun kamu.`,
-      {
-        parse_mode:   "HTML",
-        reply_markup: new InlineKeyboard()
-          .text("🔙 Kembali ke Layanan", `setcountry_${countryId}`),
-      }
-    ).catch(() => {});
+    const reason =
+      err instanceof Error ? err.message : "Layanan tidak tersedia.";
+
+    ActivityLogService.logOtpCancelled(bot.api, {
+      activationId: `FAIL-${Date.now()}`,
+      serviceName: service.name,
+      countryName: country.name,
+      reason: `Gagal Sewa: ${reason}`,
+      cost: sellingPrice,
+      buyer: {
+        telegramId,
+        firstName: dbUser.firstName,
+        username: dbUser.username,
+      },
+    }).catch((logErr) =>
+      console.error("[smsbower] ActivityLog OTP fail error:", logErr),
+    );
+
+    await bot.api
+      .sendMessage(
+        chatId,
+        `❌ <b>Gagal memproses nomor / stok sedang tidak tersedia.</b>\n\n` +
+          `💰 Saldo <b>${formatPrice(sellingPrice)}</b> telah dikembalikan ke akun kamu.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text(
+            "🔙 Kembali ke Layanan",
+            `setcountry_${countryId}`,
+          ),
+        },
+      )
+      .catch(() => {});
     return;
   }
 
   // Save order.
   await Order.create({
-    userId:       parseInt(telegramId, 10),
+    userId: parseInt(telegramId, 10),
     activationId,
-    service:      serviceCode,
-    country:      Number(countryId),
+    service: serviceCode,
+    country: Number(countryId),
     phoneNumber,
-    cost:         sellingPrice,
-    status:       "PENDING",
+    cost: sellingPrice,
+    status: "PENDING",
   });
+
+  // Broadcast audit log: OTP rental order created
+  ActivityLogService.logOtpOrder(bot.api, {
+    activationId,
+    serviceName: service.name,
+    countryName: country.name,
+    phoneNumber,
+    cost: sellingPrice,
+    buyer: {
+      telegramId,
+      firstName: dbUser.firstName,
+      username: dbUser.username,
+    },
+  }).catch((err) =>
+    console.error("[smsbower] ActivityLog OTP order error:", err),
+  );
 
   // Show the pending OTP screen.
   const sentMsg = await bot.api.sendMessage(
     chatId,
-    buildPendingText(
-      phoneNumber, service.name, country.name,
-      sellingPrice, baseCost, config.markupType, config.markupValue
-    ),
+    buildPendingText(phoneNumber, service.name, country.name, sellingPrice),
     {
-      parse_mode:   "HTML",
+      parse_mode: "HTML",
       reply_markup: buildCancelKeyboard(activationId),
-    }
+    },
   );
 
-  startPolling(bot, chatId, sentMsg.message_id, activationId, phoneNumber, service.name);
+  startPolling(
+    bot,
+    chatId,
+    sentMsg.message_id,
+    activationId,
+    phoneNumber,
+    service.name,
+  );
 }
-
 
 const activePolls = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -605,12 +849,12 @@ function clearPoll(activationId: string): void {
 // ============================================================================
 
 function startPolling(
-  bot:          Bot<Context>,
-  chatId:       number,
-  messageId:    number,
+  bot: Bot<Context>,
+  chatId: number,
+  messageId: number,
   activationId: string,
-  phoneNumber:  string,
-  serviceName:  string
+  phoneNumber: string,
+  serviceName: string,
 ): void {
   const startedAt = Date.now();
 
@@ -620,11 +864,40 @@ function startPolling(
       if (Date.now() - startedAt >= ORDER_TIMEOUT_MS) {
         clearPoll(activationId);
         await smsBower.setStatus(activationId, "8");
-        await Order.findOneAndUpdate({ activationId }, { status: "CANCELED" });
+        const order = await Order.findOneAndUpdate(
+          { activationId },
+          { status: "CANCELED" },
+          { new: true },
+        );
+        if (order) {
+          await User.findOneAndUpdate(
+            { telegramId: String(order.userId) },
+            { $inc: { balance: order.cost } },
+          );
+          const user = await User.findOne({
+            telegramId: String(order.userId),
+          }).lean();
+          ActivityLogService.logOtpCancelled(bot.api, {
+            activationId,
+            serviceName,
+            phoneNumber,
+            reason: "timeout",
+            cost: order.cost,
+            buyer: {
+              telegramId: String(order.userId),
+              firstName: user?.firstName,
+              username: user?.username,
+            },
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog OTP timeout error:", err),
+          );
+        }
+
         await bot.api.editMessageText(
-          chatId, messageId,
+          chatId,
+          messageId,
           buildCanceledText(phoneNumber, "timeout"),
-          { parse_mode: "HTML" }
+          { parse_mode: "HTML" },
         );
         return;
       }
@@ -637,7 +910,7 @@ function startPolling(
 
         await Order.findOneAndUpdate(
           { activationId },
-          { status: "COMPLETED", code: status.code }
+          { status: "COMPLETED", code: status.code },
         );
 
         const order = await Order.findOne({ activationId }).lean();
@@ -645,13 +918,14 @@ function startPolling(
           const user = await User.findOneAndUpdate(
             { telegramId: String(order.userId) },
             { $inc: { totalOrders: 1 } },
-            { new: true }
+            { new: true },
           ).lean();
 
           // Broadcast testimonial to channel
           const countryName =
-            SMSBowerService.allCountries.find((c) => c.id === String(order.country))?.name ||
-            String(order.country);
+            SMSBowerService.allCountries.find(
+              (c) => c.id === String(order.country),
+            )?.name || String(order.country);
 
           TestimonialService.sendOtpPurchaseTestimonial(bot.api, {
             activationId,
@@ -665,29 +939,76 @@ function startPolling(
               username: user?.username,
             },
             date: new Date(),
-          }).catch((err) => console.error("[smsbower] Testimonial broadcast error:", err));
+          }).catch((err) =>
+            console.error("[smsbower] Testimonial broadcast error:", err),
+          );
+
+          // Broadcast audit log to dedicated channel
+          ActivityLogService.logOtpSuccess(bot.api, {
+            activationId,
+            serviceName,
+            countryName,
+            phoneNumber,
+            code: status.code,
+            buyer: {
+              telegramId: String(order.userId),
+              firstName: user?.firstName,
+              username: user?.username,
+            },
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog OTP success error:", err),
+          );
         }
 
         await bot.api.editMessageText(
-          chatId, messageId,
+          chatId,
+          messageId,
           buildSuccessText(phoneNumber, serviceName, status.code),
-          { parse_mode: "HTML" }
+          { parse_mode: "HTML" },
         );
         return;
       }
 
       if (status.kind === "CANCEL") {
         clearPoll(activationId);
-        await Order.findOneAndUpdate({ activationId }, { status: "CANCELED" });
+        const order = await Order.findOneAndUpdate(
+          { activationId },
+          { status: "CANCELED" },
+          { new: true },
+        );
+        if (order) {
+          await User.findOneAndUpdate(
+            { telegramId: String(order.userId) },
+            { $inc: { balance: order.cost } },
+          );
+          const user = await User.findOne({
+            telegramId: String(order.userId),
+          }).lean();
+          ActivityLogService.logOtpCancelled(bot.api, {
+            activationId,
+            serviceName,
+            phoneNumber,
+            reason: "Dibatalkan oleh Provider SMS",
+            cost: order.cost,
+            buyer: {
+              telegramId: String(order.userId),
+              firstName: user?.firstName,
+              username: user?.username,
+            },
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog OTP cancel error:", err),
+          );
+        }
+
         await bot.api.editMessageText(
-          chatId, messageId,
+          chatId,
+          messageId,
           buildCanceledText(phoneNumber, "user"),
-          { parse_mode: "HTML" }
+          { parse_mode: "HTML" },
         );
       }
 
       // status.kind === "WAIT_CODE" → keep polling silently
-
     } catch (err) {
       console.error(`[smsbower] poll error for ${activationId}:`, err);
     }
@@ -710,7 +1031,7 @@ async function safeEditOrReply(
   extra?: {
     parse_mode?: "HTML" | "Markdown" | "MarkdownV2";
     reply_markup?: InlineKeyboard;
-  }
+  },
 ): Promise<void> {
   const isMedia = ctx.msg && (!("text" in ctx.msg) || !ctx.msg.text);
   if (isMedia) {
@@ -730,7 +1051,10 @@ async function safeEditOrReply(
     if (desc.includes("message is not modified")) {
       return;
     }
-    if (desc.includes("there is no text in the message to edit") || desc.includes("message to edit not found")) {
+    if (
+      desc.includes("there is no text in the message to edit") ||
+      desc.includes("message to edit not found")
+    ) {
       try {
         await ctx.deleteMessage();
       } catch {
@@ -748,26 +1072,212 @@ async function safeEditOrReply(
 // ============================================================================
 
 const smsBowerPlugin: Plugin = {
-  name:    "smsbower",
-  version: "3.0.0",
-  // No slash commands — entirely callback-query driven.
+  name: "smsbower",
+  version: "3.1.0",
+  commands: [
+    {
+      command: "carinegara",
+      description: "Cari negara untuk sewa nomor OTP SMS",
+    },
+    {
+      command: "carilayanan",
+      description: "Cari layanan/aplikasi sewa nomor OTP SMS",
+    },
+  ],
 
   register(bot: Bot<Context>): void {
+    // ── /carinegara & /searchcountry — Search Country Command ─────────────────
+    bot.command(["carinegara", "searchcountry"], async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+
+      const config = await SmsConfig.getOrCreate();
+      if (config.enabled === false) {
+        await ctx.reply(
+          "⚠️ Layanan OTP SMS sedang dinonaktifkan / maintenance.",
+        );
+        return;
+      }
+
+      const raw = ctx.message?.text ?? "";
+      const query = raw
+        .replace(/^\/(?:carinegara|searchcountry)(?:@\S+)?\s*/i, "")
+        .trim();
+
+      if (!query) {
+        userSearchModeState.set(telegramId, { type: "COUNTRY" });
+        await ctx.reply(
+          `🔍 <b>Pencarian Negara OTP</b>\n` +
+            `${"─".repeat(28)}\n\n` +
+            `Silakan ketik nama negara yang ingin Anda cari:\n` +
+            `<i>Contoh: <code>Indonesia</code>, <code>Malaysia</code>, <code>United States</code></i>\n\n` +
+            `<i>Ketik /batal atau klik tombol di bawah untuk membatalkan.</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text(
+              "🔙 Batal Cari",
+              "ctry_cancel_search",
+            ),
+          },
+        );
+        return;
+      }
+
+      const qLower = query.toLowerCase();
+      const matches = countries().filter(
+        (c) => c.name.toLowerCase().includes(qLower) || c.id === query,
+      );
+
+      if (matches.length === 0) {
+        await ctx.reply(
+          `❌ <b>Negara Tidak Ditemukan</b>\n\n` +
+            `Tidak ditemukan negara dengan kata kunci: <code>${escapeHtml(query)}</code>.\n\n` +
+            `<i>Silakan cari dengan kata kunci lain atau buka daftar lengkap semua negara.</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🔍 Cari Ulang", "ctry_search")
+              .text("🌍 Semua Negara", "ctry_pg_0"),
+          },
+        );
+        return;
+      }
+
+      userCtrySearchQuery.set(telegramId, query);
+      const { totalPages } = paginate(matches, 0);
+      await ctx.reply(buildCountryText(0, totalPages, query, matches.length), {
+        parse_mode: "HTML",
+        reply_markup: buildCountryKeyboard(0, matches),
+      });
+    });
+
+    // ── /carilayanan & /searchservice — Search Service Command ────────────────
+    bot.command(["carilayanan", "searchservice"], async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+
+      const config = await SmsConfig.getOrCreate();
+      if (config.enabled === false) {
+        await ctx.reply(
+          "⚠️ Layanan OTP SMS sedang dinonaktifkan / maintenance.",
+        );
+        return;
+      }
+
+      const raw = ctx.message?.text ?? "";
+      const query = raw
+        .replace(/^\/(?:carilayanan|searchservice)(?:@\S+)?\s*/i, "")
+        .trim();
+
+      const lastSrv = userSrvSearchQuery.get(telegramId);
+      const defaultCountryId =
+        lastSrv?.countryId ||
+        (countries().some((c) => c.id === "6") ? "6" : countries()[0]?.id);
+
+      if (!query) {
+        if (defaultCountryId) {
+          const country = findCountry(defaultCountryId);
+          userSearchModeState.set(telegramId, {
+            type: "SERVICE",
+            countryId: defaultCountryId,
+          });
+          await ctx.reply(
+            `🔍 <b>Pencarian Layanan OTP</b>\n` +
+              `${"─".repeat(28)}\n\n` +
+              `🌍 Negara: <b>${country?.name ?? defaultCountryId}</b>\n\n` +
+              `Silakan ketik nama aplikasi atau layanan yang ingin dicari:\n` +
+              `<i>Contoh: <code>WhatsApp</code>, <code>Telegram</code>, <code>TikTok</code>, <code>Shopee</code></i>\n\n` +
+              `<i>Ketik /batal atau klik tombol di bawah untuk membatalkan.</i>`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("🔙 Batal Cari", `srv_cancel_search_${defaultCountryId}`)
+                .row()
+                .text("🌍 Ganti Negara", "product_otp"),
+            },
+          );
+        } else {
+          await ctx.reply(
+            `🔍 <b>Pencarian Layanan OTP</b>\n\n` +
+              `Silakan pilih negara terlebih dahulu untuk melihat ketersediaan layanan dan harga.`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text(
+                "🌍 Pilih Negara",
+                "product_otp",
+              ),
+            },
+          );
+        }
+        return;
+      }
+
+      const countryId = defaultCountryId ?? "6";
+      const country = findCountry(countryId);
+      const qLower = query.toLowerCase();
+      const matches = services().filter(
+        (s) =>
+          s.name.toLowerCase().includes(qLower) ||
+          s.code.toLowerCase() === qLower,
+      );
+
+      if (matches.length === 0) {
+        await ctx.reply(
+          `❌ <b>Layanan Tidak Ditemukan</b>\n\n` +
+            `Tidak ditemukan layanan dengan kata kunci: <code>${escapeHtml(query)}</code> di negara <b>${country?.name ?? countryId}</b>.\n\n` +
+            `<i>Silakan cari kata kunci lain atau pilih negara lain.</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("🔍 Cari Ulang", `srv_search_${countryId}`)
+              .text("🌍 Pilih Negara", "product_otp"),
+          },
+        );
+        return;
+      }
+
+      userSrvSearchQuery.set(telegramId, { countryId, query });
+      const totalPages = Math.max(
+        1,
+        Math.ceil(matches.length / ITEMS_PER_PAGE),
+      );
+      const replyMarkup = await buildServiceKeyboard(countryId, 0, matches);
+      await ctx.reply(
+        buildServiceText(
+          country?.name ?? "Services",
+          0,
+          totalPages,
+          query,
+          matches.length,
+        ),
+        {
+          parse_mode: "HTML",
+          reply_markup: replyMarkup,
+        },
+      );
+    });
 
     // ── product_otp — Country picker page 0 ──────────────────────────────────
     bot.callbackQuery("product_otp", async (ctx) => {
       await ctx.answerCallbackQuery();
+      if (ctx.from) userSearchModeState.delete(String(ctx.from.id));
+
       const config = await SmsConfig.getOrCreate();
       if (config.enabled === false) {
         await safeEditOrReply(
           ctx,
           `⚠️ <b>Layanan OTP SMS Nonaktif</b>\n\n` +
-          `Mohon maaf, layanan sewa nomor virtual OTP SMS saat ini sedang dinonaktifkan oleh admin untuk pemeliharaan / maintenance.\n\n` +
-          `<i>Silakan cek kembali nanti atau gunakan produk lainnya di katalog kami.</i>`,
+            `Mohon maaf, layanan sewa nomor virtual OTP SMS saat ini sedang dinonaktifkan oleh admin untuk pemeliharaan / maintenance.\n\n` +
+            `<i>Silakan cek kembali nanti atau gunakan produk lainnya di katalog kami.</i>`,
           {
-            parse_mode:   "HTML",
-            reply_markup: new InlineKeyboard().text("🔙 Kembali ke Katalog", CB_CATALOG),
-          }
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text(
+              "🔙 Kembali ke Katalog",
+              CB_CATALOG,
+            ),
+          },
         );
         return;
       }
@@ -775,7 +1285,7 @@ const smsBowerPlugin: Plugin = {
       const { totalPages } = paginate(countries(), 0);
       try {
         await safeEditOrReply(ctx, buildCountryText(0, totalPages), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: buildCountryKeyboard(0),
         });
       } catch (err) {
@@ -786,6 +1296,8 @@ const smsBowerPlugin: Plugin = {
     // ── ctry_pg_<page> — Country list pagination ──────────────────────────────
     bot.callbackQuery(/^ctry_pg_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
+      if (ctx.from) userSearchModeState.delete(String(ctx.from.id));
+
       const config = await SmsConfig.getOrCreate();
       if (config.enabled === false) {
         await ctx.answerCallbackQuery({
@@ -799,7 +1311,7 @@ const smsBowerPlugin: Plugin = {
       const { totalPages } = paginate(countries(), page);
       try {
         await safeEditOrReply(ctx, buildCountryText(page, totalPages), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: buildCountryKeyboard(page),
         });
       } catch (err) {
@@ -807,12 +1319,95 @@ const smsBowerPlugin: Plugin = {
       }
     });
 
+    // ── ctry_search — Prompt for country search ──────────────────────────────
+    bot.callbackQuery("ctry_search", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+
+      userSearchModeState.set(telegramId, { type: "COUNTRY" });
+
+      await safeEditOrReply(
+        ctx,
+        `🔍 <b>Pencarian Negara OTP</b>\n` +
+          `${"─".repeat(28)}\n\n` +
+          `Silakan ketik nama negara atau kode ID yang ingin dicari:\n` +
+          `<i>Contoh: <code>Indonesia</code>, <code>Malaysia</code>, <code>United States</code></i>\n\n` +
+          `<i>Ketik /batal atau klik tombol di bawah untuk membatalkan.</i>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text(
+            "🔙 Batal Cari",
+            "ctry_cancel_search",
+          ),
+        },
+      );
+    });
+
+    // ── ctry_cancel_search — Cancel country search ───────────────────────────
+    bot.callbackQuery("ctry_cancel_search", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (from) userSearchModeState.delete(String(from.id));
+
+      const { totalPages } = paginate(countries(), 0);
+      try {
+        await safeEditOrReply(ctx, buildCountryText(0, totalPages), {
+          parse_mode: "HTML",
+          reply_markup: buildCountryKeyboard(0),
+        });
+      } catch (err) {
+        console.error("[smsbower] ctry_cancel_search error:", err);
+      }
+    });
+
+    // ── ctry_spg_<page> — Country search pagination ──────────────────────────
+    bot.callbackQuery(/^ctry_spg_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      userSearchModeState.delete(telegramId);
+
+      const query = userCtrySearchQuery.get(telegramId);
+      if (!query) {
+        const { totalPages } = paginate(countries(), 0);
+        await safeEditOrReply(ctx, buildCountryText(0, totalPages), {
+          parse_mode: "HTML",
+          reply_markup: buildCountryKeyboard(0),
+        });
+        return;
+      }
+
+      const qLower = query.toLowerCase();
+      const matches = countries().filter(
+        (c) => c.name.toLowerCase().includes(qLower) || c.id === query,
+      );
+      const page = parseInt(ctx.match[1]!, 10);
+      const { totalPages } = paginate(matches, page);
+
+      try {
+        await safeEditOrReply(
+          ctx,
+          buildCountryText(page, totalPages, query, matches.length),
+          {
+            parse_mode: "HTML",
+            reply_markup: buildCountryKeyboard(page, matches),
+          },
+        );
+      } catch (err) {
+        console.error(`[smsbower] ctry_spg_${page} error:`, err);
+      }
+    });
+
     // ── Back to Catalog ───────────────────────────────────────────────────────
     bot.callbackQuery(CB_CATALOG, async (ctx) => {
       await ctx.answerCallbackQuery();
+      if (ctx.from) userSearchModeState.delete(String(ctx.from.id));
       try {
         await safeEditOrReply(ctx, await buildCatalogText(), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: await buildCatalogKeyboard(),
         });
       } catch (err) {
@@ -823,6 +1418,8 @@ const smsBowerPlugin: Plugin = {
     // ── setcountry_<countryId> — Service picker page 0 ───────────────────────
     bot.callbackQuery(/^setcountry_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
+      if (ctx.from) userSearchModeState.delete(String(ctx.from.id));
+
       const config = await SmsConfig.getOrCreate();
       if (config.enabled === false) {
         await ctx.answerCallbackQuery({
@@ -833,11 +1430,12 @@ const smsBowerPlugin: Plugin = {
       }
 
       const countryId = ctx.match[1]!;
-      const country   = findCountry(countryId);
+      const country = findCountry(countryId);
 
       if (!country) {
         await ctx.answerCallbackQuery({
-          text: "⚠️ Unknown country. Please try again.", show_alert: true,
+          text: "⚠️ Unknown country. Please try again.",
+          show_alert: true,
         });
         return;
       }
@@ -847,30 +1445,44 @@ const smsBowerPlugin: Plugin = {
         await safeEditOrReply(
           ctx,
           `⚠️ <b>Data layanan belum ter-load dari API.</b>\n\n` +
-          `<i>Coba ketik /start dan ulangi, atau hubungi admin jika masalah berlanjut.</i>`,
-          { parse_mode: "HTML",
-            reply_markup: new InlineKeyboard().text("🔙 Back to Countries", "ctry_pg_0") }
+            `<i>Coba ketik /start dan ulangi, atau hubungi admin jika masalah berlanjut.</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text(
+              "🔙 Back to Countries",
+              "ctry_pg_0",
+            ),
+          },
         );
         return;
       }
 
-      const totalPages = Math.max(1, Math.ceil(services().length / ITEMS_PER_PAGE));
+      const totalPages = Math.max(
+        1,
+        Math.ceil(services().length / ITEMS_PER_PAGE),
+      );
       try {
         // Show a brief loading state while we fetch prices (only on first open
         // per country — subsequent opens use the in-memory cache instantly).
         const needsPriceFetch = !SMSBowerService.priceCache.has(countryId);
         if (needsPriceFetch && ctx.msg && "text" in ctx.msg && ctx.msg.text) {
-          await ctx.editMessageText(
-            `💲 <b>Memuat harga untuk ${country.name}…</b>\n<i>Sebentar ya, hanya satu kali per sesi.</i>`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
+          await ctx
+            .editMessageText(
+              `💲 <b>Memuat harga untuk ${country.name}…</b>\n<i>Sebentar ya, hanya satu kali per sesi.</i>`,
+              { parse_mode: "HTML" },
+            )
+            .catch(() => {});
         }
 
         const replyMarkup = await buildServiceKeyboard(countryId, 0);
-        await safeEditOrReply(ctx, buildServiceText(country.name, 0, totalPages), {
-          parse_mode:   "HTML",
-          reply_markup: replyMarkup,
-        });
+        await safeEditOrReply(
+          ctx,
+          buildServiceText(country.name, 0, totalPages),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
       } catch (err) {
         console.error(`[smsbower] setcountry_${countryId} error:`, err);
       }
@@ -879,6 +1491,8 @@ const smsBowerPlugin: Plugin = {
     // ── srv_pg_<countryId>_<page> — Service list pagination ───────────────────
     bot.callbackQuery(/^srv_pg_(\d+)_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
+      if (ctx.from) userSearchModeState.delete(String(ctx.from.id));
+
       const config = await SmsConfig.getOrCreate();
       if (config.enabled === false) {
         await ctx.answerCallbackQuery({
@@ -889,12 +1503,13 @@ const smsBowerPlugin: Plugin = {
       }
 
       const countryId = ctx.match[1]!;
-      const page      = parseInt(ctx.match[2]!, 10);
-      const country   = findCountry(countryId);
+      const page = parseInt(ctx.match[2]!, 10);
+      const country = findCountry(countryId);
 
       if (!country) {
         await ctx.answerCallbackQuery({
-          text: "⚠️ Unknown country. Please try again.", show_alert: true,
+          text: "⚠️ Unknown country. Please try again.",
+          show_alert: true,
         });
         return;
       }
@@ -904,22 +1519,156 @@ const smsBowerPlugin: Plugin = {
         await safeEditOrReply(
           ctx,
           `⚠️ <b>Data layanan belum ter-load dari API.</b>\n\n` +
-          `<i>Coba ketik /start dan ulangi, atau hubungi admin jika masalah berlanjut.</i>`,
-          { parse_mode: "HTML",
-            reply_markup: new InlineKeyboard().text("🔙 Back to Countries", "ctry_pg_0") }
+            `<i>Coba ketik /start dan ulangi, atau hubungi admin jika masalah berlanjut.</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text(
+              "🔙 Back to Countries",
+              "ctry_pg_0",
+            ),
+          },
         );
         return;
       }
 
-      const totalPages = Math.max(1, Math.ceil(services().length / ITEMS_PER_PAGE));
+      const totalPages = Math.max(
+        1,
+        Math.ceil(services().length / ITEMS_PER_PAGE),
+      );
       try {
         const replyMarkup = await buildServiceKeyboard(countryId, page);
-        await safeEditOrReply(ctx, buildServiceText(country.name, page, totalPages), {
-          parse_mode:   "HTML",
-          reply_markup: replyMarkup,
-        });
+        await safeEditOrReply(
+          ctx,
+          buildServiceText(country.name, page, totalPages),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
       } catch (err) {
         console.error(`[smsbower] srv_pg_${countryId}_${page} error:`, err);
+      }
+    });
+
+    // ── srv_search_<countryId> — Prompt for service search ───────────────────
+    bot.callbackQuery(/^srv_search_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const countryId = ctx.match[1]!;
+      const country = findCountry(countryId);
+      const telegramId = String(from.id);
+
+      userSearchModeState.set(telegramId, { type: "SERVICE", countryId });
+
+      await safeEditOrReply(
+        ctx,
+        `🔍 <b>Pencarian Layanan OTP</b>\n` +
+          `${"─".repeat(28)}\n\n` +
+          `🌍 Negara: <b>${country?.name ?? countryId}</b>\n\n` +
+          `Silakan ketik nama aplikasi atau kode layanan yang ingin dicari:\n` +
+          `<i>Contoh: <code>WhatsApp</code>, <code>Telegram</code>, <code>TikTok</code>, <code>Shopee</code></i>\n\n` +
+          `<i>Ketik /batal atau klik tombol di bawah untuk membatalkan.</i>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text(
+            "🔙 Batal Cari",
+            `srv_cancel_search_${countryId}`,
+          ),
+        },
+      );
+    });
+
+    // ── srv_cancel_search_<countryId> — Cancel service search ─────────────────
+    bot.callbackQuery(/^srv_cancel_search_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (from) userSearchModeState.delete(String(from.id));
+
+      const countryId = ctx.match[1]!;
+      const country = findCountry(countryId);
+      const totalPages = Math.max(
+        1,
+        Math.ceil(services().length / ITEMS_PER_PAGE),
+      );
+      try {
+        const replyMarkup = await buildServiceKeyboard(countryId, 0);
+        await safeEditOrReply(
+          ctx,
+          buildServiceText(country?.name ?? "Services", 0, totalPages),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
+      } catch (err) {
+        console.error(`[smsbower] srv_cancel_search_${countryId} error:`, err);
+      }
+    });
+
+    // ── srv_spg_<countryId>_<page> — Service search pagination ────────────────
+    bot.callbackQuery(/^srv_spg_(\d+)_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      userSearchModeState.delete(telegramId);
+
+      const countryId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+      const country = findCountry(countryId);
+
+      const srvSession = userSrvSearchQuery.get(telegramId);
+      if (!srvSession || srvSession.countryId !== countryId) {
+        const totalPages = Math.max(
+          1,
+          Math.ceil(services().length / ITEMS_PER_PAGE),
+        );
+        const replyMarkup = await buildServiceKeyboard(countryId, 0);
+        await safeEditOrReply(
+          ctx,
+          buildServiceText(country?.name ?? "Services", 0, totalPages),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
+        return;
+      }
+
+      const qLower = srvSession.query.toLowerCase();
+      const matches = services().filter(
+        (s) =>
+          s.name.toLowerCase().includes(qLower) ||
+          s.code.toLowerCase() === qLower,
+      );
+      const totalPages = Math.max(
+        1,
+        Math.ceil(matches.length / ITEMS_PER_PAGE),
+      );
+
+      try {
+        const replyMarkup = await buildServiceKeyboard(
+          countryId,
+          page,
+          matches,
+        );
+        await safeEditOrReply(
+          ctx,
+          buildServiceText(
+            country?.name ?? "Services",
+            page,
+            totalPages,
+            srvSession.query,
+            matches.length,
+          ),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
+      } catch (err) {
+        console.error(`[smsbower] srv_spg_${countryId}_${page} error:`, err);
       }
     });
 
@@ -929,6 +1678,7 @@ const smsBowerPlugin: Plugin = {
 
       const from = ctx.from;
       if (!from) return;
+      userSearchModeState.delete(String(from.id));
 
       const config = await SmsConfig.getOrCreate();
       if (config.enabled === false) {
@@ -939,51 +1689,75 @@ const smsBowerPlugin: Plugin = {
         return;
       }
 
-      const countryId   = ctx.match[1]!;
+      const countryId = ctx.match[1]!;
       const serviceCode = ctx.match[2]!;
-      const country     = findCountry(countryId);
-      const service     = findService(serviceCode);
+      const country = findCountry(countryId);
+      const service = findService(serviceCode);
 
       if (!country || !service) {
         await ctx.answerCallbackQuery({
-          text: "⚠️ Layanan ini sudah tidak tersedia.", show_alert: true,
+          text: "⚠️ Layanan ini sudah tidak tersedia.",
+          show_alert: true,
         });
         return;
       }
 
       const telegramId = String(from.id);
-      const chatId     = ctx.chat?.id ?? from.id;
+      const chatId = ctx.chat?.id ?? from.id;
 
       try {
         // ── 1. Verify registration ─────────────────────────────────────────────
         const dbUser = await User.findOne({ telegramId }).lean();
         if (!dbUser) {
           await ctx.answerCallbackQuery({
-            text: "⚠️ Silakan /register terlebih dahulu.", show_alert: true,
+            text: "⚠️ Silakan /register terlebih dahulu.",
+            show_alert: true,
           });
           return;
         }
 
         // ── 2. Calculate selling price from cached price + markup ──────────────
-        const config         = await SmsConfig.getOrCreate();
-        const cachedBaseCost = SMSBowerService.priceCache.get(countryId)?.get(serviceCode)?.cost ?? 0;
-        const sellingPrice   = applyMarkup(cachedBaseCost, config.markupType, config.markupValue);
+        const [config, usdRate] = await Promise.all([
+          SmsConfig.getOrCreate(),
+          CurrencyService.getUsdRate(),
+        ]);
+        let cachedBaseCost =
+          SMSBowerService.priceCache.get(countryId)?.get(serviceCode)?.cost ??
+          0;
+        if (cachedBaseCost <= 0) {
+          const freshPrices =
+            await SMSBowerService.getPricesForCountry(countryId);
+          cachedBaseCost = freshPrices.get(serviceCode)?.cost ?? 0;
+        }
+        const sellingPrice = applyMarkup(
+          cachedBaseCost,
+          config.markupType,
+          config.markupValue,
+          usdRate,
+        );
 
         // ── 3A. Sufficient balance → execute immediately ───────────────────────
         if (dbUser.balance >= sellingPrice && sellingPrice > 0) {
           await safeEditOrReply(
             ctx,
             `⏳ <b>Memproses nomor…</b>\n\n` +
-            `🔧 Layanan: <b>${service.name}</b>\n` +
-            `🌍 Negara: <b>${country.name}</b>\n\n` +
-            `<i>Menghubungi provider SMS, mohon tunggu sebentar.</i>`,
-            { parse_mode: "HTML" }
+              `🔧 Layanan: <b>${service.name}</b>\n` +
+              `🌍 Negara: <b>${country.name}</b>\n\n` +
+              `<i>Menghubungi provider SMS, mohon tunggu sebentar.</i>`,
+            { parse_mode: "HTML" },
           );
 
           const msgId = ctx.msgId;
           if (!msgId) throw new Error("Could not resolve message ID.");
 
-          await executePurchase(bot, chatId, msgId, telegramId, serviceCode, countryId);
+          await executePurchase(
+            bot,
+            chatId,
+            msgId,
+            telegramId,
+            serviceCode,
+            countryId,
+          );
           return;
         }
 
@@ -992,12 +1766,14 @@ const smsBowerPlugin: Plugin = {
           await safeEditOrReply(
             ctx,
             `⚠️ <b>Harga tidak tersedia.</b>\n\n` +
-            `<i>Silakan kembali ke daftar layanan dan coba lagi.</i>`,
+              `<i>Silakan kembali ke daftar layanan dan coba lagi.</i>`,
             {
-              parse_mode:   "HTML",
-              reply_markup: new InlineKeyboard()
-                .text("🔙 Kembali ke Layanan", `setcountry_${countryId}`),
-            }
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text(
+                "🔙 Kembali ke Layanan",
+                `setcountry_${countryId}`,
+              ),
+            },
           );
           return;
         }
@@ -1008,12 +1784,13 @@ const smsBowerPlugin: Plugin = {
         await safeEditOrReply(
           ctx,
           `💳 <b>Menyiapkan QRIS GoPay…</b>\n\n` +
-          `<i>Sedang men-generate QRIS dinamis + kode unik pembayaran…</i>`,
-          { parse_mode: "HTML" }
+            `<i>Sedang men-generate QRIS dinamis + kode unik pembayaran…</i>`,
+          { parse_mode: "HTML" },
         );
 
         // Generate unique code & total payment amount to uniquely identify this transaction
-        const { baseAmount, uniqueCode, totalAmount } = await getUniquePaymentAmount(shortage);
+        const { baseAmount, uniqueCode, totalAmount } =
+          await getUniquePaymentAmount(shortage);
 
         // Generate unique order ID
         const orderId = `topup-${telegramId}-${Date.now()}`;
@@ -1029,11 +1806,23 @@ const smsBowerPlugin: Plugin = {
           orderId,
           baseAmount,
           uniqueCode,
-          amountIDR:          totalAmount,
+          amountIDR: totalAmount,
           pendingServiceCode: serviceCode,
-          pendingCountryId:   countryId,
-          status:             "PENDING",
+          pendingCountryId: countryId,
+          status: "PENDING",
         });
+
+        // Broadcast audit log: Topup created
+        ActivityLogService.logTopupCreated(ctx.api, {
+          session,
+          user: {
+            telegramId,
+            firstName: dbUser.firstName,
+            username: dbUser.username,
+          },
+        }).catch((err) =>
+          console.error("[smsbower] ActivityLog topup created error:", err),
+        );
 
         // Build invoice caption with clear unique code explanation
         const caption =
@@ -1060,7 +1849,7 @@ const smsBowerPlugin: Plugin = {
         // Send QRIS image as photo
         const sentQrisMsg = await ctx.replyWithPhoto(
           new InputFile(qrisResult.buffer, "qris.png"),
-          { caption, parse_mode: "HTML", reply_markup: checkBtn }
+          { caption, parse_mode: "HTML", reply_markup: checkBtn },
         );
 
         // Update session with sent message ID
@@ -1069,7 +1858,11 @@ const smsBowerPlugin: Plugin = {
         });
 
         // Delete the loading message
-        try { await ctx.deleteMessage(); } catch { /* non-critical */ }
+        try {
+          await ctx.deleteMessage();
+        } catch {
+          /* non-critical */
+        }
 
         // Start background polling for GoPay settlements
         startQrisPolling(
@@ -1083,59 +1876,67 @@ const smsBowerPlugin: Plugin = {
           serviceCode,
           countryId,
           service.name,
-          country.name
+          country.name,
         );
-
       } catch (err) {
         console.error(`[smsbower] buy_${countryId}_${serviceCode} error:`, err);
         try {
           await safeEditOrReply(
             ctx,
             `❌ <b>Gagal membuat QRIS.</b>\n\n` +
-            `<i>${err instanceof Error ? err.message : "Terjadi kesalahan sistem."}</i>`,
+              `<i>${err instanceof Error ? err.message : "Terjadi kesalahan sistem."}</i>`,
             {
-              parse_mode:   "HTML",
-              reply_markup: new InlineKeyboard()
-                .text("🔙 Kembali ke Layanan", `setcountry_${countryId}`),
-            }
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard().text(
+                "🔙 Kembali ke Layanan",
+                `setcountry_${countryId}`,
+              ),
+            },
           );
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     });
 
     // ── chkpay_<orderId> — Manual payment check ──────────────────────────────
     bot.callbackQuery(/^chkpay_(.+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery({ text: "🔄 Mengecek mutasi pembayaran GoPay…" });
+      await ctx.answerCallbackQuery({
+        text: "🔄 Mengecek mutasi pembayaran GoPay…",
+      });
 
       const orderId = ctx.match[1]!;
       const from = ctx.from;
       if (!from) return;
 
       const telegramId = String(from.id);
-      const chatId     = ctx.chat?.id ?? from.id;
+      const chatId = ctx.chat?.id ?? from.id;
 
       try {
         const session = await TopupSession.findOne({ orderId });
 
         if (!session) {
           await ctx.answerCallbackQuery({
-            text: "⚠️ Sesi pembayaran tidak ditemukan.", show_alert: true,
+            text: "⚠️ Sesi pembayaran tidak ditemukan.",
+            show_alert: true,
           });
           return;
         }
 
         if (session.telegramId !== telegramId) {
           await ctx.answerCallbackQuery({
-            text: "⛔ Kamu bukan pemilik invoice ini.", show_alert: true,
+            text: "⛔ Kamu bukan pemilik invoice ini.",
+            show_alert: true,
           });
           return;
         }
 
         if (session.status !== "PENDING") {
           await ctx.answerCallbackQuery({
-            text: session.status === "SETTLED"
-              ? "✅ Pembayaran sudah dikonfirmasi!"
-              : "❌ Sesi ini sudah tidak aktif.",
+            text:
+              session.status === "SETTLED"
+                ? "✅ Pembayaran sudah dikonfirmasi!"
+                : "❌ Sesi ini sudah tidak aktif.",
             show_alert: true,
           });
           return;
@@ -1147,21 +1948,42 @@ const smsBowerPlugin: Plugin = {
           clearQrisPoll(orderId);
 
           // Credit balance
-          await User.findOneAndUpdate(
+          const updatedUser = await User.findOneAndUpdate(
             { telegramId },
-            { $inc: { balance: session.amountIDR } }
+            { $inc: { balance: session.amountIDR } },
+            { new: true },
+          ).lean();
+
+          const settledSession = await TopupSession.findByIdAndUpdate(
+            session._id,
+            {
+              status: "SETTLED",
+              matchedTransactionId: matchedTx.transactionId,
+            },
+            { new: true },
           );
-          await TopupSession.findByIdAndUpdate(session._id, {
-            status: "SETTLED",
-            matchedTransactionId: matchedTx.transactionId,
-          });
+
+          if (settledSession) {
+            ActivityLogService.logTopupSettled(ctx.api, {
+              session: settledSession,
+              txId: matchedTx.transactionId,
+              user: {
+                telegramId,
+                firstName: updatedUser?.firstName || ctx.from?.first_name,
+                username: updatedUser?.username || ctx.from?.username,
+              },
+              newBalance: updatedUser?.balance,
+            }).catch((err) =>
+              console.error("[smsbower] ActivityLog topup settled error:", err),
+            );
+          }
 
           await ctx.editMessageCaption({
             caption:
               `✅ <b>Pembayaran Dikonfirmasi!</b>\n\n` +
               `💰 <b>${formatPrice(session.amountIDR)}</b> telah ditambahkan ke saldo kamu.\n\n` +
               `⏳ Sedang memproses pembelian otomatis…`,
-            parse_mode:   "HTML",
+            parse_mode: "HTML",
             reply_markup: new InlineKeyboard(),
           });
 
@@ -1172,7 +1994,7 @@ const smsBowerPlugin: Plugin = {
             ctx.msgId!,
             telegramId,
             session.pendingServiceCode ?? "",
-            session.pendingCountryId   ?? ""
+            session.pendingCountryId ?? "",
           );
           return;
         }
@@ -1182,7 +2004,6 @@ const smsBowerPlugin: Plugin = {
           text: "⏳ Pembayaran belum terdeteksi. Silakan transfer terlebih dahulu atau coba lagi dalam beberapa detik.",
           show_alert: true,
         });
-
       } catch (err) {
         console.error(`[smsbower] chkpay error for ${orderId}:`, err);
         await ctx.answerCallbackQuery({
@@ -1196,76 +2017,327 @@ const smsBowerPlugin: Plugin = {
     bot.callbackQuery(/^cncltopup_(.+)_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery({ text: "Invoice dibatalkan." });
 
-      const orderId   = ctx.match[1]!;
+      const orderId = ctx.match[1]!;
       const countryId = ctx.match[2]!;
 
       clearQrisPoll(orderId);
-      await TopupSession.findOneAndUpdate({ orderId }, { status: "CANCELLED" });
+      const session = await TopupSession.findOneAndUpdate(
+        { orderId },
+        { status: "CANCELLED" },
+        { new: true },
+      );
+      if (session) {
+        ActivityLogService.logTopupCancelled(ctx.api, {
+          session,
+          reason: "Dibatalkan oleh Pengguna",
+          user: {
+            telegramId: String(ctx.from?.id),
+            firstName: ctx.from?.first_name,
+            username: ctx.from?.username,
+          },
+        }).catch((err) =>
+          console.error("[smsbower] ActivityLog topup cancel error:", err),
+        );
+      }
 
       try {
         await ctx.deleteMessage();
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
 
       const country = findCountry(countryId);
-      const totalPages = Math.max(1, Math.ceil(services().length / ITEMS_PER_PAGE));
+      const totalPages = Math.max(
+        1,
+        Math.ceil(services().length / ITEMS_PER_PAGE),
+      );
       const replyMarkup = await buildServiceKeyboard(countryId, 0);
-      await ctx.reply(buildServiceText(country?.name ?? "Services", 0, totalPages), {
-        parse_mode:   "HTML",
-        reply_markup: replyMarkup,
-      });
+      await ctx.reply(
+        buildServiceText(country?.name ?? "Services", 0, totalPages),
+        {
+          parse_mode: "HTML",
+          reply_markup: replyMarkup,
+        },
+      );
     });
 
     // ── cancel_<activationId> — Manual cancellation ───────────────────────────
     bot.callbackQuery(/^cancel_(.+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-
       const activationId = ctx.match[1]!;
 
       try {
-        // Stop the poller first — prevents a race between setStatus and DB update.
-        clearPoll(activationId);
-
         const order = await Order.findOne({ activationId }).lean();
         if (!order) {
-          await safeEditOrReply(
-            ctx,
-            "⚠️ Order not found — it may have already been processed.",
-            { parse_mode: "HTML" }
-          );
+          await ctx.answerCallbackQuery({
+            text: "⚠️ Pesanan tidak ditemukan atau sudah selesai.",
+            show_alert: true,
+          });
           return;
         }
 
         if (order.status !== "PENDING") {
           await ctx.answerCallbackQuery({
-            text: `Order is already ${order.status}.`, show_alert: true,
+            text: `Pesanan sudah ${order.status === "COMPLETED" ? "selesai (OTP sudah masuk)" : "dibatalkan"}.`,
+            show_alert: true,
           });
           return;
         }
 
-        // Status 8 = cancel / refund the number.
+        // Check if OTP arrived right before user clicked cancel
+        const currentStatus = await smsBower
+          .getStatus(activationId)
+          .catch(() => ({ kind: "WAIT_CODE" }) as const);
+        if (currentStatus.kind === "OK") {
+          clearPoll(activationId);
+          await Order.findOneAndUpdate(
+            { activationId },
+            { status: "COMPLETED", code: currentStatus.code },
+          );
+
+          const user = await User.findOneAndUpdate(
+            { telegramId: String(order.userId) },
+            { $inc: { totalOrders: 1 } },
+            { new: true },
+          ).lean();
+
+          // Broadcast audit log to dedicated channel
+          const countryName =
+            SMSBowerService.allCountries.find(
+              (c) => c.id === String(order.country),
+            )?.name || String(order.country);
+
+          TestimonialService.sendOtpPurchaseTestimonial(ctx.api, {
+            activationId,
+            serviceName: order.service,
+            countryName,
+            phoneNumber: order.phoneNumber,
+            cost: order.cost,
+            buyer: {
+              telegramId: String(order.userId),
+              firstName: user?.firstName || ctx.from?.first_name,
+              username: user?.username || ctx.from?.username,
+            },
+            date: new Date(),
+          }).catch((err) =>
+            console.error("[smsbower] Testimonial broadcast error:", err),
+          );
+
+          ActivityLogService.logOtpSuccess(ctx.api, {
+            activationId,
+            serviceName: order.service,
+            countryName,
+            phoneNumber: order.phoneNumber,
+            code: currentStatus.code,
+            buyer: {
+              telegramId: String(order.userId),
+              firstName: user?.firstName || ctx.from?.first_name,
+              username: user?.username || ctx.from?.username,
+            },
+          }).catch((err) =>
+            console.error("[smsbower] ActivityLog OTP success error:", err),
+          );
+
+          await ctx.answerCallbackQuery({
+            text: "⚠️ Kode OTP sudah masuk! Pesanan tidak dapat dibatalkan.",
+            show_alert: true,
+          });
+
+          await safeEditOrReply(
+            ctx,
+            buildSuccessText(
+              order.phoneNumber,
+              order.service,
+              currentStatus.code,
+            ),
+            { parse_mode: "HTML" },
+          );
+          return;
+        }
+
+        // Stop the poller first — prevents a race between setStatus and DB update.
+        clearPoll(activationId);
+
+        // Status 8 = cancel / refund the number on SMSBower
         await smsBower.setStatus(activationId, "8");
         await Order.findOneAndUpdate({ activationId }, { status: "CANCELED" });
+
+        // Refund user balance
+        await User.findOneAndUpdate(
+          { telegramId: String(order.userId) },
+          { $inc: { balance: order.cost } },
+        );
+
+        await ctx.answerCallbackQuery({
+          text: "✅ Pesanan berhasil dibatalkan dan saldo telah dikembalikan.",
+        });
+
+        const user = await User.findOne({
+          telegramId: String(order.userId),
+        }).lean();
+        ActivityLogService.logOtpCancelled(ctx.api, {
+          activationId,
+          serviceName: order.service,
+          phoneNumber: order.phoneNumber,
+          reason: "Dibatalkan oleh Pengguna",
+          cost: order.cost,
+          buyer: {
+            telegramId: String(order.userId),
+            firstName: user?.firstName || ctx.from?.first_name,
+            username: user?.username || ctx.from?.username,
+          },
+        }).catch((err) =>
+          console.error("[smsbower] ActivityLog OTP cancel error:", err),
+        );
 
         await safeEditOrReply(
           ctx,
           buildCanceledText(order.phoneNumber, "user"),
-          { parse_mode: "HTML" }
+          { parse_mode: "HTML" },
         );
-
       } catch (err) {
         console.error(`[smsbower] cancel error for ${activationId}:`, err);
-        await safeEditOrReply(
-          ctx,
-          "❌ Failed to cancel. Please try again or contact support.",
-          { parse_mode: "HTML" }
-        );
+        await ctx.answerCallbackQuery({
+          text: "❌ Gagal membatalkan pesanan. Silakan coba lagi.",
+          show_alert: true,
+        });
       }
     });
 
-    console.log(
-      "   → product_otp | ctry_pg_<n> | setcountry_<id> | srv_pg_<id>_<n> | buy_<c>_<s> | chkpay_<id> | cncltopup_<id> | cancel_<id> registered"
-    );
+    // ── Interactive Text Listener for Country / Service Search ──────────────
+    bot.on("message:text", async (ctx, next) => {
+      const from = ctx.from;
+      if (!from) return next();
 
+      const telegramId = String(from.id);
+      const searchMode = userSearchModeState.get(telegramId);
+      if (!searchMode) return next();
+
+      const rawText = ctx.message.text.trim();
+
+      // Handle cancellation
+      if (
+        rawText === "/batal" ||
+        rawText === "/cancel" ||
+        rawText.toLowerCase() === "batal"
+      ) {
+        userSearchModeState.delete(telegramId);
+        if (searchMode.type === "COUNTRY") {
+          const { totalPages } = paginate(countries(), 0);
+          await ctx.reply("❌ Pencarian negara dibatalkan.", {
+            reply_markup: buildCountryKeyboard(0),
+          });
+        } else {
+          const country = findCountry(searchMode.countryId);
+          const replyMarkup = await buildServiceKeyboard(
+            searchMode.countryId,
+            0,
+          );
+          await ctx.reply(
+            `❌ Pencarian layanan untuk <b>${country?.name ?? "Negara"}</b> dibatalkan.`,
+            {
+              parse_mode: "HTML",
+              reply_markup: replyMarkup,
+            },
+          );
+        }
+        return;
+      }
+
+      // If user typed another command, release search state and pass through
+      if (rawText.startsWith("/")) {
+        userSearchModeState.delete(telegramId);
+        return next();
+      }
+
+      const query = rawText;
+      const qLower = query.toLowerCase();
+
+      if (searchMode.type === "COUNTRY") {
+        userSearchModeState.delete(telegramId);
+        const matches = countries().filter(
+          (c) => c.name.toLowerCase().includes(qLower) || c.id === query,
+        );
+
+        if (matches.length === 0) {
+          await ctx.reply(
+            `❌ <b>Negara Tidak Ditemukan</b>\n\n` +
+              `Tidak ditemukan negara dengan kata kunci: <code>${escapeHtml(query)}</code>.\n\n` +
+              `<i>Silakan cari dengan kata kunci lain atau buka daftar lengkap semua negara.</i>`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("🔍 Cari Ulang", "ctry_search")
+                .text("🌍 Semua Negara", "ctry_pg_0"),
+            },
+          );
+          return;
+        }
+
+        userCtrySearchQuery.set(telegramId, query);
+        const { totalPages } = paginate(matches, 0);
+        await ctx.reply(
+          buildCountryText(0, totalPages, query, matches.length),
+          {
+            parse_mode: "HTML",
+            reply_markup: buildCountryKeyboard(0, matches),
+          },
+        );
+        return;
+      }
+
+      if (searchMode.type === "SERVICE") {
+        userSearchModeState.delete(telegramId);
+        const countryId = searchMode.countryId;
+        const country = findCountry(countryId);
+        const matches = services().filter(
+          (s) =>
+            s.name.toLowerCase().includes(qLower) ||
+            s.code.toLowerCase() === qLower,
+        );
+
+        if (matches.length === 0) {
+          await ctx.reply(
+            `❌ <b>Layanan Tidak Ditemukan</b>\n\n` +
+              `Tidak ditemukan layanan dengan kata kunci: <code>${escapeHtml(query)}</code> di negara <b>${country?.name ?? countryId}</b>.\n\n` +
+              `<i>Silakan cari dengan kata kunci lain atau buka semua daftar layanan.</i>`,
+            {
+              parse_mode: "HTML",
+              reply_markup: new InlineKeyboard()
+                .text("🔍 Cari Ulang", `srv_search_${countryId}`)
+                .text("📱 Semua Layanan", `setcountry_${countryId}`),
+            },
+          );
+          return;
+        }
+
+        userSrvSearchQuery.set(telegramId, { countryId, query });
+        const totalPages = Math.max(
+          1,
+          Math.ceil(matches.length / ITEMS_PER_PAGE),
+        );
+        const replyMarkup = await buildServiceKeyboard(countryId, 0, matches);
+        await ctx.reply(
+          buildServiceText(
+            country?.name ?? "Services",
+            0,
+            totalPages,
+            query,
+            matches.length,
+          ),
+          {
+            parse_mode: "HTML",
+            reply_markup: replyMarkup,
+          },
+        );
+        return;
+      }
+
+      return next();
+    });
+
+    console.log(
+      "   → product_otp | ctry_pg_<n> | ctry_search | ctry_spg_<n> | setcountry_<id> | srv_pg_<id>_<n> | srv_search_<id> | srv_spg_<id>_<n> | buy_<c>_<s> | chkpay_<id> | cncltopup_<id> | cancel_<id> registered",
+    );
   },
 };
 

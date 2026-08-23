@@ -1,7 +1,8 @@
-import { Bot, Context, InlineKeyboard, Keyboard } from "grammy";
+import { Api, Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
+import { ActivityLogService } from "../../services/activityLog.js";
 import { HydratedDocument } from "mongoose";
 
 // ============================================================================
@@ -26,7 +27,7 @@ export const CB_CATALOG = "menu_catalog" as const;
 /**
  * Builds the persistent Reply Keyboard shown after /start.
  *
- * Reply Keyboard buttons send plain text messages when tapped, which are
+ * Reply Keyboards send plain text messages when tapped, which are
  * caught by `bot.hears()` handlers below.
  *
  * `.resized()` makes Telegram shrink the keyboard to the minimum height
@@ -35,7 +36,8 @@ export const CB_CATALOG = "menu_catalog" as const;
 export function buildMainMenuReplyKeyboard(): Keyboard {
   return new Keyboard()
     .text("👤 Info User").text("🛍️ Catalog").row()
-    .text("💳 Topup").text("❓ Help")
+    .text("💳 Topup").text("👥 Afiliasi").row()
+    .text("❓ Help")
     .resized();
 }
 
@@ -60,6 +62,7 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
   }
 
   kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
+  kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
 }
 
@@ -160,23 +163,46 @@ function buildHelpText(): string {
 export async function findOrCreateUser(
   telegramId: string,
   firstName:  string,
-  username?:  string
+  username?:  string,
+  api?:       Api,
+  referredBy?: string
 ): Promise<HydratedDocument<IUser>> {
-  const user = await User.findOneAndUpdate(
-    { telegramId },
-    {
-      $setOnInsert: {
-        telegramId,
-        firstName,
-        ...(username && { username }),
-        balance:     0,
-        totalOrders: 0,
-      },
-    },
-    { upsert: true, returnDocument: "after", runValidators: true }
-  );
-  if (!user) throw new Error(`findOrCreateUser: null for id ${telegramId}`);
-  return user;
+  const existing = await User.findOne({ telegramId });
+  if (!existing) {
+    const newUser = await User.create({
+      telegramId,
+      firstName,
+      ...(username && { username }),
+      ...(referredBy && { referredBy }),
+      balance:     0,
+      totalOrders: 0,
+    });
+
+    if (api) {
+      ActivityLogService.logUserRegistration(api, {
+        user: { telegramId, firstName, username },
+        registeredVia: "/start (Main Menu)",
+      }).catch((err) => console.error("[ActivityLog] register log error:", err));
+    }
+
+    return newUser;
+  }
+
+  // Update name/username if changed
+  let needSave = false;
+  if (existing.firstName !== firstName) {
+    existing.firstName = firstName;
+    needSave = true;
+  }
+  if (username !== undefined && existing.username !== username) {
+    existing.username = username;
+    needSave = true;
+  }
+  if (needSave) {
+    await existing.save();
+  }
+
+  return existing;
 }
 
 // ============================================================================
@@ -185,25 +211,39 @@ export async function findOrCreateUser(
 
 const panelPlugin: Plugin = {
   name:    "panel",
-  version: "2.0.0",
+  version: "2.1.0",
 
   commands: [
     { command: "start", description: "Open the main menu" },
+    { command: "menu",  description: "Open the main menu" },
   ],
 
   register(bot: Bot<Context>): void {
 
     // ── /start ────────────────────────────────────────────────────────────────
-    // Sends the welcome message AND attaches the persistent Reply Keyboard.
-    // The Reply Keyboard stays until explicitly removed — the user always has
-    // the main-menu buttons available without needing to type /start again.
+    // Supports deep-link referral: /start ref_<referrerId>
     bot.command("start", async (ctx) => {
       const from = ctx.from;
       if (!from) return;
 
       try {
+        // Parse referral payload
+        const payload = ctx.message?.text?.split(" ")[1]?.trim() ?? "";
+        let referredBy: string | undefined;
+
+        if (payload.startsWith("ref_")) {
+          const candidateId = payload.slice(4).trim();
+          // Validate: referrer must exist and cannot refer themselves
+          if (candidateId && candidateId !== String(from.id)) {
+            const referrerExists = await User.exists({ telegramId: candidateId });
+            if (referrerExists) {
+              referredBy = candidateId;
+            }
+          }
+        }
+
         const user = await findOrCreateUser(
-          String(from.id), from.first_name, from.username
+          String(from.id), from.first_name, from.username, ctx.api, referredBy
         );
 
         await ctx.reply(buildWelcomeText(user), {
@@ -216,17 +256,33 @@ const panelPlugin: Plugin = {
       }
     });
 
+    // ── /menu ─────────────────────────────────────────────────────────────────
+    bot.command("menu", async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      try {
+        const user = await findOrCreateUser(
+          String(from.id), from.first_name, from.username, ctx.api
+        );
+        await ctx.reply(buildWelcomeText(user), {
+          parse_mode:   "HTML",
+          reply_markup: buildMainMenuReplyKeyboard(),
+        });
+      } catch (err) {
+        console.error("[panel] /menu error:", err);
+        await ctx.reply("❌ Something went wrong. Please try again.");
+      }
+    });
+
     // ── 👤 Info User (bot.hears) ──────────────────────────────────────────────
-    // Reply Keyboards send plain text — bot.hears() matches the exact button label.
     bot.hears("👤 Info User", async (ctx) => {
       const from = ctx.from;
       if (!from) return;
 
       try {
         const user = await findOrCreateUser(
-          String(from.id), from.first_name, from.username
+          String(from.id), from.first_name, from.username, ctx.api
         );
-        // Reply with a fresh message — no inline keyboard needed here.
         await ctx.reply(buildInfoText(user), { parse_mode: "HTML" });
       } catch (err) {
         console.error("[panel] hears:Info User error:", err);
@@ -235,9 +291,6 @@ const panelPlugin: Plugin = {
     });
 
     // ── 🛍️ Catalog (bot.hears) ───────────────────────────────────────────────
-    // Sends the catalog as a new message with an Inline Keyboard for deeper
-    // navigation. Sub-menus always live in Inline Keyboards so the persistent
-    // bottom bar stays accessible at all times.
     bot.hears("🛍️ Catalog", async (ctx) => {
       try {
         await ctx.reply(await buildCatalogText(), {
@@ -260,6 +313,34 @@ const panelPlugin: Plugin = {
       }
     });
 
+    // ── 👥 Afiliasi (bot.hears) ───────────────────────────────────────────────
+    // Forwards to the affiliate plugin via its callback
+    bot.hears("👥 Afiliasi", async (ctx) => {
+      try {
+        // Build and send affiliate dashboard inline
+        const from = ctx.from;
+        if (!from) return;
+
+        const user = await User.findOne({ telegramId: String(from.id) }).lean();
+        if (!user) {
+          await ctx.reply("⚠️ Kamu belum terdaftar. Silakan ketik /start terlebih dahulu.");
+          return;
+        }
+
+        // Redirect to /afiliasi command
+        await ctx.reply(
+          `👥 <b>Program Afiliasi</b>\n\nGunakan perintah /afiliasi untuk membuka dashboard afiliasi kamu.`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("👥 Buka Dashboard Afiliasi", "aff_home"),
+          }
+        );
+      } catch (err) {
+        console.error("[panel] hears:Afiliasi error:", err);
+        await ctx.reply("❌ Could not load affiliate info. Please try again.");
+      }
+    });
+
     // ── ❓ Help (bot.hears) ───────────────────────────────────────────────────
     bot.hears("❓ Help", async (ctx) => {
       try {
@@ -271,9 +352,6 @@ const panelPlugin: Plugin = {
     });
 
     // ── menu_catalog (callbackQuery) ──────────────────────────────────────────
-    // The smsbower plugin registers its own CB_CATALOG listener, but we keep
-    // this handler here so that any inline "Back to Catalog" button works even
-    // if the smsbower plugin isn't loaded (e.g. during development).
     bot.callbackQuery(CB_CATALOG, async (ctx) => {
       await ctx.answerCallbackQuery();
       try {
@@ -314,7 +392,7 @@ const panelPlugin: Plugin = {
     });
 
     console.log(
-      "   → /start (Reply Keyboard) | hears: 👤 Info User, 🛍️ Catalog, 💳 Topup, ❓ Help | callbackQuery: menu_catalog"
+      "   → /start /menu (deep-link ref support) | hears: 👤 Info User, 🛍️ Catalog, 💳 Topup, 👥 Afiliasi, ❓ Help | callbackQuery: menu_catalog"
     );
   },
 };

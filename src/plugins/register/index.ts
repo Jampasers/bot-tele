@@ -1,6 +1,7 @@
 import { Bot, Context } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User } from "../../models/User.js";
+import { ActivityLogService } from "../../services/activityLog.js";
 
 /**
  * 📝 Register Plugin
@@ -58,6 +59,16 @@ const registerPlugin: Plugin = {
           // `username` is optional — only store if present
           ...(from.username && { username: from.username }),
         });
+
+        // Broadcast audit log to dedicated channel
+        ActivityLogService.logUserRegistration(ctx.api, {
+          user: {
+            telegramId,
+            firstName: from.first_name,
+            username: from.username,
+          },
+          registeredVia: "/register (Command)",
+        }).catch((err) => console.error("[register] ActivityLog error:", err));
 
         await ctx.reply(
           `🎉 Registration successful!\n\n` +

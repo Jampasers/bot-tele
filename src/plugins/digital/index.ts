@@ -5,8 +5,13 @@ import { DigitalProduct } from "../../models/DigitalProduct.js";
 import { TopupSession, ITopupSession } from "../../models/TopupSession.js";
 import { DigitalProductService, ProductWithStock } from "../../services/digitalProduct.js";
 import { TestimonialService } from "../../services/testimonial.js";
+import { ActivityLogService } from "../../services/activityLog.js";
 import { generateQris, checkSessionSettlement, getUniquePaymentAmount } from "../../services/payment/index.js";
 import { CB_CATALOG, buildCatalogText, buildCatalogKeyboard } from "../panel/index.js";
+import { RestockAlert } from "../../models/RestockAlert.js";
+import { validatePromo, applyPromo } from "../../services/promo.js";
+import { awardCommission } from "../../services/affiliate.js";
+import { WarrantyService } from "../../services/warranty.js";
 
 // ============================================================================
 //  CONSTANTS & TIMINGS
@@ -24,6 +29,29 @@ interface ManualQtyState {
   page: number;
 }
 const userManualQtyState = new Map<string, ManualQtyState>();
+
+// Promo code input state
+interface PromoInputState {
+  productId: string;
+  qty: number;
+  catIdx: number;
+  page: number;
+}
+const userPromoState = new Map<string, PromoInputState>();
+
+// Active promo codes per user (validated but not yet applied)
+interface ActivePromo {
+  code: string;
+  discountAmount: number;
+  discountedPrice: number;
+}
+const userActivePromo = new Map<string, ActivePromo>();
+
+// Warranty claim input state
+interface ClaimInputState {
+  orderId: string;
+}
+const userClaimState = new Map<string, ClaimInputState>();
 
 function clearDigitalQrisPoll(orderId: string): void {
   const handle = activeDigitalQrisPolls.get(orderId);
@@ -187,15 +215,28 @@ async function buildProductDetailView(
   if (!prod) return null;
 
   const stockStatus = prod.stockCount > 0 ? `🟢 <b>${prod.stockCount} item</b> (Tersedia)` : `🔴 <b>Habis</b>`;
-  const desc = prod.description ? `\n📝 <b>Deskripsi / Garansi:</b>\n${prod.description}\n` : "";
+  const warrantyText = WarrantyService.formatWarrantyText(prod.warrantyDuration, prod.warrantyUnit, prod.maxClaims);
+  const desc = prod.description ? `\n📝 <b>Deskripsi:</b>\n${prod.description}\n` : "";
+
+  let bulkSection = "";
+  if (prod.bulkDiscounts && prod.bulkDiscounts.length > 0) {
+    bulkSection = `\n🏷️ <b>Diskon Grosir / Beli Banyak:</b>\n`;
+    for (const tier of prod.bulkDiscounts) {
+      const discPct = prod.price > 0 ? Math.round(((prod.price - tier.pricePerUnit) / prod.price) * 100) : 0;
+      const pctText = discPct > 0 ? ` <i>(Hemat ${discPct}%)</i>` : "";
+      bulkSection += `• Beli ≥ <b>${tier.minQty} item</b>: <b>${formatPrice(tier.pricePerUnit)}</b>/item${pctText}\n`;
+    }
+  }
 
   const text =
     `📦 <b>${prod.name}</b>\n` +
     `${"─".repeat(30)}\n\n` +
     `📂 <b>Kategori:</b> ${prod.category}\n` +
     `💰 <b>Harga:</b>    <b>${formatPrice(prod.price)}</b>\n` +
+    `🛡️ <b>Garansi:</b>  <b>${warrantyText}</b>\n` +
     `📊 <b>Stok:</b>     ${stockStatus}\n` +
     `🪙 <b>Saldo Anda:</b> ${formatPrice(userBalance)}\n` +
+    bulkSection +
     desc +
     `\n<i>⚡ Data item akan langsung dikirim ke chat ini setelah dibeli.</i>`;
 
@@ -205,6 +246,7 @@ async function buildProductDetailView(
     kb.text(`🛒 Beli Produk (${formatPrice(prod.price)})`, `dg_qty_${prod.id}_1_${categoryIndex}_${page}`).row();
   } else {
     kb.text("❌ Stok Sedang Habis", "dg_noop").row();
+    kb.text("🔔 Ingatkan Saat Restock", `dg_restock_${prod.id}`).row();
   }
 
   kb.text("🔙 Kembali ke Daftar", `dg_catpg_${categoryIndex}_${page}`);
@@ -236,20 +278,35 @@ async function buildQuantitySelectorView(
 
   // Safe quantity clamp: strictly positive integer between 1 and available stock
   const safeQty = Math.max(1, Math.min(prod.stockCount, Math.floor(quantity)));
-  const totalPrice = prod.price * safeQty;
+  const pricing = DigitalProductService.calculatePricing(prod, safeQty);
+  const totalPrice = pricing.totalPrice;
   const shortage = Math.max(0, totalPrice - userBalance);
+
+  let unitPriceText = `💰 <b>Harga Satuan:</b>   <b>${formatPrice(prod.price)}</b>\n`;
+  let discountLine = "";
+  if (pricing.appliedTier) {
+    unitPriceText = `💰 <b>Harga Satuan:</b>   <b>${formatPrice(pricing.unitPrice)}</b> (🎉 <i>Grosir min. ${pricing.appliedTier.minQty}x</i>)\n`;
+    discountLine = `✨ <b>Diskon Grosir:</b>  <b>-${formatPrice(pricing.discountAmount)}</b> (${pricing.discountPercent}% OFF)\n`;
+  }
+
+  let nextTierHint = "";
+  if (pricing.nextTier && pricing.nextTier.neededQty <= (prod.stockCount - safeQty)) {
+    nextTierHint = `💡 <i>Beli ${pricing.nextTier.neededQty} item lagi untuk dapat harga grosir <b>${formatPrice(pricing.nextTier.pricePerUnit)}/item</b> (-${pricing.nextTier.discountPercent}%)!</i>\n\n`;
+  }
 
   let text =
     `📦 <b>Beli Produk: ${prod.name}</b>\n` +
     `${"─".repeat(30)}\n\n` +
     `📂 <b>Kategori:</b>       ${prod.category}\n` +
-    `💰 <b>Harga Satuan:</b>   <b>${formatPrice(prod.price)}</b>\n` +
+    unitPriceText +
     `📊 <b>Stok Tersedia:</b>  <b>${prod.stockCount} item</b>\n` +
     `🪙 <b>Saldo Anda:</b>     <b>${formatPrice(userBalance)}</b>\n` +
     `${"─".repeat(30)}\n` +
     `🔢 <b>Jumlah Beli:</b>    <b>${safeQty} item</b>\n` +
+    discountLine +
     `💵 <b>Total Bayar:</b>    <b>${formatPrice(totalPrice)}</b>\n` +
-    `${"─".repeat(30)}\n\n`;
+    `${"─".repeat(30)}\n\n` +
+    nextTierHint;
 
   if (userBalance >= totalPrice) {
     text += `✅ <i>Saldo Anda mencukupi untuk pembayaran instan.</i>`;
@@ -272,29 +329,45 @@ async function buildQuantitySelectorView(
     .text("➕ 5", `dg_qset_${prod.id}_${qPlus5}_${categoryIndex}_${page}`)
     .row();
 
-  // Row 2: Quick Presets (1x, 2x, 5x, 10x, Maks)
-  const presetRow: { label: string; qty: number }[] = [];
-  presetRow.push({ label: "1x", qty: 1 });
-  if (prod.stockCount >= 2) presetRow.push({ label: "2x", qty: 2 });
-  if (prod.stockCount >= 5) presetRow.push({ label: "5x", qty: 5 });
-  if (prod.stockCount >= 10) presetRow.push({ label: "10x", qty: 10 });
-  presetRow.push({ label: `🌟 Maks (${prod.stockCount})`, qty: prod.stockCount });
-
-  for (const p of presetRow) {
-    kb.text(p.label, `dg_qset_${prod.id}_${p.qty}_${categoryIndex}_${page}`);
+  // Row 2: Quick Presets (1x, bulk tiers, Maks)
+  const presetSet = new Set<number>([1]);
+  if (prod.stockCount >= 2) presetSet.add(2);
+  if (prod.stockCount >= 5) presetSet.add(5);
+  if (prod.stockCount >= 10) presetSet.add(10);
+  if (prod.bulkDiscounts && prod.bulkDiscounts.length > 0) {
+    for (const t of prod.bulkDiscounts) {
+      if (t.minQty <= prod.stockCount) {
+        presetSet.add(t.minQty);
+      }
+    }
   }
+
+  // Pick up to 4 presets + Max
+  const sortedPresets = Array.from(presetSet).sort((a, b) => a - b).filter((q) => q < prod.stockCount);
+  const selectedPresets = sortedPresets.slice(0, 4);
+
+  for (const q of selectedPresets) {
+    const isTier = (prod.bulkDiscounts || []).some((t) => t.minQty === q);
+    const label = isTier ? `🏷️ ${q}x` : `${q}x`;
+    kb.text(label, `dg_qset_${prod.id}_${q}_${categoryIndex}_${page}`);
+  }
+  kb.text(`🌟 Maks (${prod.stockCount})`, `dg_qset_${prod.id}_${prod.stockCount}_${categoryIndex}_${page}`);
   kb.row();
 
   // Row 3: Manual Input Button
   kb.text("✏️ Ketik Jumlah Manual", `dg_qmanual_${prod.id}_${categoryIndex}_${page}`).row();
 
-  // Row 4: Confirm Purchase Button
-  kb.text(
-    `🛒 Konfirmasi Beli (${safeQty} item — ${formatPrice(totalPrice)})`,
-    `dg_confirmbuy_${prod.id}_${safeQty}_${categoryIndex}_${page}`
-  ).row();
+  // Row 4: Promo Voucher
+  kb.text("🎟️ Pakai Voucher / Kode Promo", `dg_promo_${prod.id}_${safeQty}_${categoryIndex}_${page}`).row();
 
-  // Row 5: Back to Product Detail
+  // Row 5: Confirm Purchase Button
+  const confirmLabel = pricing.discountAmount > 0
+    ? `🛒 Beli (${safeQty} item — ${formatPrice(totalPrice)} | -${pricing.discountPercent}%)`
+    : `🛒 Konfirmasi Beli (${safeQty} item — ${formatPrice(totalPrice)})`;
+
+  kb.text(confirmLabel, `dg_confirmbuy_${prod.id}_${safeQty}_${categoryIndex}_${page}`).row();
+
+  // Row 6: Back to Product Detail
   kb.text("🔙 Kembali ke Detail Produk", `dg_p_${prod.id}_${categoryIndex}_${page}`);
 
   return { text, keyboard: kb };
@@ -323,7 +396,15 @@ function startDigitalQrisPolling(
       // ── 1. Timeout Check ──────────────────────────────────────────────────
       if (Date.now() - startedAt >= QRIS_TIMEOUT_MS) {
         clearDigitalQrisPoll(orderId);
-        await TopupSession.findByIdAndUpdate(sessionId, { status: "EXPIRED" });
+        const expiredSession = await TopupSession.findByIdAndUpdate(sessionId, { status: "EXPIRED" }, { new: true });
+        if (expiredSession) {
+          ActivityLogService.logTopupCancelled(bot.api, {
+            session: expiredSession,
+            reason: "Waktu Pembayaran QRIS Habis (14 Menit)",
+            user: { telegramId },
+          }).catch((err) => console.error("[digital] ActivityLog topup expired error:", err));
+        }
+
         const expiredText =
           `⌛ <b>QRIS Kedaluwarsa</b>\n\n` +
           `QR code untuk pembayaran <b>${formatPrice(amountIDR)}</b> (${productName}) sudah tidak berlaku.\n\n` +
@@ -355,15 +436,29 @@ function startDigitalQrisPolling(
         clearDigitalQrisPoll(orderId);
 
         // Credit user balance
-        await User.findOneAndUpdate(
+        const updatedUser = await User.findOneAndUpdate(
           { telegramId },
-          { $inc: { balance: amountIDR } }
-        );
+          { $inc: { balance: amountIDR } },
+          { new: true }
+        ).lean();
 
-        await TopupSession.findByIdAndUpdate(sessionId, {
+        const settledSession = await TopupSession.findByIdAndUpdate(sessionId, {
           status: "SETTLED",
           matchedTransactionId: matchedTx.transactionId,
-        });
+        }, { new: true });
+
+        if (settledSession) {
+          ActivityLogService.logTopupSettled(bot.api, {
+            session: settledSession,
+            txId: matchedTx.transactionId,
+            user: {
+              telegramId,
+              firstName: updatedUser?.firstName,
+              username: updatedUser?.username,
+            },
+            newBalance: updatedUser?.balance,
+          }).catch((err) => console.error("[digital] ActivityLog topup settled error:", err));
+        }
 
         // Notify payment received
         try {
@@ -390,6 +485,9 @@ function startDigitalQrisPolling(
 
         if (result.success) {
           const qtyText = result.quantity > 1 ? ` (${result.quantity} item)` : "";
+          const delivNote = result.deliveryMessage
+            ? `💬 <b>Catatan Pengiriman:</b>\n${result.deliveryMessage}\n\n`
+            : "";
           const successCaption =
             `🎉 <b>Pembelian Berhasil & Lunas!</b>\n` +
             `${"─".repeat(30)}\n\n` +
@@ -400,10 +498,21 @@ function startDigitalQrisPolling(
             `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
             `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
             `<code>${result.itemContent}</code>\n\n` +
+            delivNote +
             `⚠️ <i>Harap simpan data di atas. Kamu juga bisa melihatnya kapan saja di menu Riwayat Pesanan.</i>`;
 
-          const kb = new InlineKeyboard()
-            .text("📜 Riwayat Pesanan", "dg_myorders")
+          const hasWarranty = Boolean(
+            result.order.warrantyDuration &&
+            result.order.warrantyDuration > 0 &&
+            result.order.warrantyExpiresAt &&
+            new Date() < result.order.warrantyExpiresAt
+          );
+
+          const kb = new InlineKeyboard();
+          if (hasWarranty) {
+            kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
+          }
+          kb.text("📜 Riwayat Pesanan", "dg_myorders")
             .row()
             .text("🛍️ Belanja Lagi", "product_digital");
 
@@ -429,6 +538,23 @@ function startDigitalQrisPolling(
             },
             date: result.order.createdAt,
           }).catch((err) => console.error("[digital] Testimonial broadcast error:", err));
+
+          // Broadcast audit log to dedicated channel
+          ActivityLogService.logDigitalPurchase(bot.api, {
+            orderId: result.order.orderId,
+            productName: result.productName,
+            category: prod?.category,
+            quantity: result.quantity,
+            totalPrice: result.price,
+            method: "QRIS INSTAN",
+            buyer: {
+              telegramId,
+              firstName: user?.firstName,
+              username: user?.username,
+            },
+            remainingBalance: user?.balance,
+            date: result.order.createdAt,
+          }).catch((err) => console.error("[digital] ActivityLog digital purchase error:", err));
         } else {
           // If stock ran out while paying, user's balance is safely credited!
           const outOfStockMsg =
@@ -506,11 +632,16 @@ const digitalPlugin: Plugin = {
 
         for (const ord of orders) {
           const qtyText = ord.quantity && ord.quantity > 1 ? ` (x${ord.quantity})` : "";
+          const delivNote = ord.deliveryMessage
+            ? `💬 <i>Catatan: ${ord.deliveryMessage}</i>\n`
+            : "";
           msg +=
             `📦 <b>${ord.productName}</b>${qtyText}\n` +
             `🆔 <code>${ord.orderId}</code> | ${formatPrice(ord.price)}\n` +
             `📅 ${formatDate(ord.createdAt)}\n` +
-            `🔑 <code>${ord.itemContent}</code>\n\n`;
+            `🔑 <code>${ord.itemContent}</code>\n` +
+            delivNote +
+            `\n`;
         }
 
         await ctx.reply(msg, {
@@ -754,10 +885,32 @@ const digitalPlugin: Plugin = {
         return;
       }
 
-      const totalPrice = product.price * rawQty;
+      const pricing = DigitalProductService.calculatePricing(product, rawQty);
+      const totalPrice = pricing.totalPrice;
 
       // ── Scenario A: Sufficient Balance → Instant Purchase ──────────────────
       if (currentBalance >= totalPrice) {
+        // Check for active promo
+        const activePromo = userActivePromo.get(telegramId);
+        let effectiveTotalPrice = totalPrice;
+        let promoApplied: ActivePromo | null = null;
+
+        if (activePromo) {
+          // Re-validate promo at purchase time
+          const validation = await validatePromo(activePromo.code, telegramId, totalPrice);
+          if (validation.valid) {
+            effectiveTotalPrice = validation.discountedPrice;
+            promoApplied = {
+              code: activePromo.code,
+              discountAmount: validation.discountAmount,
+              discountedPrice: validation.discountedPrice,
+            };
+          } else {
+            userActivePromo.delete(telegramId);
+          }
+        }
+
+        if (currentBalance >= effectiveTotalPrice) {
         await safeEditOrReply(
           ctx,
           `⏳ <b>Memproses pesanan…</b>\n\n` +
@@ -770,57 +923,107 @@ const digitalPlugin: Plugin = {
 
         const result = await DigitalProductService.purchaseProduct(productId, telegramId, rawQty);
 
-        if (result.success) {
-          const qtyText = result.quantity > 1 ? ` (${result.quantity} item)` : "";
-          const successMsg =
-            `🎉 <b>Pembelian Berhasil!</b>\n` +
-            `${"─".repeat(30)}\n\n` +
-            `📦 <b>Produk:</b> ${result.productName}${qtyText}\n` +
-            `🔢 <b>Jumlah:</b> ${result.quantity} item\n` +
-            `🆔 <b>Order ID:</b> <code>${result.order.orderId}</code>\n` +
-            `💰 <b>Total Bayar:</b> ${formatPrice(result.price)}\n` +
-            `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
-            `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
-            `<code>${result.itemContent}</code>\n\n` +
-            `⚠️ <i>Harap simpan data di atas. Data pesanan juga dapat diakses melalui tombol di bawah.</i>`;
-
-          const kb = new InlineKeyboard()
-            .text("📜 Riwayat Pesanan", "dg_myorders")
-            .row()
-            .text("🛍️ Belanja Lagi", `dg_catpg_${catIdx}_${page}`);
-
-          await safeEditOrReply(ctx, successMsg, {
-            parse_mode: "HTML",
-            reply_markup: kb,
-          });
-
-          // Broadcast testimonial to channel
-          TestimonialService.sendDigitalPurchaseTestimonial(ctx.api, {
-            orderId: result.order.orderId,
-            productName: result.productName,
-            category: product.category,
-            quantity: result.quantity,
-            totalPrice: result.price,
-            method: "SALDO AKUN",
-            buyer: {
-              telegramId,
-              firstName: ctx.from?.first_name,
-              username: ctx.from?.username,
-            },
-            date: result.order.createdAt,
-          }).catch((err) => console.error("[digital] Testimonial broadcast error:", err));
-        } else {
-          await safeEditOrReply(
-            ctx,
-            `❌ <b>Gagal Menyelesaikan Pembelian</b>\n\n` +
-            `<i>${result.message}</i>`,
-            {
-              parse_mode: "HTML",
-              reply_markup: new InlineKeyboard().text("🔙 Kembali", `dg_catpg_${catIdx}_${page}`),
+          if (result.success) {
+            // Apply promo (mark as used) if applicable
+            if (promoApplied) {
+              await applyPromo(promoApplied.code, telegramId);
+              userActivePromo.delete(telegramId);
             }
-          );
+
+            const qtyText = result.quantity > 1 ? ` (${result.quantity} item)` : "";
+            const bulkDiscountLine = pricing.discountAmount > 0
+              ? `🏷️ <b>Diskon Grosir:</b> -${formatPrice(pricing.discountAmount)} (${pricing.discountPercent}% OFF)\n`
+              : "";
+            const promoLine = promoApplied
+              ? `🎟️ <b>Diskon Promo:</b> -${formatPrice(promoApplied.discountAmount)} (<code>${promoApplied.code}</code>)\n`
+              : "";
+            const delivNote = result.deliveryMessage
+              ? `💬 <b>Catatan Pengiriman:</b>\n${result.deliveryMessage}\n\n`
+              : "";
+            const successMsg =
+              `🎉 <b>Pembelian Berhasil!</b>\n` +
+              `${"─".repeat(30)}\n\n` +
+              `📦 <b>Produk:</b> ${result.productName}${qtyText}\n` +
+              `🔢 <b>Jumlah:</b> ${result.quantity} item\n` +
+              `🆔 <b>Order ID:</b> <code>${result.order.orderId}</code>\n` +
+              bulkDiscountLine +
+              promoLine +
+              `💰 <b>Total Bayar:</b> ${formatPrice(result.price)}\n` +
+              `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
+              `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
+              `<code>${result.itemContent}</code>\n\n` +
+              delivNote +
+              `⚠️ <i>Harap simpan data di atas. Data pesanan juga dapat diakses melalui tombol di bawah.</i>`;
+
+            const hasWarranty = Boolean(
+              result.order.warrantyDuration &&
+              result.order.warrantyDuration > 0 &&
+              result.order.warrantyExpiresAt &&
+              new Date() < result.order.warrantyExpiresAt
+            );
+
+            const kb = new InlineKeyboard();
+            if (hasWarranty) {
+              kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
+            }
+            kb.text("📜 Riwayat Pesanan", "dg_myorders")
+              .row()
+              .text("🛍️ Belanja Lagi", `dg_catpg_${catIdx}_${page}`);
+
+            await safeEditOrReply(ctx, successMsg, {
+              parse_mode: "HTML",
+              reply_markup: kb,
+            });
+
+            // Affiliate commission
+            awardCommission(telegramId, result.price, "DIGITAL_PURCHASE", result.order.orderId)
+              .catch((err) => console.error("[digital] affiliate commission error:", err));
+
+            // Broadcast testimonial to channel
+            TestimonialService.sendDigitalPurchaseTestimonial(ctx.api, {
+              orderId: result.order.orderId,
+              productName: result.productName,
+              category: product.category,
+              quantity: result.quantity,
+              totalPrice: result.price,
+              method: "SALDO AKUN",
+              buyer: {
+                telegramId,
+                firstName: ctx.from?.first_name,
+                username: ctx.from?.username,
+              },
+              date: result.order.createdAt,
+            }).catch((err) => console.error("[digital] Testimonial broadcast error:", err));
+
+            // Broadcast audit log to dedicated channel
+            ActivityLogService.logDigitalPurchase(ctx.api, {
+              orderId: result.order.orderId,
+              productName: result.productName,
+              category: product.category,
+              quantity: result.quantity,
+              totalPrice: result.price,
+              method: "SALDO AKUN",
+              buyer: {
+                telegramId,
+                firstName: ctx.from?.first_name,
+                username: ctx.from?.username,
+              },
+              remainingBalance: Math.max(0, currentBalance - result.price),
+              date: result.order.createdAt,
+            }).catch((err) => console.error("[digital] ActivityLog digital purchase error:", err));
+          } else {
+            await safeEditOrReply(
+              ctx,
+              `❌ <b>Gagal Menyelesaikan Pembelian</b>\n\n` +
+              `<i>${result.message}</i>`,
+              {
+                parse_mode: "HTML",
+                reply_markup: new InlineKeyboard().text("🔙 Kembali", `dg_catpg_${catIdx}_${page}`),
+              }
+            );
+          }
+          return;
         }
-        return;
       }
 
       // ── Scenario B: Insufficient Balance → Generate QRIS GoPay ─────────────
@@ -852,12 +1055,28 @@ const digitalPlugin: Plugin = {
           status: "PENDING",
         });
 
+        // Broadcast audit log: Topup created
+        ActivityLogService.logTopupCreated(ctx.api, {
+          session,
+          user: {
+            telegramId,
+            firstName: ctx.from?.first_name,
+            username: ctx.from?.username,
+          },
+        }).catch((err) => console.error("[digital] ActivityLog topup created error:", err));
+
+        const bulkDiscountLine = pricing.discountAmount > 0
+          ? `🏷️ <b>Total Normal:</b>       <s>${formatPrice(pricing.normalTotalPrice)}</s>\n` +
+            `✨ <b>Diskon Grosir:</b>      -${formatPrice(pricing.discountAmount)} (${pricing.discountPercent}% OFF)\n`
+          : "";
+
         const caption =
           `💳 <b>Pembayaran QRIS — GoPay</b>\n` +
           `${"─".repeat(30)}\n\n` +
           `Saldo kamu kurang! Silakan scan QRIS di atas untuk menyelesaikan pembelian:\n` +
           `📦 <b>${product.name}</b> (<b>${rawQty} item</b>)\n\n` +
           `💰 <b>Saldo kamu saat ini:</b> ${formatPrice(currentBalance)}\n` +
+          bulkDiscountLine +
           `🏷️ <b>Total harga (${rawQty}x):</b>   ${formatPrice(totalPrice)}\n` +
           `📉 <b>Kekurangan saldo:</b>    ${formatPrice(baseAmount)}\n` +
           `🔢 <b>Kode Unik:</b>           +${formatPrice(uniqueCode)}\n` +
@@ -911,6 +1130,84 @@ const digitalPlugin: Plugin = {
       }
     });
 
+    // ── dg_restock_<productId> — Subscribe to restock alert ──────────────────
+    bot.callbackQuery(/^dg_restock_([a-f0-9]+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const chatId = String(ctx.chat?.id ?? from.id);
+      const productId = ctx.match[1]!;
+
+      try {
+        const prod = await DigitalProductService.getProductWithStock(productId);
+        if (!prod) {
+          await ctx.answerCallbackQuery({ text: "⚠️ Produk tidak ditemukan.", show_alert: true });
+          return;
+        }
+
+        // Upsert: won't throw if already exists (unique index)
+        try {
+          await RestockAlert.create({ productId, userId: telegramId, chatId });
+          await ctx.reply(
+            `🔔 <b>Notifikasi Restock Diaktifkan!</b>\n\n` +
+            `Kamu akan diberitahu segera ketika <b>${prod.name}</b> kembali tersedia.`,
+            { parse_mode: "HTML" }
+          );
+        } catch (err: any) {
+          if (err?.code === 11000) {
+            // Already subscribed (duplicate key)
+            await ctx.reply(
+              `ℹ️ Kamu sudah terdaftar untuk notifikasi restock produk <b>${prod.name}</b>.`,
+              { parse_mode: "HTML" }
+            );
+          } else {
+            throw err;
+          }
+        }
+      } catch (err) {
+        console.error("[digital] dg_restock error:", err);
+        await ctx.reply("❌ Gagal mendaftar notifikasi restock. Coba lagi.");
+      }
+    });
+
+    // ── dg_promo_<productId>_<qty>_<catIdx>_<page> — Prompt promo code input ─
+    bot.callbackQuery(/^dg_promo_([a-f0-9]+)_(\d+)_(\d+)_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+
+      const productId = ctx.match[1]!;
+      const qty = parseInt(ctx.match[2]!, 10);
+      const catIdx = parseInt(ctx.match[3]!, 10);
+      const page = parseInt(ctx.match[4]!, 10);
+
+      const prod = await DigitalProductService.getProductWithStock(productId);
+      if (!prod) {
+        await ctx.answerCallbackQuery({ text: "⚠️ Produk tidak ditemukan.", show_alert: true });
+        return;
+      }
+
+      userPromoState.set(telegramId, { productId, qty, catIdx, page });
+      userManualQtyState.delete(telegramId);
+
+      const pricing = DigitalProductService.calculatePricing(prod, qty);
+      const totalPrice = pricing.totalPrice;
+      const kb = new InlineKeyboard().text("❌ Batal", `dg_qty_${productId}_${qty}_${catIdx}_${page}`);
+
+      await safeEditOrReply(ctx, 
+        `🎟️ <b>Masukkan Kode Promo / Voucher</b>\n` +
+        `${"─".repeat(30)}\n\n` +
+        `📦 <b>Produk:</b> ${prod.name} (${qty}x)\n` +
+        `💰 <b>Total Sebelum Diskon:</b> ${formatPrice(totalPrice)}\n\n` +
+        `Ketik kode promo kamu di bawah ini:\n\n` +
+        `<i>Contoh: <code>HEMAT50</code> atau <code>DISKON10</code></i>\n` +
+        `<i>Ketik /batal untuk membatalkan.</i>`,
+        { parse_mode: "HTML", reply_markup: kb }
+      );
+    });
+
     // ── dg_chk_<sessionId> — Manual payment check ──────────────────────────
     bot.callbackQuery(/^(?:dg_chk_|dg_chkpay_)(.+)$/, async (ctx) => {
       await ctx.answerCallbackQuery({ text: "🔄 Mengecek mutasi pembayaran GoPay…" });
@@ -948,15 +1245,29 @@ const digitalPlugin: Plugin = {
         // Settled manually
         clearDigitalQrisPoll(session.orderId);
 
-        await User.findOneAndUpdate(
+        const updatedUser = await User.findOneAndUpdate(
           { telegramId },
-          { $inc: { balance: session.amountIDR } }
-        );
+          { $inc: { balance: session.amountIDR } },
+          { new: true }
+        ).lean();
 
-        await TopupSession.findByIdAndUpdate(session._id, {
+        const settledSession = await TopupSession.findByIdAndUpdate(session._id, {
           status: "SETTLED",
           matchedTransactionId: matchedTx.transactionId,
-        });
+        }, { new: true });
+
+        if (settledSession) {
+          ActivityLogService.logTopupSettled(ctx.api, {
+            session: settledSession,
+            txId: matchedTx.transactionId,
+            user: {
+              telegramId,
+              firstName: updatedUser?.firstName || ctx.from?.first_name,
+              username: updatedUser?.username || ctx.from?.username,
+            },
+            newBalance: updatedUser?.balance,
+          }).catch((err) => console.error("[digital] ActivityLog topup settled error:", err));
+        }
 
         const productId = session.pendingDigitalProductId;
         const quantity = session.pendingQuantity || 1;
@@ -964,6 +1275,9 @@ const digitalPlugin: Plugin = {
           const result = await DigitalProductService.purchaseProduct(productId, telegramId, quantity);
           if (result.success) {
             const qtyText = result.quantity > 1 ? ` (${result.quantity} item)` : "";
+            const delivNote = result.deliveryMessage
+              ? `💬 <b>Catatan Pengiriman:</b>\n${result.deliveryMessage}\n\n`
+              : "";
             const successCaption =
               `🎉 <b>Pembelian Berhasil & Lunas!</b>\n` +
               `${"─".repeat(30)}\n\n` +
@@ -974,11 +1288,27 @@ const digitalPlugin: Plugin = {
               `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
               `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
               `<code>${result.itemContent}</code>\n\n` +
+              delivNote +
               `⚠️ <i>Harap simpan data di atas.</i>`;
+
+            const hasWarranty = Boolean(
+              result.order.warrantyDuration &&
+              result.order.warrantyDuration > 0 &&
+              result.order.warrantyExpiresAt &&
+              new Date() < result.order.warrantyExpiresAt
+            );
+
+            const kb = new InlineKeyboard();
+            if (hasWarranty) {
+              kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
+            }
+            kb.text("📜 Riwayat Pesanan", "dg_myorders")
+              .row()
+              .text("🛍️ Belanja Lagi", "product_digital");
 
             await ctx.reply(successCaption, {
               parse_mode: "HTML",
-              reply_markup: new InlineKeyboard().text("📜 Riwayat Pesanan", "dg_myorders"),
+              reply_markup: kb,
             });
 
             // Broadcast testimonial to channel
@@ -998,6 +1328,23 @@ const digitalPlugin: Plugin = {
               },
               date: result.order.createdAt,
             }).catch((err) => console.error("[digital] Testimonial broadcast error:", err));
+
+            // Broadcast audit log to dedicated channel
+            ActivityLogService.logDigitalPurchase(ctx.api, {
+              orderId: result.order.orderId,
+              productName: result.productName,
+              category: prod?.category,
+              quantity: result.quantity,
+              totalPrice: result.price,
+              method: "QRIS INSTAN (Manual Check)",
+              buyer: {
+                telegramId,
+                firstName: user?.firstName || ctx.from?.first_name,
+                username: user?.username || ctx.from?.username,
+              },
+              remainingBalance: user?.balance,
+              date: result.order.createdAt,
+            }).catch((err) => console.error("[digital] ActivityLog digital purchase error:", err));
 
             return;
           }
@@ -1027,7 +1374,18 @@ const digitalPlugin: Plugin = {
 
         if (session) {
           clearDigitalQrisPoll(session.orderId);
-          await TopupSession.findByIdAndUpdate(session._id, { status: "CANCELLED" });
+          const cancelledSession = await TopupSession.findByIdAndUpdate(session._id, { status: "CANCELLED" }, { new: true });
+          if (cancelledSession) {
+            ActivityLogService.logTopupCancelled(ctx.api, {
+              session: cancelledSession,
+              reason: "Dibatalkan oleh Pengguna",
+              user: {
+                telegramId: String(ctx.from?.id),
+                firstName: ctx.from?.first_name,
+                username: ctx.from?.username,
+              },
+            }).catch((err) => console.error("[digital] ActivityLog topup cancel error:", err));
+          }
         }
 
         try { await ctx.deleteMessage(); } catch { /* ignore */ }
@@ -1083,25 +1441,110 @@ const digitalPlugin: Plugin = {
           `📜 <b>Riwayat Pembelian Produk Digital (${orders.length} terakhir)</b>\n` +
           `${"─".repeat(30)}\n\n`;
 
+        const kb = new InlineKeyboard();
+        const claimableOrders: string[] = [];
+
         for (const ord of orders) {
           const qtyText = ord.quantity && ord.quantity > 1 ? ` (x${ord.quantity})` : "";
+          const delivNote = ord.deliveryMessage
+            ? `💬 <i>Catatan: ${ord.deliveryMessage}</i>\n`
+            : "";
+
+          const wStatus = WarrantyService.checkOrderWarrantyStatus(ord);
+          let warrantyLine = "";
+          if (wStatus.hasWarranty) {
+            if (wStatus.isExpired) {
+              warrantyLine = `🛡️ <b>Garansi:</b> <s>Expired (${wStatus.expiresAt ? formatDate(wStatus.expiresAt) : "—"})</s>\n`;
+            } else if (wStatus.claimsCount >= wStatus.maxClaims) {
+              warrantyLine = `🛡️ <b>Garansi:</b> Habis (${wStatus.claimsCount}/${wStatus.maxClaims}x klaim)\n`;
+            } else {
+              warrantyLine = `🛡️ <b>Garansi:</b> Aktif s/d ${wStatus.expiresAt ? formatDate(wStatus.expiresAt) : "—"} (${wStatus.claimsCount}/${wStatus.maxClaims}x klaim)\n`;
+              if (!claimableOrders.includes(ord.orderId)) {
+                claimableOrders.push(ord.orderId);
+                kb.text(`🛡️ Klaim: ${ord.productName.slice(0, 18)} (${ord.orderId.slice(-6)})`, `dg_claim_${ord.orderId}`).row();
+              }
+            }
+          }
+
           msg +=
             `📦 <b>${ord.productName}</b>${qtyText}\n` +
             `🆔 <code>${ord.orderId}</code> | ${formatPrice(ord.price)}\n` +
             `📅 ${formatDate(ord.createdAt)}\n` +
-            `🔑 <code>${ord.itemContent}</code>\n\n`;
+            warrantyLine +
+            `🔑 <code>${ord.itemContent}</code>\n` +
+            delivNote +
+            `\n`;
         }
+
+        kb.text("🛍️ Beli Produk", "product_digital")
+          .row()
+          .text("🔙 Kembali", CB_CATALOG);
 
         await safeEditOrReply(ctx, msg, {
           parse_mode: "HTML",
-          reply_markup: new InlineKeyboard()
-            .text("🛍️ Beli Produk", "product_digital")
-            .row()
-            .text("🔙 Kembali", CB_CATALOG),
+          reply_markup: kb,
         });
       } catch (err) {
         console.error("[digital] dg_myorders error:", err);
       }
+    });
+
+    // ── dg_claim_* — User initiates warranty claim ───────────────────────────
+    bot.callbackQuery(/^dg_claim_(.+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+
+      const orderId = ctx.match[1];
+      if (!orderId) return;
+      const check = await WarrantyService.validateClaimEligibility(orderId, String(from.id));
+      if (!check.eligible || !check.order) {
+        await safeEditOrReply(
+          ctx,
+          `⚠️ <b>Tidak Dapat Mengajukan Klaim</b>\n` +
+          `${"─".repeat(30)}\n\n` +
+          `${check.reason || "Pesanan ini tidak memenuhi syarat garansi."}`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("📜 Kembali ke Riwayat", "dg_myorders"),
+          }
+        );
+        return;
+      }
+
+      const ord = check.order;
+      userClaimState.set(String(from.id), { orderId: ord.orderId });
+
+      const expDate = ord.warrantyExpiresAt ? formatDate(ord.warrantyExpiresAt) : "—";
+      const claimIdx = (ord.claimsCount || 0) + 1;
+      const maxClm = ord.maxClaims ?? 1;
+
+      await safeEditOrReply(
+        ctx,
+        `🛡️ <b>Formulir Pengajuan Klaim Garansi</b>\n` +
+        `${"─".repeat(30)}\n\n` +
+        `📦 <b>Produk:</b> <b>${ord.productName}</b>\n` +
+        `🆔 <b>Order ID:</b> <code>${ord.orderId}</code>\n` +
+        `📅 <b>Garansi Berlaku S/d:</b> ${expDate}\n` +
+        `🔢 <b>Pengajuan Klaim ke:</b> ${claimIdx} dari maks. ${maxClm}x\n\n` +
+        `💬 <b>Petunjuk:</b>\n` +
+        `Silakan <b>ketikkan deskripsi / keluhan kendala</b> yang kamu alami pada chat ini sekarang.\n\n` +
+        `<i>(Ketik /batal atau klik tombol di bawah untuk membatalkan)</i>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("❌ Batal Klaim", "dg_claim_cancel"),
+        }
+      );
+    });
+
+    // ── dg_claim_cancel — Cancel claim filing ────────────────────────────────
+    bot.callbackQuery("dg_claim_cancel", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      if (ctx.from) userClaimState.delete(String(ctx.from.id));
+      await safeEditOrReply(ctx, "❌ Pengajuan klaim garansi dibatalkan.", {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("📜 Riwayat Pesanan", "dg_myorders"),
+      });
     });
 
     // ── dg_noop ─────────────────────────────────────────────────────────────
@@ -1109,16 +1552,129 @@ const digitalPlugin: Plugin = {
       await ctx.answerCallbackQuery();
     });
 
-    // ── Text message handler for interactive manual quantity input ──────────
+    // ── Text message handler for interactive inputs (Claim, Promo, Manual Qty) ─
     bot.on("message:text", async (ctx, next) => {
       const from = ctx.from;
       if (!from) return next();
 
       const telegramId = String(from.id);
+      const rawText = ctx.message.text.trim();
+
+      // ── Warranty Claim Input Handler ──────────────────────────────────────
+      const claimState = userClaimState.get(telegramId);
+      if (claimState) {
+        if (rawText === "/batal" || rawText === "/cancel" || rawText.toLowerCase() === "batal") {
+          userClaimState.delete(telegramId);
+          await ctx.reply("❌ Pengajuan klaim garansi dibatalkan.", {
+            reply_markup: new InlineKeyboard().text("📜 Riwayat Pesanan", "dg_myorders"),
+          });
+          return;
+        }
+
+        if (rawText.startsWith("/")) {
+          userClaimState.delete(telegramId);
+          return next();
+        }
+
+        userClaimState.delete(telegramId);
+        const claimRes = await WarrantyService.createClaim({
+          orderId: claimState.orderId,
+          userId: telegramId,
+          userHandle: from.username || from.first_name,
+          reason: rawText,
+          api: ctx.api,
+        });
+
+        if (!claimRes.success || !claimRes.claim) {
+          await ctx.reply(`❌ <b>Gagal Mengajukan Klaim:</b>\n${claimRes.message}`, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("📜 Riwayat Pesanan", "dg_myorders"),
+          });
+          return;
+        }
+
+        await ctx.reply(
+          `✅ <b>Tiket Klaim Garansi Berhasil Diajukan!</b>\n` +
+          `${"─".repeat(30)}\n\n` +
+          `🎫 <b>ID Tiket:</b> <code>${claimRes.claim.claimId}</code>\n` +
+          `📦 <b>Order ID:</b> <code>${claimRes.claim.orderId}</code>\n` +
+          `🏷️ <b>Produk:</b> <b>${claimRes.claim.productName}</b>\n\n` +
+          `📝 <b>Keluhan Kamu:</b>\n<i>${claimRes.claim.reason}</i>\n\n` +
+          `<i>Tiket kamu telah diteruskan ke admin untuk ditinjau. Kamu akan menerima notifikasi otomatis di chat ini segera setelah admin memberikan keputusan (Ganti Stok / Refund).</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard()
+              .text("📜 Riwayat Pesanan", "dg_myorders")
+              .row()
+              .text("🛍️ Menu Utama", "product_digital"),
+          }
+        );
+        return;
+      }
+
+      // ── Promo code input ─────────────────────────────────────────────────
+      const promoState = userPromoState.get(telegramId);
+      if (promoState) {
+        // Handle cancel
+        if (rawText === "/batal" || rawText === "/cancel" || rawText.toLowerCase() === "batal") {
+          userPromoState.delete(telegramId);
+          const user = await User.findOne({ telegramId }).lean();
+          const balance = user?.balance ?? 0;
+          const view = await buildQuantitySelectorView(promoState.productId, balance, promoState.qty, promoState.catIdx, promoState.page);
+          await ctx.reply("❌ Input promo dibatalkan.");
+          if (view) await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+          return;
+        }
+
+        if (rawText.startsWith("/")) {
+          userPromoState.delete(telegramId);
+          return next();
+        }
+
+        const prod = await DigitalProductService.getProductWithStock(promoState.productId);
+        if (!prod) {
+          userPromoState.delete(telegramId);
+          await ctx.reply("⚠️ Produk sudah tidak tersedia.");
+          return;
+        }
+
+        const pricing = DigitalProductService.calculatePricing(prod, promoState.qty);
+        const totalPrice = pricing.totalPrice;
+        const validation = await validatePromo(rawText, telegramId, totalPrice);
+
+        if (!validation.valid) {
+          await ctx.reply(
+            `${validation.message}\n\n<i>Ketik kode lain atau /batal untuk membatalkan.</i>`,
+            { parse_mode: "HTML" }
+          );
+          return;
+        }
+
+        // Valid promo — save it and show updated quantity selector
+        userActivePromo.set(telegramId, {
+          code: rawText.trim().toUpperCase(),
+          discountAmount: validation.discountAmount,
+          discountedPrice: validation.discountedPrice,
+        });
+        userPromoState.delete(telegramId);
+
+        const user = await User.findOne({ telegramId }).lean();
+        const balance = user?.balance ?? 0;
+        const view = await buildQuantitySelectorView(promoState.productId, balance, promoState.qty, promoState.catIdx, promoState.page);
+
+        await ctx.reply(
+          `${validation.message}\n` +
+          `💵 <b>Harga Setelah Diskon:</b> ${formatPrice(validation.discountedPrice)}\n\n` +
+          `<i>Diskon otomatis diterapkan saat konfirmasi pembelian.</i>`,
+          { parse_mode: "HTML" }
+        );
+        if (view) await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+        return;
+      }
+
+      // ── Manual qty input ─────────────────────────────────────────────────
       const state = userManualQtyState.get(telegramId);
       if (!state) return next();
-
-      const rawText = ctx.message.text.trim();
 
       // Handle cancel command
       if (
