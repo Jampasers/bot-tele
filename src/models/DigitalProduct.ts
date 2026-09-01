@@ -6,6 +6,8 @@ import { Schema, model, Model, Document, Types } from "mongoose";
 
 export type WarrantyUnit = "HOURS" | "DAYS" | "WEEKS" | "MONTHS" | "NONE";
 
+export type DeliveryType = "CREDENTIAL" | "FILE" | "DYNAMIC_API" | "MANUAL_PREORDER";
+
 export interface IBulkDiscountTier {
   /** Minimum quantity to activate this wholesale tier (e.g. 5, 10, 50) */
   minQty: number;
@@ -29,6 +31,21 @@ export interface IDigitalProduct {
 
   /** Wholesale / bulk discount tiers (sorted ascending by minQty) */
   bulkDiscounts?: IBulkDiscountTier[] | undefined;
+
+  /** Multi-format delivery mechanism */
+  deliveryType?: DeliveryType | undefined;
+
+  /** Telegram File ID if deliveryType is FILE */
+  fileId?: string | undefined;
+
+  /** External document/file download URL or local path if deliveryType is FILE */
+  fileUrl?: string | undefined;
+
+  /** Webhook or external generator API URL if deliveryType is DYNAMIC_API */
+  webhookUrl?: string | undefined;
+
+  /** Optional custom headers / API key object for DYNAMIC_API webhook */
+  apiHeader?: Record<string, string> | undefined;
 
   /** Whether the product is currently visible and purchasable in the catalog */
   isActive: boolean;
@@ -103,6 +120,27 @@ const digitalProductSchema = new Schema<IDigitalProduct>(
         },
       ],
       default: [],
+    },
+    deliveryType: {
+      type: String,
+      enum: ["CREDENTIAL", "FILE", "DYNAMIC_API", "MANUAL_PREORDER"],
+      default: "CREDENTIAL",
+      index: true,
+    },
+    fileId: {
+      type: String,
+      trim: true,
+    },
+    fileUrl: {
+      type: String,
+      trim: true,
+    },
+    webhookUrl: {
+      type: String,
+      trim: true,
+    },
+    apiHeader: {
+      type: Schema.Types.Mixed,
     },
     isActive: {
       type: Boolean,

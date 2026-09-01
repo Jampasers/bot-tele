@@ -26,6 +26,9 @@ import { clearMaintenanceCache } from "../../middlewares/maintenance.js";
 import { CurrencyService } from "../../services/currency.js";
 import { ImapOtpService } from "../../services/imapOtp.js";
 import { CloudflareService } from "../../services/cloudflare.js";
+import { AntiFraudService } from "../../services/antiFraudService.js";
+import { FraudLog } from "../../models/FraudLog.js";
+import { clearUserBanCache } from "../../middlewares/antiFraud.js";
 import { isAdmin } from "../../core/admin.js";
 
 // ============================================================================
@@ -186,6 +189,8 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .row()
     .text("📦 Kelola Produk Digital & Stok", "dga_home")
     .row()
+    .text("🛡️ Anti-Fraud & Security Monitor", "adm_antifraud")
+    .row()
     .text("🔧 Mode Maintenance", "adm_maintenance")
     .row()
     .text("💳 Manajemen Saldo User", "adm_balance_menu")
@@ -196,6 +201,55 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .row()
     .text("🖴 Backup Database", "adm_backup")
     .text("♻️ Rollback Database", "adm_rollback");
+}
+
+// ── Anti-Fraud & Security Guard UI Builders ──────────────────────────────────
+
+async function buildAntiFraudText(): Promise<string> {
+  const config = await BotConfig.getOrCreate();
+  const secStatus = config.securityAlertChannelEnabled && config.securityAlertChannel
+    ? `🟢 Aktif (<code>${config.securityAlertChannel}</code>)`
+    : config.securityAlertChannel
+    ? `🔴 Nonaktif (<code>${config.securityAlertChannel}</code>)`
+    : "⚪ Belum dikonfigurasi";
+
+  const totalFraudLogs = await FraudLog.countDocuments();
+  const unresolvedFraudLogs = await FraudLog.countDocuments({ resolved: false });
+  const bannedUsersCount = await User.countDocuments({ $or: [{ isBanned: true }, { accountStatus: "BANNED" }] });
+  const reviewUsersCount = await User.countDocuments({ accountStatus: "UNDER_REVIEW" });
+
+  return (
+    `🛡️ <b>Anti-Fraud & Security Monitor</b>\n` +
+    `${"─".repeat(34)}\n\n` +
+    `📢 <b>Security Alert Channel:</b> ${secStatus}\n\n` +
+    `📊 <b>Ringkasan Keamanan:</b>\n` +
+    `• Total Kejadian Fraud: <b>${totalFraudLogs}</b> log\n` +
+    `• Perlu Ditinjau (Unresolved): <b>${unresolvedFraudLogs}</b> kasus\n` +
+    `• User Status UNDER_REVIEW: <b>${reviewUsersCount}</b> user\n` +
+    `• User Dibanned: <b>${bannedUsersCount}</b> user\n\n` +
+    `⚙️ <b>Ambang Batas Keamanan Aktif:</b>\n` +
+    `• Payment Idempotency TTL: <b>48 Jam</b> (MD5 Replay Guard)\n` +
+    `• Maks. Klaim Garansi: <b>${config.maxWarrantyClaimsPerDay || 3}x / 24 Jam</b> (Maks Rasio: ${config.maxWarrantyClaimRatioPercent || 50}%)\n` +
+    `• Brute-Force Promo: <b>${config.maxPromoFailedAttempts || 5}x Gagal</b> (Lock: ${config.promoBlockDurationMinutes || 60} menit)\n` +
+    `• Velocity Limiter: <b>${config.velocityMaxActionsPerSecond || 5} req/detik</b>\n\n` +
+    `⚡ <b>Quick Commands:</b>\n` +
+    `• <code>/fraudlogs</code> — Lihat 10 log aktivitas fraud terbaru\n` +
+    `• <code>/banned</code> — Daftar user yang sedang dibanned\n` +
+    `• <code>/ban &lt;userId&gt; [alasan]</code> — Blokir user secara manual\n` +
+    `• <code>/unban &lt;userId&gt;</code> — Buka blokir user`
+  );
+}
+
+function buildAntiFraudKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("📜 10 Log Fraud Terbaru", "adm_fraud_logs")
+    .row()
+    .text("⚠️ User Under Review", "adm_review_users")
+    .text("🚫 Daftar User Banned", "adm_banned_users")
+    .row()
+    .text("🔔 Toggle Security Channel", "adm_toggle_sec_chan")
+    .row()
+    .text("🔙 Kembali ke Menu Admin", "adm_home");
 }
 
 // ── Cloudflare Email Routing UI Builders ─────────────────────────────────────
@@ -1095,9 +1149,9 @@ function maskEmail(email?: string): string {
 }
 
 function buildStatsKeyboard(
-  currentTab: "overview" | "users" | "finance" | "digital" | "sms"
+  currentTab: "overview" | "users" | "finance" | "digital" | "sms" | "revenue"
 ): InlineKeyboard {
-  return new InlineKeyboard()
+  const keyboard = new InlineKeyboard()
     .text(currentTab === "overview" ? "• 📊 Overview •" : "📊 Overview", "adm_stats_overview")
     .text(currentTab === "users" ? "• 👥 User •" : "👥 User", "adm_stats_users")
     .row()
@@ -1105,9 +1159,37 @@ function buildStatsKeyboard(
     .text(currentTab === "digital" ? "• 📦 Digital •" : "📦 Digital", "adm_stats_digital")
     .row()
     .text(currentTab === "sms" ? "• 📱 OTP SMS •" : "📱 OTP SMS", "adm_stats_sms")
+    .text(currentTab === "revenue" ? "• 💰 Pendapatan •" : "💰 Pendapatan", "adm_stats_revenue")
     .text("🔄 Refresh Data", `adm_stats_rf_${currentTab}`)
     .row()
     .text("🔙 Kembali ke Menu Admin", "adm_home");
+
+  if (currentTab === "revenue") {
+    keyboard
+      .row()
+      .text("📅 Hari Ini", "adm_stats_rev_today")
+      .text("🗓️ Minggu Ini", "adm_stats_rev_week")
+      .text("📆 Bulan Ini", "adm_stats_rev_month");
+  }
+
+  return keyboard;
+}
+
+async function buildStatsRevenueText(
+  period: "today" | "week" | "month" | "date" = "today",
+  dateInput?: string
+): Promise<string> {
+  const stats = await BotStatsService.getRevenueStats(period, dateInput);
+  return (
+    `💰 <b>Pendapatan Bot — ${stats.period.label}</b>\n` +
+    `<i>Hanya order yang selesai/terkirim yang dihitung.</i>\n\n` +
+    `• Pendapatan Digital: <b>${formatIDR(stats.digitalRevenue)}</b> (<code>${stats.digitalOrders} order</code>)\n` +
+    `• Pendapatan OTP SMS: <b>${formatIDR(stats.smsRevenue)}</b> (<code>${stats.smsOrders} order</code>)\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `• <b>Total Pendapatan: ${formatIDR(stats.totalRevenue)}</b>\n` +
+    `• Total Order: <b>${stats.totalOrders}</b>\n\n` +
+    `<i>Gunakan /pendapatan YYYY-MM-DD untuk melihat tanggal tertentu.</i>`
+  );
 }
 
 async function buildStatsOverviewText(): Promise<string> {
@@ -1292,6 +1374,7 @@ const adminPlugin: Plugin = {
     { command: "admin",             description: "[Admin] Buka panel manajemen admin utama" },
     { command: "stats",             description: "[Admin] Lihat ringkasan & statistik performa bot" },
     { command: "statistik",         description: "[Admin] Lihat ringkasan & statistik performa bot" },
+    { command: "pendapatan",        description: "[Admin] Lihat pendapatan hari/minggu/bulan atau tanggal tertentu" },
     { command: "otpadmin",          description: "[Admin] Buka panel pengaturan layanan OTP SMS" },
     { command: "toggleotp",         description: "[Admin] Toggle on/off layanan OTP SMS" },
     { command: "togglesms",         description: "[Admin] Toggle on/off layanan OTP SMS" },
@@ -1339,6 +1422,11 @@ const adminPlugin: Plugin = {
     { command: "cfzones",           description: "[Admin] Daftar domain / zone Cloudflare" },
     { command: "rollback",          description: "[Admin] Rollback / pulihkan database dari file backup" },
     { command: "restore",           description: "[Admin] Restore / pulihkan database dari file backup" },
+    { command: "antifraud",         description: "[Admin] Buka panel Anti-Fraud & Security Monitor" },
+    { command: "fraudlogs",         description: "[Admin] Lihat 10 log aktivitas fraud terbaru" },
+    { command: "banned",            description: "[Admin] Lihat daftar user yang sedang dibanned" },
+    { command: "ban",               description: "[Admin] Ban user: /ban <telegramId> [alasan]" },
+    { command: "unban",             description: "[Admin] Unban user: /unban <telegramId>" },
   ],
 
   register(bot: Bot<Context>): void {
@@ -1355,6 +1443,145 @@ const adminPlugin: Plugin = {
         reply_markup: await buildHomeKeyboard(),
       });
     };
+
+    // ── /antifraud — Anti-Fraud & Security Monitor ────────────────────────────
+    const openAntiFraud = async (ctx: Context) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      fsubInputState.delete(String(ctx.from?.id));
+      await ctx.reply(await buildAntiFraudText(), {
+        parse_mode: "HTML",
+        reply_markup: buildAntiFraudKeyboard(),
+      });
+    };
+
+    bot.command("antifraud", openAntiFraud);
+
+    // ── /fraudlogs — View recent 10 fraud logs ──────────────────────────────
+    bot.command("fraudlogs", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      const logs = await FraudLog.find().sort({ createdAt: -1 }).limit(10).lean();
+      if (logs.length === 0) {
+        await ctx.reply("✅ <b>Tidak Ada Log Fraud:</b> Sistem dalam kondisi aman dan bersih.", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+        });
+        return;
+      }
+
+      let msg =
+        `🛡️ <b>10 Log Kejadian Fraud Terbaru</b>\n` +
+        `${"─".repeat(32)}\n\n`;
+
+      for (let i = 0; i < logs.length; i++) {
+        const l = logs[i]!;
+        const num = i + 1;
+        const timeStr = formatDateWIB(l.createdAt);
+        const userStr = l.userHandle ? `@${l.userHandle}` : `ID: ${l.userId}`;
+        msg +=
+          `<b>${num}. [${l.severity}] ${l.fraudType}</b>\n` +
+          `👤 User: <code>${l.userId}</code> (${userStr})\n` +
+          `🛑 Action: <code>${l.actionTaken}</code> | 📅 ${timeStr}\n` +
+          `📝 <i>${escapeHtml(l.reason)}</i>\n\n`;
+      }
+
+      const kb = new InlineKeyboard()
+        .text("🔄 Refresh Logs", "adm_fraud_logs")
+        .row()
+        .text("🔙 Anti-Fraud Panel", "adm_antifraud");
+
+      await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+    });
+
+    // ── /banned — List banned users ──────────────────────────────────────────
+    bot.command("banned", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      const bannedUsers = await User.find({
+        $or: [{ isBanned: true }, { accountStatus: "BANNED" }],
+      }).limit(20).lean();
+
+      if (bannedUsers.length === 0) {
+        await ctx.reply("✅ <b>Tidak Ada User Banned:</b> Tidak ada akun yang sedang diblokir.", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+        });
+        return;
+      }
+
+      let msg =
+        `🚫 <b>Daftar Pengguna Dibanned (${bannedUsers.length})</b>\n` +
+        `${"─".repeat(32)}\n\n`;
+
+      const kb = new InlineKeyboard();
+      for (const u of bannedUsers) {
+        const name = u.firstName || "Tanpa Nama";
+        const handle = u.username ? ` (@${u.username})` : "";
+        msg +=
+          `👤 <b>${escapeHtml(name)}</b>${handle}\n` +
+          `🆔 <code>${u.telegramId}</code> | Saldo: ${formatIDR(u.balance)}\n` +
+          `📌 Alasan: <i>${escapeHtml(u.banReason || "Tidak ada rincian")}</i>\n\n`;
+
+        kb.text(`🔓 Unban ${name.slice(0, 12)} (${u.telegramId})`, `sec_unban_${u.telegramId}`).row();
+      }
+
+      kb.text("🔙 Anti-Fraud Panel", "adm_antifraud");
+      await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+    });
+
+    // ── /ban <userId> [reason] ───────────────────────────────────────────────
+    bot.command("ban", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      const parts = (ctx.message?.text || "").trim().split(/\s+/);
+      const targetId = parts[1]?.trim();
+      const reason = parts.slice(2).join(" ").trim() || "Diblokir oleh Administrator";
+
+      if (!targetId) {
+        await ctx.reply(
+          `📖 <b>Format Perintah /ban:</b>\n\n` +
+          `<code>/ban &lt;telegramId&gt; [alasan]</code>\n\n` +
+          `<b>Contoh:</b> <code>/ban 123456789 Indikasi fraud mutasi ganda</code>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const res = await AntiFraudService.banUser(targetId, reason, String(ctx.from?.id));
+      clearUserBanCache(targetId);
+      await ctx.reply(res.message, { parse_mode: "HTML" });
+    });
+
+    // ── /unban <userId> ──────────────────────────────────────────────────────
+    bot.command("unban", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      const targetId = parseArg(ctx);
+      if (!targetId) {
+        await ctx.reply(
+          `📖 <b>Format Perintah /unban:</b>\n\n` +
+          `<code>/unban &lt;telegramId&gt;</code>\n\n` +
+          `<b>Contoh:</b> <code>/unban 123456789</code>`,
+          { parse_mode: "HTML" }
+        );
+        return;
+      }
+
+      const res = await AntiFraudService.unbanUser(targetId, String(ctx.from?.id));
+      clearUserBanCache(targetId);
+      await ctx.reply(res.message, { parse_mode: "HTML" });
+    });
 
     // ── /otpadmin — OTP SMS admin panel ──────────────────────────────────────
     const openOtpAdmin = async (ctx: Context) => {
@@ -1380,6 +1607,18 @@ const adminPlugin: Plugin = {
         return;
       }
       fsubInputState.delete(String(ctx.from?.id));
+      const requestedDate = String(ctx.match ?? "").trim();
+      if (requestedDate) {
+        try {
+          await ctx.reply(await buildStatsRevenueText("date", requestedDate), {
+            parse_mode: "HTML",
+            reply_markup: buildStatsKeyboard("revenue"),
+          });
+        } catch (error) {
+          await ctx.reply(error instanceof Error ? `⚠️ ${error.message}` : "⚠️ Format tanggal tidak valid. Gunakan YYYY-MM-DD.");
+        }
+        return;
+      }
       await ctx.reply(await buildStatsOverviewText(), {
         parse_mode: "HTML",
         reply_markup: buildStatsKeyboard("overview"),
@@ -1388,6 +1627,28 @@ const adminPlugin: Plugin = {
 
     bot.command("stats", openStats);
     bot.command("statistik", openStats);
+    bot.command("pendapatan", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      const requestedDate = String(ctx.match ?? "").trim();
+      if (!requestedDate) {
+        await ctx.reply(await buildStatsRevenueText(), {
+          parse_mode: "HTML",
+          reply_markup: buildStatsKeyboard("revenue"),
+        });
+        return;
+      }
+      try {
+        await ctx.reply(await buildStatsRevenueText("date", requestedDate), {
+          parse_mode: "HTML",
+          reply_markup: buildStatsKeyboard("revenue"),
+        });
+      } catch (error) {
+        await ctx.reply(error instanceof Error ? `⚠️ ${error.message}` : "⚠️ Format tanggal tidak valid. Gunakan YYYY-MM-DD.");
+      }
+    });
 
     // ── /forcesub — Wajib Join Channel Panel ──────────────────────────────────
     const openForceSub = async (ctx: Context) => {
@@ -3466,6 +3727,30 @@ const adminPlugin: Plugin = {
     bot.callbackQuery("adm_stats", handleStatsOverview);
     bot.callbackQuery("adm_stats_overview", handleStatsOverview);
 
+    // ── adm_stats_revenue — Pendapatan per periode ──────────────────────────
+    const handleRevenueStats = async (ctx: Context) => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx)) return;
+      const data = ctx.callbackQuery?.data ?? "";
+      const period: "today" | "week" | "month" = data.endsWith("week")
+        ? "week"
+        : data.endsWith("month")
+        ? "month"
+        : "today";
+      try {
+        await ctx.editMessageText(await buildStatsRevenueText(period), {
+          parse_mode: "HTML",
+          reply_markup: buildStatsKeyboard("revenue"),
+        });
+      } catch {
+        /* safe ignore unchanged */
+      }
+    };
+    bot.callbackQuery("adm_stats_revenue", handleRevenueStats);
+    bot.callbackQuery("adm_stats_rev_today", handleRevenueStats);
+    bot.callbackQuery("adm_stats_rev_week", handleRevenueStats);
+    bot.callbackQuery("adm_stats_rev_month", handleRevenueStats);
+
     // ── adm_stats_users — Users Tab ──────────────────────────────────────────
     bot.callbackQuery("adm_stats_users", async (ctx) => {
       await ctx.answerCallbackQuery();
@@ -3527,12 +3812,12 @@ const adminPlugin: Plugin = {
     });
 
     // ── adm_stats_rf_<tab> — Refresh Tab with Alert ──────────────────────────
-    bot.callbackQuery(/^adm_stats_rf_(overview|users|finance|digital|sms)$/, async (ctx) => {
+    bot.callbackQuery(/^adm_stats_rf_(overview|users|finance|digital|sms|revenue)$/, async (ctx) => {
       if (!isAdmin(ctx)) {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
-      const tab = ctx.match[1] as "overview" | "users" | "finance" | "digital" | "sms";
+      const tab = ctx.match[1] as "overview" | "users" | "finance" | "digital" | "sms" | "revenue";
       await ctx.answerCallbackQuery({ text: "🔄 Data statistik berhasil diperbarui!" });
 
       let text = "";
@@ -3541,6 +3826,7 @@ const adminPlugin: Plugin = {
       else if (tab === "finance") text = await buildStatsFinanceText();
       else if (tab === "digital") text = await buildStatsDigitalText();
       else if (tab === "sms") text = await buildStatsSmsText();
+      else if (tab === "revenue") text = await buildStatsRevenueText();
 
       try {
         await ctx.editMessageText(text, {
@@ -4907,6 +5193,327 @@ const adminPlugin: Plugin = {
           reply_markup: new InlineKeyboard().text("🔙 Kembali ke Menu Admin", "adm_home"),
         });
       }
+    });
+
+    // ── Anti-Fraud & Security Monitor Callbacks ──────────────────────────────
+
+    // adm_antifraud — Open Anti-Fraud Panel
+    bot.callbackQuery("adm_antifraud", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+      try {
+        await ctx.editMessageText(await buildAntiFraudText(), {
+          parse_mode: "HTML",
+          reply_markup: buildAntiFraudKeyboard(),
+        });
+      } catch {
+        await ctx.reply(await buildAntiFraudText(), {
+          parse_mode: "HTML",
+          reply_markup: buildAntiFraudKeyboard(),
+        });
+      }
+    });
+
+    // adm_fraud_logs — View 10 fraud logs callback
+    bot.callbackQuery("adm_fraud_logs", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+
+      const logs = await FraudLog.find().sort({ createdAt: -1 }).limit(10).lean();
+      if (logs.length === 0) {
+        const emptyMsg =
+          `🛡️ <b>Log Kejadian Fraud</b>\n` +
+          `${"─".repeat(32)}\n\n` +
+          `✅ <i>Tidak ada riwayat aktivitas fraud yang tercatat.</i>`;
+        try {
+          await ctx.editMessageText(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        } catch {
+          await ctx.reply(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        }
+        return;
+      }
+
+      let msg =
+        `🛡️ <b>10 Log Kejadian Fraud Terbaru</b>\n` +
+        `${"─".repeat(32)}\n\n`;
+
+      for (let i = 0; i < logs.length; i++) {
+        const l = logs[i]!;
+        const num = i + 1;
+        const timeStr = formatDateWIB(l.createdAt);
+        const userStr = l.userHandle ? `@${l.userHandle}` : `ID: ${l.userId}`;
+        msg +=
+          `<b>${num}. [${l.severity}] ${l.fraudType}</b>\n` +
+          `👤 User: <code>${l.userId}</code> (${userStr})\n` +
+          `🛑 Action: <code>${l.actionTaken}</code> | 📅 ${timeStr}\n` +
+          `📝 <i>${escapeHtml(l.reason)}</i>\n\n`;
+      }
+
+      const kb = new InlineKeyboard()
+        .text("🔄 Refresh Logs", "adm_fraud_logs")
+        .row()
+        .text("🔙 Anti-Fraud Panel", "adm_antifraud");
+
+      try {
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      } catch {
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+      }
+    });
+
+    // adm_banned_users — View Banned Users
+    bot.callbackQuery("adm_banned_users", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+
+      const bannedUsers = await User.find({
+        $or: [{ isBanned: true }, { accountStatus: "BANNED" }],
+      }).limit(20).lean();
+
+      if (bannedUsers.length === 0) {
+        const emptyMsg =
+          `🚫 <b>Daftar Pengguna Dibanned</b>\n` +
+          `${"─".repeat(32)}\n\n` +
+          `✅ <i>Tidak ada pengguna yang sedang dibanned saat ini.</i>`;
+        try {
+          await ctx.editMessageText(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        } catch {
+          await ctx.reply(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        }
+        return;
+      }
+
+      let msg =
+        `🚫 <b>Daftar Pengguna Dibanned (${bannedUsers.length})</b>\n` +
+        `${"─".repeat(32)}\n\n`;
+
+      const kb = new InlineKeyboard();
+      for (const u of bannedUsers) {
+        const name = u.firstName || "Tanpa Nama";
+        const handle = u.username ? ` (@${u.username})` : "";
+        msg +=
+          `👤 <b>${escapeHtml(name)}</b>${handle}\n` +
+          `🆔 <code>${u.telegramId}</code> | Saldo: ${formatIDR(u.balance)}\n` +
+          `📌 Alasan: <i>${escapeHtml(u.banReason || "Tidak ada rincian")}</i>\n\n`;
+
+        kb.text(`🔓 Unban ${name.slice(0, 12)} (${u.telegramId})`, `sec_unban_${u.telegramId}`).row();
+      }
+
+      kb.text("🔙 Anti-Fraud Panel", "adm_antifraud");
+      try {
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      } catch {
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+      }
+    });
+
+    // adm_review_users — View Users Under Review
+    bot.callbackQuery("adm_review_users", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+
+      const reviewUsers = await User.find({ accountStatus: "UNDER_REVIEW" }).limit(20).lean();
+      if (reviewUsers.length === 0) {
+        const emptyMsg =
+          `⚠️ <b>Daftar Pengguna Under Review</b>\n` +
+          `${"─".repeat(32)}\n\n` +
+          `✅ <i>Tidak ada akun yang sedang berstatus UNDER_REVIEW.</i>`;
+        try {
+          await ctx.editMessageText(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        } catch {
+          await ctx.reply(emptyMsg, {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Anti-Fraud Panel", "adm_antifraud"),
+          });
+        }
+        return;
+      }
+
+      let msg =
+        `⚠️ <b>Daftar Pengguna Under Review (${reviewUsers.length})</b>\n` +
+        `${"─".repeat(32)}\n\n`;
+
+      const kb = new InlineKeyboard();
+      for (const u of reviewUsers) {
+        const name = u.firstName || "Tanpa Nama";
+        const handle = u.username ? ` (@${u.username})` : "";
+        const flagTime = u.flaggedAt ? formatDateWIB(u.flaggedAt) : "—";
+        msg +=
+          `👤 <b>${escapeHtml(name)}</b>${handle}\n` +
+          `🆔 <code>${u.telegramId}</code> | Skor Risiko: <b>${u.fraudScore || 0}</b>\n` +
+          `📅 Flagged At: ${flagTime}\n\n`;
+
+        kb.text(`🔍 Review ${u.telegramId}`, `sec_rev_${u.telegramId}`)
+          .text(`✅ Unflag`, `sec_unflag_${u.telegramId}`)
+          .row();
+      }
+
+      kb.text("🔙 Anti-Fraud Panel", "adm_antifraud");
+      try {
+        await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: kb });
+      } catch {
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kb });
+      }
+    });
+
+    // adm_toggle_sec_chan — Toggle Security Alert Channel
+    bot.callbackQuery("adm_toggle_sec_chan", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      const config = await BotConfig.getOrCreate();
+      config.securityAlertChannelEnabled = !config.securityAlertChannelEnabled;
+      await config.save();
+
+      const status = config.securityAlertChannelEnabled ? "🟢 DIAKTIFKAN" : "🔴 DINONAKTIFKAN";
+      await ctx.answerCallbackQuery({ text: `Security Alert Channel: ${status}` });
+
+      try {
+        await ctx.editMessageText(await buildAntiFraudText(), {
+          parse_mode: "HTML",
+          reply_markup: buildAntiFraudKeyboard(),
+        });
+      } catch {
+        await ctx.reply(await buildAntiFraudText(), {
+          parse_mode: "HTML",
+          reply_markup: buildAntiFraudKeyboard(),
+        });
+      }
+    });
+
+    // sec_ban_<userId> — Security Alert Action: Ban User
+    bot.callbackQuery(/^sec_ban_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      const targetId = ctx.match[1]!;
+      const adminId = String(ctx.from?.id);
+
+      const res = await AntiFraudService.banUser(targetId, "Diblokir dari Security Alert oleh Admin", adminId);
+      clearUserBanCache(targetId);
+      await ctx.answerCallbackQuery({ text: `🚫 User ${targetId} berhasil dibanned!` });
+
+      await ctx.reply(`🛡️ <b>[Security Action]</b>\n${res.message}`, { parse_mode: "HTML" });
+    });
+
+    // sec_unban_<userId> — Security Alert Action: Unban User
+    bot.callbackQuery(/^sec_unban_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      const targetId = ctx.match[1]!;
+      const adminId = String(ctx.from?.id);
+
+      const res = await AntiFraudService.unbanUser(targetId, adminId);
+      clearUserBanCache(targetId);
+      await ctx.answerCallbackQuery({ text: `🔓 User ${targetId} berhasil di-unban!` });
+
+      await ctx.reply(`🛡️ <b>[Security Action]</b>\n${res.message}`, { parse_mode: "HTML" });
+    });
+
+    // sec_unflag_<userId> — Security Alert Action: Unflag (Set Active)
+    bot.callbackQuery(/^sec_unflag_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      const targetId = ctx.match[1]!;
+      const adminId = String(ctx.from?.id);
+
+      const res = await AntiFraudService.unflagUser(targetId, adminId);
+      await ctx.answerCallbackQuery({ text: `✅ Status user ${targetId} dipulihkan!` });
+
+      await ctx.reply(`🛡️ <b>[Security Action]</b>\n${res.message}`, { parse_mode: "HTML" });
+    });
+
+    // sec_rev_<userId> — Security Investigation Card
+    bot.callbackQuery(/^sec_rev_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only" });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+      const targetId = ctx.match[1]!;
+
+      const review = await AntiFraudService.getUserSecurityReview(targetId);
+      if (!review) {
+        await ctx.answerCallbackQuery({ text: "⚠️ User tidak ditemukan.", show_alert: true });
+        return;
+      }
+
+      const u = review.user;
+      const handleStr = u.username ? `@${u.username}` : "Tanpa Username";
+      const statusBadge =
+        u.accountStatus === "BANNED" || u.isBanned
+          ? "🚫 BANNED"
+          : u.accountStatus === "UNDER_REVIEW"
+          ? "⚠️ UNDER_REVIEW"
+          : "🟢 ACTIVE";
+
+      let logsSection = "<i>Tidak ada log fraud tercatat.</i>";
+      if (review.recentFraudLogs.length > 0) {
+        logsSection = review.recentFraudLogs
+          .slice(0, 5)
+          .map((l, i) => `  ${i + 1}. [${l.severity}] <b>${l.fraudType}</b>: <i>${escapeHtml(l.reason)}</i> (${formatDateWIB(l.createdAt)})`)
+          .join("\n");
+      }
+
+      const reviewMsg =
+        `🔍 <b>Profil & Investigasi Keamanan Pengguna</b>\n` +
+        `${"─".repeat(34)}\n\n` +
+        `👤 <b>Nama:</b>        <b>${escapeHtml(u.firstName)}</b> (${handleStr})\n` +
+        `🆔 <b>Telegram ID:</b> <code>${u.telegramId}</code>\n` +
+        `🛡️ <b>Status Akun:</b> <b>${statusBadge}</b>\n` +
+        `📊 <b>Skor Risiko:</b> <b>${u.fraudScore || 0}</b>\n` +
+        `💰 <b>Saldo Saat Ini:</b> ${formatIDR(u.balance)}\n` +
+        `🛍️ <b>Total Belanja:</b>  ${formatIDR(review.totalBalanceSpent)} (<code>${review.totalOrders} pesanan</code>)\n` +
+        `🛡️ <b>Klaim Garansi:</b>  <b>${review.totalClaims}x</b> (Rasio Klaim: <b>${review.claimRatioPercent}%</b>)\n\n` +
+        `📋 <b>Riwayat Fraud Terakhir (${review.fraudLogsCount} total):</b>\n` +
+        logsSection + `\n\n` +
+        `Pilih tindakan cepat untuk akun ini:`;
+
+      const kb = new InlineKeyboard();
+      if (u.isBanned || u.accountStatus === "BANNED") {
+        kb.text("🔓 Unban User", `sec_unban_${u.telegramId}`);
+      } else {
+        kb.text("🚫 Banned User", `sec_ban_${u.telegramId}`);
+      }
+      if (u.accountStatus === "UNDER_REVIEW") {
+        kb.text("✅ Unflag Status", `sec_unflag_${u.telegramId}`);
+      }
+      kb.row().text("🔙 Kembali ke Anti-Fraud", "adm_antifraud");
+
+      await ctx.reply(reviewMsg, { parse_mode: "HTML", reply_markup: kb });
     });
   },
 };

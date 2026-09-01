@@ -4,6 +4,7 @@ import { loadPlugins } from "./pluginLoader.js";
 import { forceSubMiddleware } from "../middlewares/forceSub.js";
 import { rateLimitMiddleware } from "../middlewares/rateLimit.js";
 import { maintenanceMiddleware } from "../middlewares/maintenance.js";
+import { antiFraudMiddleware } from "../middlewares/antiFraud.js";
 
 /**
  * Creates the grammY Bot instance and wires up the dynamic plugin loader.
@@ -47,10 +48,13 @@ export async function createBot(token: string): Promise<Bot<Context>> {
   // 1. Rate Limiter — drop spam before anything else runs
   bot.use(rateLimitMiddleware);
 
-  // 2. Maintenance Mode — block non-admin users when bot is under maintenance
+  // 2. Anti-Fraud & Velocity Guard — checks banned users and burst rate
+  bot.use(antiFraudMiddleware);
+
+  // 3. Maintenance Mode — block non-admin users when bot is under maintenance
   bot.use(maintenanceMiddleware);
 
-  // 3. Wajib Join Channel (Force Subscription) middleware
+  // 4. Wajib Join Channel (Force Subscription) middleware
   bot.use(forceSubMiddleware);
 
   // Dynamically load and register all plugins from src/plugins/.

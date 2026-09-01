@@ -35,6 +35,32 @@ export interface IBotConfig extends Document {
   /** Link invite atau tautan publik channel log aktivitas */
   logChannelLink: string;
 
+  // ── Security & Anti-Fraud Alert ─────────────────────────────────────────────
+
+  /** Apakah notifikasi security alert diaktifkan */
+  securityAlertChannelEnabled: boolean;
+
+  /** Username atau ID channel security alert (contoh: @bot_security atau -1001234567890) */
+  securityAlertChannel: string;
+
+  /** Link invite channel security alert */
+  securityAlertChannelLink: string;
+
+  /** Batas maksimum klaim garansi dalam 24 jam sebelum auto-flag (default: 3) */
+  maxWarrantyClaimsPerDay: number;
+
+  /** Batas rasio klaim terhadap total pesanan dalam persen (default: 50) */
+  maxWarrantyClaimRatioPercent: number;
+
+  /** Batas kegagalan input promo sebelum diblokir (default: 5) */
+  maxPromoFailedAttempts: number;
+
+  /** Durasi blokir promo dalam menit (default: 60) */
+  promoBlockDurationMinutes: number;
+
+  /** Batas kecepatan aksi per detik per user (default: 5) */
+  velocityMaxActionsPerSecond: number;
+
   // ── Maintenance Mode ────────────────────────────────────────────────────────
 
   /** Apakah bot sedang dalam mode maintenance (semua non-admin diblokir) */
@@ -206,6 +232,56 @@ const botConfigSchema = new Schema<IBotConfig>(
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
+    },
+    // ── Security & Anti-Fraud ────────────────────────────────────────────────
+    securityAlertChannelEnabled: {
+      type: Boolean,
+      default: () => {
+        if (process.env.SECURITY_ALERT_CHANNEL_ENABLED === "false") return false;
+        const envSec = process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL;
+        return !!envSec && envSec.trim().length > 0;
+      },
+    },
+    securityAlertChannel: {
+      type: String,
+      default: () => (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim(),
+      trim: true,
+    },
+    securityAlertChannelLink: {
+      type: String,
+      default: () => {
+        const envLink = process.env.SECURITY_ALERT_CHANNEL_LINK?.trim();
+        if (envLink) return envLink;
+        const envChan = (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim();
+        return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
+      },
+      trim: true,
+    },
+    maxWarrantyClaimsPerDay: {
+      type: Number,
+      default: 3,
+      min: 1,
+    },
+    maxWarrantyClaimRatioPercent: {
+      type: Number,
+      default: 50,
+      min: 1,
+      max: 100,
+    },
+    maxPromoFailedAttempts: {
+      type: Number,
+      default: 5,
+      min: 1,
+    },
+    promoBlockDurationMinutes: {
+      type: Number,
+      default: 60,
+      min: 1,
+    },
+    velocityMaxActionsPerSecond: {
+      type: Number,
+      default: 5,
+      min: 1,
     },
     // ── Maintenance Mode ────────────────────────────────────────────────────
     isMaintenance: {
@@ -413,6 +489,10 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
   const envCfApiKey = (process.env.CF_GLOBAL_API_KEY || process.env.CF_API_KEY || "").trim();
   const envCfDestEmail = (process.env.CF_DEST_EMAIL || process.env.CF_DESTINATION_EMAIL || "").trim();
 
+  const envSecChannel = (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim();
+  const envSecLink = process.env.SECURITY_ALERT_CHANNEL_LINK?.trim() || (envSecChannel.startsWith("@") ? `https://t.me/${envSecChannel.slice(1)}` : "");
+  const envSecEnabled = process.env.SECURITY_ALERT_CHANNEL_ENABLED !== "false" && envSecChannel.length > 0;
+
   if (!doc) {
     const envChannel = process.env.FORCE_SUB_CHANNEL?.trim() || "";
     const envLink = process.env.FORCE_SUB_LINK?.trim() || (envChannel.startsWith("@") ? `https://t.me/${envChannel.slice(1)}` : "");
@@ -430,6 +510,14 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
       logChannelEnabled: envLogEnabled,
       logChannel: envLogChannel,
       logChannelLink: envLogLink,
+      securityAlertChannelEnabled: envSecEnabled,
+      securityAlertChannel: envSecChannel,
+      securityAlertChannelLink: envSecLink,
+      maxWarrantyClaimsPerDay: 3,
+      maxWarrantyClaimRatioPercent: 50,
+      maxPromoFailedAttempts: 5,
+      promoBlockDurationMinutes: 60,
+      velocityMaxActionsPerSecond: 5,
       isMaintenance: false,
       maintenanceMessage: "🔧 <b>Bot Sedang Maintenance</b>\n\nMaaf, bot sedang dalam proses pemeliharaan dan peningkatan sistem.\nSilakan coba lagi beberapa saat kemudian.\n\n<i>Terima kasih atas kesabaran Anda! 🙏</i>",
       affiliateEnabled: false,
@@ -479,6 +567,30 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
     }
     if (doc.logChannelEnabled === undefined) {
       doc.logChannelEnabled = envLogEnabled; needSave = true;
+    }
+    if (doc.securityAlertChannel === undefined && envSecChannel) {
+      doc.securityAlertChannel = envSecChannel; needSave = true;
+    }
+    if (doc.securityAlertChannelLink === undefined && envSecLink) {
+      doc.securityAlertChannelLink = envSecLink; needSave = true;
+    }
+    if (doc.securityAlertChannelEnabled === undefined) {
+      doc.securityAlertChannelEnabled = envSecEnabled; needSave = true;
+    }
+    if (doc.maxWarrantyClaimsPerDay === undefined) {
+      doc.maxWarrantyClaimsPerDay = 3; needSave = true;
+    }
+    if (doc.maxWarrantyClaimRatioPercent === undefined) {
+      doc.maxWarrantyClaimRatioPercent = 50; needSave = true;
+    }
+    if (doc.maxPromoFailedAttempts === undefined) {
+      doc.maxPromoFailedAttempts = 5; needSave = true;
+    }
+    if (doc.promoBlockDurationMinutes === undefined) {
+      doc.promoBlockDurationMinutes = 60; needSave = true;
+    }
+    if (doc.velocityMaxActionsPerSecond === undefined) {
+      doc.velocityMaxActionsPerSecond = 5; needSave = true;
     }
     // New fields migration
     if (doc.isMaintenance === undefined) {

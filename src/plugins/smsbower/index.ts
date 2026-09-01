@@ -525,7 +525,7 @@ function startQrisPolling(
         const expiredSession = await TopupSession.findByIdAndUpdate(
           sessionId,
           { status: "EXPIRED" },
-          { new: true },
+          { returnDocument: "after" },
         );
         if (expiredSession) {
           ActivityLogService.logTopupCancelled(bot.api, {
@@ -576,7 +576,7 @@ function startQrisPolling(
         const updatedUser = await User.findOneAndUpdate(
           { telegramId },
           { $inc: { balance: amountIDR } },
-          { new: true },
+          { returnDocument: "after" },
         ).lean();
 
         const settledSession = await TopupSession.findByIdAndUpdate(
@@ -585,7 +585,7 @@ function startQrisPolling(
             status: "SETTLED",
             matchedTransactionId: matchedTx.transactionId,
           },
-          { new: true },
+          { returnDocument: "after" },
         );
 
         if (settledSession) {
@@ -867,7 +867,7 @@ function startPolling(
         const order = await Order.findOneAndUpdate(
           { activationId },
           { status: "CANCELED" },
-          { new: true },
+          { returnDocument: "after" },
         );
         if (order) {
           await User.findOneAndUpdate(
@@ -918,7 +918,7 @@ function startPolling(
           const user = await User.findOneAndUpdate(
             { telegramId: String(order.userId) },
             { $inc: { totalOrders: 1 } },
-            { new: true },
+            { returnDocument: "after" },
           ).lean();
 
           // Broadcast testimonial to channel
@@ -974,7 +974,7 @@ function startPolling(
         const order = await Order.findOneAndUpdate(
           { activationId },
           { status: "CANCELED" },
-          { new: true },
+          { returnDocument: "after" },
         );
         if (order) {
           await User.findOneAndUpdate(
@@ -1951,7 +1951,7 @@ const smsBowerPlugin: Plugin = {
           const updatedUser = await User.findOneAndUpdate(
             { telegramId },
             { $inc: { balance: session.amountIDR } },
-            { new: true },
+            { returnDocument: "after" },
           ).lean();
 
           const settledSession = await TopupSession.findByIdAndUpdate(
@@ -1960,7 +1960,7 @@ const smsBowerPlugin: Plugin = {
               status: "SETTLED",
               matchedTransactionId: matchedTx.transactionId,
             },
-            { new: true },
+            { returnDocument: "after" },
           );
 
           if (settledSession) {
@@ -2024,7 +2024,7 @@ const smsBowerPlugin: Plugin = {
       const session = await TopupSession.findOneAndUpdate(
         { orderId },
         { status: "CANCELLED" },
-        { new: true },
+        { returnDocument: "after" },
       );
       if (session) {
         ActivityLogService.logTopupCancelled(ctx.api, {
@@ -2097,7 +2097,7 @@ const smsBowerPlugin: Plugin = {
           const user = await User.findOneAndUpdate(
             { telegramId: String(order.userId) },
             { $inc: { totalOrders: 1 } },
-            { new: true },
+            { returnDocument: "after" },
           ).lean();
 
           // Broadcast audit log to dedicated channel

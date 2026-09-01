@@ -19,6 +19,8 @@ import { BalanceLog } from "../models/BalanceLog.js";
 import { AffiliateLog } from "../models/AffiliateLog.js";
 import { RestockAlert } from "../models/RestockAlert.js";
 import { WarrantyClaim } from "../models/WarrantyClaim.js";
+import { FraudLog } from "../models/FraudLog.js";
+import { Cart } from "../models/Cart.js";
 import { ActivityLogService } from "./activityLog.js";
 import { SMSBowerService } from "./smsbower.js";
 import { clearMaintenanceCache } from "../middlewares/maintenance.js";
@@ -38,6 +40,7 @@ export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "digitalproducts", model: DigitalProduct },
   { name: "digitalstocks",   model: DigitalStock },
   { name: "digitalorders",   model: DigitalOrder },
+  { name: "carts",           model: Cart },
   { name: "orders",          model: Order },
   { name: "botconfigs",      model: BotConfig },
   { name: "smsconfigs",      model: SmsConfig },
@@ -47,6 +50,7 @@ export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "affiliatelogs",   model: AffiliateLog },
   { name: "restockalerts",   model: RestockAlert },
   { name: "warrantyclaims",  model: WarrantyClaim },
+  { name: "fraudlogs",       model: FraudLog },
 ] as const;
 
 export const COLLECTION_MODEL_MAP = new Map<string, Model<any>>(

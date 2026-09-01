@@ -105,7 +105,7 @@ export async function withdrawAffiliateBalance(userId: string): Promise<{
     {
       $inc: { balance: amount, affiliateBalance: -amount },
     },
-    { new: true }
+    { returnDocument: "after" }
   );
 
   if (!updated) {

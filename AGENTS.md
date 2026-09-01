@@ -320,6 +320,7 @@ npm start
    - Use `safeEditOrReply` patterns when switching between media messages (photos/receipts) and text menus. Attempting to edit a photo message with text alone causes a Telegram API error.
 4. **Database Operations**:
    - Use `.lean()` for read-only Mongoose queries to reduce overhead.
+   - Always use `{ returnDocument: "after" }` instead of deprecated `{ new: true }` in `findOneAndUpdate()`, `findByIdAndUpdate()`, and `findOneAndReplace()`.
    - For configuration documents, always use `SmsConfig.getOrCreate()` and `BotConfig.getOrCreate()` to guarantee a non-null singleton.
    - When mutating user balances, ensure atomic operations (e.g. `$inc`) or validation checks against negative balances.
 5. **Puppeteer Receipt Generator**:

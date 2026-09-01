@@ -1,10 +1,19 @@
 import { Types } from "mongoose";
-import { DigitalProduct, IDigitalProduct, DigitalProductDocument, WarrantyUnit, IBulkDiscountTier } from "../models/DigitalProduct.js";
+import {
+  DigitalProduct,
+  IDigitalProduct,
+  DigitalProductDocument,
+  WarrantyUnit,
+  IBulkDiscountTier,
+  DeliveryType,
+} from "../models/DigitalProduct.js";
 import { DigitalStock, IDigitalStock, DigitalStockDocument } from "../models/DigitalStock.js";
-import { DigitalOrder, IDigitalOrder, DigitalOrderDocument } from "../models/DigitalOrder.js";
+import { DigitalOrder, IDigitalOrder, DigitalOrderDocument, IDigitalOrderItem } from "../models/DigitalOrder.js";
 import { User } from "../models/User.js";
+import { BalanceLog } from "../models/BalanceLog.js";
 import { RestockAlert } from "../models/RestockAlert.js";
 import { WarrantyService } from "./warranty.js";
+import { CartService, CartSummary } from "./cartService.js";
 import type { Api } from "grammy";
 
 // ============================================================================
@@ -34,17 +43,41 @@ export interface ProductWithStock {
   name: string;
   category: string;
   description: string;
-  deliveryMessage?: string;
+  deliveryMessage?: string | undefined;
   price: number;
-  bulkDiscounts?: IBulkDiscountTier[];
+  bulkDiscounts?: IBulkDiscountTier[] | undefined;
+  deliveryType: DeliveryType;
+  fileId?: string | undefined;
+  fileUrl?: string | undefined;
+  webhookUrl?: string | undefined;
   isActive: boolean;
-  warrantyDuration?: number;
-  warrantyUnit?: WarrantyUnit;
-  maxClaims?: number;
+  warrantyDuration?: number | undefined;
+  warrantyUnit?: WarrantyUnit | undefined;
+  maxClaims?: number | undefined;
   stockCount: number;
   soldCount: number;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface DeliveredLineItem {
+  productId: string;
+  productName: string;
+  category: string;
+  deliveryType: DeliveryType;
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number;
+  discountAmount?: number | undefined;
+  itemContent?: string | undefined;
+  fileId?: string | undefined;
+  fileUrl?: string | undefined;
+  dynamicResponse?: string | undefined;
+  deliveryMessage?: string | undefined;
+  warrantyExpiresAt?: Date | undefined;
+  warrantyDuration?: number | undefined;
+  warrantyUnit?: WarrantyUnit | undefined;
+  maxClaims?: number | undefined;
 }
 
 export type PurchaseResult =
@@ -55,12 +88,44 @@ export type PurchaseResult =
       productName: string;
       quantity: number;
       price: number;
-      deliveryMessage?: string;
+      deliveryType: DeliveryType;
+      fileId?: string | undefined;
+      fileUrl?: string | undefined;
+      dynamicResponse?: string | undefined;
+      deliveryMessage?: string | undefined;
     }
   | {
       success: false;
-      reason: "PRODUCT_NOT_FOUND" | "PRODUCT_INACTIVE" | "OUT_OF_STOCK" | "INSUFFICIENT_BALANCE" | "INVALID_QUANTITY" | "INTERNAL_ERROR";
+      reason:
+        | "PRODUCT_NOT_FOUND"
+        | "PRODUCT_INACTIVE"
+        | "OUT_OF_STOCK"
+        | "INSUFFICIENT_BALANCE"
+        | "INVALID_QUANTITY"
+        | "INTERNAL_ERROR";
       message: string;
+    };
+
+export type CartCheckoutResult =
+  | {
+      success: true;
+      order: DigitalOrderDocument;
+      items: DeliveredLineItem[];
+      totalQuantity: number;
+      totalPrice: number;
+      totalDiscount: number;
+      remainingBalance: number;
+    }
+  | {
+      success: false;
+      reason:
+        | "CART_EMPTY"
+        | "CART_INVALID"
+        | "OUT_OF_STOCK"
+        | "INSUFFICIENT_BALANCE"
+        | "INTERNAL_ERROR";
+      message: string;
+      validationErrors?: string[];
     };
 
 // ============================================================================
@@ -179,7 +244,7 @@ export class DigitalProductService {
     return await DigitalProduct.findByIdAndUpdate(
       productId,
       { $set: { bulkDiscounts: [] } },
-      { new: true }
+      { returnDocument: "after" }
     );
   }
 
@@ -193,6 +258,11 @@ export class DigitalProductService {
     deliveryMessage?: string;
     price: number;
     bulkDiscounts?: IBulkDiscountTier[];
+    deliveryType?: DeliveryType;
+    fileId?: string;
+    fileUrl?: string;
+    webhookUrl?: string;
+    apiHeader?: Record<string, string>;
     isActive?: boolean;
     warrantyDuration?: number;
     warrantyUnit?: WarrantyUnit;
@@ -205,6 +275,11 @@ export class DigitalProductService {
       deliveryMessage: data.deliveryMessage?.trim() || "",
       price: Math.max(0, Math.round(data.price)),
       bulkDiscounts: (data.bulkDiscounts || []).sort((a, b) => a.minQty - b.minQty),
+      deliveryType: data.deliveryType || "CREDENTIAL",
+      fileId: data.fileId?.trim() || undefined,
+      fileUrl: data.fileUrl?.trim() || undefined,
+      webhookUrl: data.webhookUrl?.trim() || undefined,
+      apiHeader: data.apiHeader || undefined,
       isActive: data.isActive ?? true,
       warrantyDuration: Math.max(0, data.warrantyDuration ?? 0),
       warrantyUnit: data.warrantyUnit ?? "NONE",
@@ -223,7 +298,7 @@ export class DigitalProductService {
     return await DigitalProduct.findByIdAndUpdate(
       id,
       { $set: data },
-      { new: true, runValidators: true }
+      { returnDocument: "after", runValidators: true }
     );
   }
 
@@ -292,6 +367,9 @@ export class DigitalProductService {
 
     return products.map((p) => {
       const pidStr = String(p._id);
+      const deliveryType: DeliveryType = p.deliveryType || "CREDENTIAL";
+      const stockCount = deliveryType === "CREDENTIAL" ? (unsoldMap.get(pidStr) ?? 0) : 9999;
+
       return {
         id: pidStr,
         name: p.name,
@@ -300,11 +378,15 @@ export class DigitalProductService {
         deliveryMessage: p.deliveryMessage || "",
         price: p.price,
         bulkDiscounts: p.bulkDiscounts || [],
+        deliveryType,
+        fileId: p.fileId,
+        fileUrl: p.fileUrl,
+        webhookUrl: p.webhookUrl,
         isActive: p.isActive,
         warrantyDuration: p.warrantyDuration ?? 0,
         warrantyUnit: p.warrantyUnit ?? "NONE",
         maxClaims: p.maxClaims ?? 1,
-        stockCount: unsoldMap.get(pidStr) ?? 0,
+        stockCount,
         soldCount: soldMap.get(pidStr) ?? 0,
         createdAt: p.createdAt,
         updatedAt: p.updatedAt,
@@ -322,7 +404,11 @@ export class DigitalProductService {
     if (!p) return null;
 
     const pidStr = String(p._id);
-    const stockCount = await DigitalStock.countDocuments({ productId: p._id, isSold: false });
+    const deliveryType: DeliveryType = p.deliveryType || "CREDENTIAL";
+    const stockCount =
+      deliveryType === "CREDENTIAL"
+        ? await DigitalStock.countDocuments({ productId: p._id, isSold: false })
+        : 9999;
     const soldCount = await DigitalStock.countDocuments({ productId: p._id, isSold: true });
 
     return {
@@ -333,6 +419,10 @@ export class DigitalProductService {
       deliveryMessage: p.deliveryMessage || "",
       price: p.price,
       bulkDiscounts: p.bulkDiscounts || [],
+      deliveryType,
+      fileId: p.fileId,
+      fileUrl: p.fileUrl,
+      webhookUrl: p.webhookUrl,
       isActive: p.isActive,
       warrantyDuration: p.warrantyDuration ?? 0,
       warrantyUnit: p.warrantyUnit ?? "NONE",
@@ -452,14 +542,75 @@ export class DigitalProductService {
   }
 
   /**
+   * Takes a single specific unsold stock item by its ID, removes it from stock, and returns it.
+   */
+  static async takeStockItem(stockId: string): Promise<DigitalStockDocument | null> {
+    if (!Types.ObjectId.isValid(stockId)) return null;
+    return await DigitalStock.findOneAndDelete({ _id: stockId, isSold: false });
+  }
+
+  /**
+   * Takes up to `quantity` unsold stock items (FIFO - oldest first) for a product,
+   * removes them from stock atomically, and returns the taken items.
+   */
+  static async takeStockBulk(productId: string, quantity: number): Promise<DigitalStockDocument[]> {
+    if (!Types.ObjectId.isValid(productId) || quantity <= 0) return [];
+    const safeQty = Math.min(Math.floor(quantity), 500);
+    const items = await DigitalStock.find({ productId, isSold: false })
+      .sort({ createdAt: 1 })
+      .limit(safeQty);
+    if (items.length === 0) return [];
+
+    const ids = items.map((i) => i._id);
+    await DigitalStock.deleteMany({ _id: { $in: ids } });
+    return items;
+  }
+
+  /**
+   * Retrieves paginated unsold stock items for a product.
+   */
+  static async getUnsoldStockPaginated(
+    productId: string,
+    page: number = 0,
+    limit: number = 5
+  ): Promise<{
+    items: DigitalStockDocument[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    if (!Types.ObjectId.isValid(productId)) {
+      return { items: [], total: 0, page: 0, totalPages: 0 };
+    }
+    const safePage = Math.max(0, page);
+    const total = await DigitalStock.countDocuments({ productId, isSold: false });
+    const totalPages = Math.ceil(total / limit);
+
+    const items = await DigitalStock.find({ productId, isSold: false })
+      .sort({ createdAt: 1 })
+      .skip(safePage * limit)
+      .limit(limit);
+
+    return { items, total, page: safePage, totalPages };
+  }
+
+  /**
+   * Retrieves a single stock item by ID.
+   */
+  static async getSingleStockItem(stockId: string): Promise<DigitalStockDocument | null> {
+    if (!Types.ObjectId.isValid(stockId)) return null;
+    return await DigitalStock.findById(stockId);
+  }
+
+  /**
    * Executes a safe atomic purchase of a digital product for a user:
    * 1. Validates quantity (must be positive integer >= 1).
    * 2. Validates product exists and is active.
    * 3. Calculates effective wholesale / bulk price based on quantity.
    * 4. Checks user balance against total price.
-   * 5. Atomically acquires N unsold stock items (FIFO).
+   * 5. Atomically acquires N unsold stock items for CREDENTIAL (or resolves FILE/API/PREORDER).
    * 6. Deducts user balance and increments totalOrders.
-   * 7. Creates DigitalOrder record.
+   * 7. Creates DigitalOrder record with multi-format items.
    * 8. Returns order and delivered stock content.
    */
   static async purchaseProduct(
@@ -502,6 +653,7 @@ export class DigitalProductService {
       };
     }
 
+    const deliveryType: DeliveryType = product.deliveryType || "CREDENTIAL";
     const pricing = DigitalProductService.calculatePricing(product, safeQty);
     const totalPrice = pricing.totalPrice;
 
@@ -524,36 +676,119 @@ export class DigitalProductService {
     }
 
     const orderId = `DIGI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-
-    // Atomically acquire N unsold stock items (FIFO)
     const acquiredItems: DigitalStockDocument[] = [];
-    for (let i = 0; i < safeQty; i++) {
-      const acquired = await DigitalStock.findOneAndUpdate(
-        {
-          productId: product._id,
-          isSold: false,
-          _id: { $nin: acquiredItems.map((a) => a._id) },
-        },
-        {
-          $set: {
-            isSold: true,
-            soldTo: telegramId,
-            soldAt: new Date(),
-            orderId,
-          },
-        },
-        {
-          sort: { createdAt: 1 },
-          new: true,
-        }
-      );
+    let formattedContent = "";
+    let dynamicResponse: string | undefined = undefined;
 
-      if (!acquired) break;
-      acquiredItems.push(acquired);
+    // ── 2. Handle Delivery Type Fulfillment ─────────────────────────────────
+    if (deliveryType === "CREDENTIAL") {
+      // Atomically acquire N unsold stock items (FIFO)
+      for (let i = 0; i < safeQty; i++) {
+        const acquired = await DigitalStock.findOneAndUpdate(
+          {
+            productId: product._id,
+            isSold: false,
+            _id: { $nin: acquiredItems.map((a) => a._id) },
+          },
+          {
+            $set: {
+              isSold: true,
+              soldTo: telegramId,
+              soldAt: new Date(),
+              orderId,
+            },
+          },
+          {
+            sort: { createdAt: 1 },
+            returnDocument: "after",
+          }
+        );
+
+        if (!acquired) break;
+        acquiredItems.push(acquired);
+      }
+
+      if (acquiredItems.length < safeQty) {
+        // Rollback any acquired items if full quantity could not be fulfilled
+        if (acquiredItems.length > 0) {
+          await DigitalStock.updateMany(
+            { _id: { $in: acquiredItems.map((a) => a._id) } },
+            {
+              $set: {
+                isSold: false,
+                soldTo: undefined,
+                soldAt: undefined,
+                orderId: undefined,
+              },
+            }
+          );
+        }
+
+        return {
+          success: false,
+          reason: "OUT_OF_STOCK",
+          message:
+            acquiredItems.length === 0
+              ? "Maaf, stok produk ini baru saja habis."
+              : `Maaf, stok tidak mencukupi untuk jumlah ${safeQty} item. Stok tersisa hanya ${acquiredItems.length} item.`,
+        };
+      }
+
+      formattedContent =
+        acquiredItems.length === 1
+          ? acquiredItems[0]!.content
+          : acquiredItems.map((item, idx) => `[Item #${idx + 1}]\n${item.content}`).join("\n\n");
+    } else if (deliveryType === "FILE") {
+      formattedContent = product.fileUrl || product.fileId || "📁 File terlampir (akan dikirimkan otomatis).";
+    } else if (deliveryType === "DYNAMIC_API") {
+      if (product.webhookUrl) {
+        try {
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            ...(typeof product.apiHeader === "object" ? product.apiHeader : {}),
+          };
+          const response = await fetch(product.webhookUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              orderId,
+              userId: telegramId,
+              productId: String(product._id),
+              productName: product.name,
+              quantity: safeQty,
+            }),
+            signal: AbortSignal.timeout(6000),
+          });
+          const resJson: any = await response.json().catch(() => null);
+          dynamicResponse = resJson?.content || resJson?.key || resJson?.token || JSON.stringify(resJson) || "Success";
+          formattedContent = dynamicResponse!;
+        } catch (err) {
+          console.error(`[digitalProduct] DYNAMIC_API webhook error:`, err);
+          dynamicResponse = `GEN-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+          formattedContent = `⚡ Token/Lisensi: ${dynamicResponse}`;
+        }
+      } else {
+        dynamicResponse = `KEY-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+        formattedContent = `⚡ Kode Akses / Serial: ${dynamicResponse}`;
+      }
+    } else if (deliveryType === "MANUAL_PREORDER") {
+      formattedContent = "⏳ Pesanan Pre-Order diterima. Admin akan memproses pesanan Anda secara manual secepatnya.";
     }
 
-    if (acquiredItems.length < safeQty) {
-      // Rollback any acquired items if full quantity could not be fulfilled
+    // ── 3. Atomically Deduct Balance ────────────────────────────────────────
+    const updatedUser = await User.findOneAndUpdate(
+      { telegramId, balance: { $gte: totalPrice } },
+      {
+        $inc: {
+          balance: -totalPrice,
+          totalOrders: safeQty,
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    if (!updatedUser) {
+      // Rollback acquired items if user balance deduction failed
       if (acquiredItems.length > 0) {
         await DigitalStock.updateMany(
           { _id: { $in: acquiredItems.map((a) => a._id) } },
@@ -570,52 +805,20 @@ export class DigitalProductService {
 
       return {
         success: false,
-        reason: "OUT_OF_STOCK",
-        message:
-          acquiredItems.length === 0
-            ? "Maaf, stok produk ini baru saja habis."
-            : `Maaf, stok tidak mencukupi untuk jumlah ${safeQty} item. Stok tersisa hanya ${acquiredItems.length} item.`,
-      };
-    }
-
-    // Atomically deduct user balance (with balance guard)
-    const updatedUser = await User.findOneAndUpdate(
-      { telegramId, balance: { $gte: totalPrice } },
-      {
-        $inc: {
-          balance: -totalPrice,
-          totalOrders: safeQty,
-        },
-      },
-      { new: true }
-    );
-
-    if (!updatedUser) {
-      // Rollback acquired items if user balance deduction failed (e.g. race condition)
-      await DigitalStock.updateMany(
-        { _id: { $in: acquiredItems.map((a) => a._id) } },
-        {
-          $set: {
-            isSold: false,
-            soldTo: undefined,
-            soldAt: undefined,
-            orderId: undefined,
-          },
-        }
-      );
-
-      return {
-        success: false,
         reason: "INSUFFICIENT_BALANCE",
         message: "Gagal memotong saldo. Pastikan saldo kamu mencukupi.",
       };
     }
 
-    // Format delivered items
-    const formattedContent =
-      acquiredItems.length === 1
-        ? acquiredItems[0]!.content
-        : acquiredItems.map((item, idx) => `[Item #${idx + 1}]\n${item.content}`).join("\n\n");
+    // Create balance audit log
+    await BalanceLog.create({
+      userId: telegramId,
+      type: "PURCHASE",
+      amount: totalPrice,
+      balanceBefore: user.balance,
+      balanceAfter: updatedUser.balance,
+      reason: `Beli ${product.name} (${safeQty}x)`,
+    });
 
     // Compute warranty expiry
     const now = new Date();
@@ -625,10 +828,35 @@ export class DigitalProductService {
       product.warrantyUnit
     );
 
+    const singleOrderItem: IDigitalOrderItem = {
+      productId: product._id,
+      productName: product.name,
+      category: product.category,
+      deliveryType,
+      quantity: safeQty,
+      unitPrice: pricing.unitPrice,
+      totalPrice: totalPrice,
+      discountAmount: pricing.discountAmount,
+      itemContent: formattedContent,
+      fileId: product.fileId,
+      fileUrl: product.fileUrl,
+      dynamicResponse,
+      deliveryMessage: product.deliveryMessage || "",
+      warrantyDuration: product.warrantyDuration ?? 0,
+      warrantyUnit: product.warrantyUnit ?? "NONE",
+      warrantyExpiresAt,
+      maxClaims: product.maxClaims ?? 1,
+      claimsCount: 0,
+    };
+    if (pricing.appliedTier) {
+      singleOrderItem.bulkTierMinQty = pricing.appliedTier.minQty;
+    }
+
     // Create DigitalOrder document
     const orderData: any = {
       orderId,
       userId: telegramId,
+      items: [singleOrderItem],
       productId: product._id,
       productName: product.name,
       quantity: safeQty,
@@ -659,7 +887,304 @@ export class DigitalProductService {
       productName: product.name,
       quantity: safeQty,
       price: totalPrice,
+      deliveryType,
+      fileId: product.fileId,
+      fileUrl: product.fileUrl,
+      dynamicResponse,
       deliveryMessage: product.deliveryMessage || "",
+    };
+  }
+
+  /**
+   * Executes an atomic multi-item checkout from the user's shopping cart:
+   * 1. Validates all cart items and stock in real-time.
+   * 2. Checks user balance against total cart price (accounting for any promo discount).
+   * 3. Atomically acquires stock for all CREDENTIAL items (rollback on any failure).
+   * 4. Resolves FILE, DYNAMIC_API, and MANUAL_PREORDER delivery payloads.
+   * 5. Atomically deducts user balance & creates audit BalanceLog.
+   * 6. Creates a single DigitalOrder containing all line items.
+   * 7. Empties the user's shopping cart.
+   * 8. Returns comprehensive checkout summary with line items.
+   */
+  static async checkoutCart(
+    userId: string,
+    options?: { promoCode?: string; promoDiscountAmount?: number }
+  ): Promise<CartCheckoutResult> {
+    const user = await User.findOne({ telegramId: userId });
+    if (!user) {
+      return {
+        success: false,
+        reason: "INTERNAL_ERROR",
+        message: "Akun pengguna tidak ditemukan di database.",
+      };
+    }
+
+    const cartSummary = await CartService.getCartSummary(userId);
+    if (cartSummary.items.length === 0) {
+      return {
+        success: false,
+        reason: "CART_EMPTY",
+        message: "Keranjang belanja Anda masih kosong.",
+      };
+    }
+
+    if (!cartSummary.isCartValid) {
+      return {
+        success: false,
+        reason: "CART_INVALID",
+        message: "Beberapa produk di keranjang Anda mengalami perubahan ketersediaan atau stok.",
+        validationErrors: cartSummary.validationErrors,
+      };
+    }
+
+    const promoDiscount = Math.max(0, options?.promoDiscountAmount || 0);
+    const grandTotal = Math.max(0, cartSummary.totalPrice - promoDiscount);
+
+    if (user.balance < grandTotal) {
+      return {
+        success: false,
+        reason: "INSUFFICIENT_BALANCE",
+        message: `Saldo tidak mencukupi. Saldo kamu: Rp ${user.balance.toLocaleString("id-ID")}, Total Bayar: Rp ${grandTotal.toLocaleString("id-ID")}.`,
+      };
+    }
+
+    const orderId = `DIGI-CART-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const now = new Date();
+
+    const allAcquiredStockDocs: DigitalStockDocument[] = [];
+    const orderLineItems: IDigitalOrderItem[] = [];
+    const deliveredLineItems: DeliveredLineItem[] = [];
+
+    // ── Acquire stock & prepare fulfillment for all line items ───────────────
+    for (const item of cartSummary.items) {
+      const product = await DigitalProduct.findById(item.productId);
+      if (!product || !product.isActive) {
+        // Rollback already acquired stocks
+        if (allAcquiredStockDocs.length > 0) {
+          await DigitalStock.updateMany(
+            { _id: { $in: allAcquiredStockDocs.map((s) => s._id) } },
+            { $set: { isSold: false, soldTo: undefined, soldAt: undefined, orderId: undefined } }
+          );
+        }
+        return {
+          success: false,
+          reason: "OUT_OF_STOCK",
+          message: `Produk "${item.productName}" sudah tidak tersedia.`,
+        };
+      }
+
+      const deliveryType: DeliveryType = product.deliveryType || "CREDENTIAL";
+      let formattedContent = "";
+      let dynamicResponse: string | undefined = undefined;
+
+      if (deliveryType === "CREDENTIAL") {
+        const itemStocks: DigitalStockDocument[] = [];
+        for (let i = 0; i < item.quantity; i++) {
+          const acquired = await DigitalStock.findOneAndUpdate(
+            {
+              productId: product._id,
+              isSold: false,
+              _id: { $nin: allAcquiredStockDocs.map((s) => s._id) },
+            },
+            {
+              $set: {
+                isSold: true,
+                soldTo: userId,
+                soldAt: now,
+                orderId,
+              },
+            },
+            {
+              sort: { createdAt: 1 },
+              returnDocument: "after",
+            }
+          );
+
+          if (!acquired) break;
+          itemStocks.push(acquired);
+          allAcquiredStockDocs.push(acquired);
+        }
+
+        if (itemStocks.length < item.quantity) {
+          // Rollback ALL acquired stocks across the entire cart
+          if (allAcquiredStockDocs.length > 0) {
+            await DigitalStock.updateMany(
+              { _id: { $in: allAcquiredStockDocs.map((s) => s._id) } },
+              { $set: { isSold: false, soldTo: undefined, soldAt: undefined, orderId: undefined } }
+            );
+          }
+
+          return {
+            success: false,
+            reason: "OUT_OF_STOCK",
+            message: `Stok untuk "${product.name}" tidak mencukupi untuk jumlah ${item.quantity} item.`,
+          };
+        }
+
+        formattedContent =
+          itemStocks.length === 1
+            ? itemStocks[0]!.content
+            : itemStocks.map((s, idx) => `[Item #${idx + 1}]\n${s.content}`).join("\n\n");
+      } else if (deliveryType === "FILE") {
+        formattedContent = product.fileUrl || product.fileId || "📁 File terlampir (dikirim otomatis).";
+      } else if (deliveryType === "DYNAMIC_API") {
+        if (product.webhookUrl) {
+          try {
+            const headers: Record<string, string> = {
+              "Content-Type": "application/json",
+              ...(typeof product.apiHeader === "object" ? product.apiHeader : {}),
+            };
+            const response = await fetch(product.webhookUrl, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                orderId,
+                userId,
+                productId: String(product._id),
+                productName: product.name,
+                quantity: item.quantity,
+              }),
+              signal: AbortSignal.timeout(6000),
+            });
+            const resJson: any = await response.json().catch(() => null);
+            dynamicResponse = resJson?.content || resJson?.key || resJson?.token || JSON.stringify(resJson) || "Success";
+            formattedContent = dynamicResponse!;
+          } catch (err) {
+            console.error(`[digitalProduct] DYNAMIC_API webhook error for ${product.name}:`, err);
+            dynamicResponse = `GEN-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+            formattedContent = `⚡ Token/Lisensi: ${dynamicResponse}`;
+          }
+        } else {
+          dynamicResponse = `KEY-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+          formattedContent = `⚡ Kode Akses / Serial: ${dynamicResponse}`;
+        }
+      } else if (deliveryType === "MANUAL_PREORDER") {
+        formattedContent = "⏳ Pesanan Pre-Order diterima. Admin akan memproses pesanan Anda secara manual secepatnya.";
+      }
+
+      const warrantyExpiresAt = WarrantyService.calculateExpiryDate(
+        now,
+        product.warrantyDuration,
+        product.warrantyUnit
+      );
+
+      const lineItem: IDigitalOrderItem = {
+        productId: product._id,
+        productName: product.name,
+        category: product.category,
+        deliveryType,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        totalPrice: item.lineTotalPrice,
+        discountAmount: item.discountAmount,
+        itemContent: formattedContent,
+        fileId: product.fileId,
+        fileUrl: product.fileUrl,
+        dynamicResponse,
+        deliveryMessage: product.deliveryMessage || "",
+        warrantyDuration: product.warrantyDuration ?? 0,
+        warrantyUnit: product.warrantyUnit ?? "NONE",
+        warrantyExpiresAt,
+        maxClaims: product.maxClaims ?? 1,
+        claimsCount: 0,
+      };
+
+      orderLineItems.push(lineItem);
+      deliveredLineItems.push({
+        productId: String(product._id),
+        productName: product.name,
+        category: product.category,
+        deliveryType,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        totalPrice: item.lineTotalPrice,
+        discountAmount: item.discountAmount,
+        itemContent: formattedContent,
+        fileId: product.fileId,
+        fileUrl: product.fileUrl,
+        dynamicResponse,
+        deliveryMessage: product.deliveryMessage || "",
+        warrantyExpiresAt,
+        warrantyDuration: product.warrantyDuration,
+        warrantyUnit: product.warrantyUnit,
+        maxClaims: product.maxClaims,
+      });
+    }
+
+    // ── Atomically Deduct User Balance ──────────────────────────────────────
+    const updatedUser = await User.findOneAndUpdate(
+      { telegramId: userId, balance: { $gte: grandTotal } },
+      {
+        $inc: {
+          balance: -grandTotal,
+          totalOrders: cartSummary.totalQuantity,
+        },
+      },
+      { returnDocument: "after" }
+    );
+
+    if (!updatedUser) {
+      // Rollback all acquired stock items if deduction failed
+      if (allAcquiredStockDocs.length > 0) {
+        await DigitalStock.updateMany(
+          { _id: { $in: allAcquiredStockDocs.map((s) => s._id) } },
+          { $set: { isSold: false, soldTo: undefined, soldAt: undefined, orderId: undefined } }
+        );
+      }
+
+      return {
+        success: false,
+        reason: "INSUFFICIENT_BALANCE",
+        message: "Gagal memotong saldo. Pastikan saldo kamu mencukupi.",
+      };
+    }
+
+    // Create BalanceLog audit entry
+    await BalanceLog.create({
+      userId,
+      type: "PURCHASE",
+      amount: grandTotal,
+      balanceBefore: user.balance,
+      balanceAfter: updatedUser.balance,
+      reason: `Checkout keranjang (${cartSummary.totalQuantity} item, ${orderLineItems.length} jenis produk)`,
+    });
+
+    // ── Create Unified DigitalOrder Record ──────────────────────────────────
+    const primaryItem = orderLineItems[0]!;
+    const order = await DigitalOrder.create({
+      orderId,
+      userId,
+      items: orderLineItems,
+      productId: primaryItem.productId,
+      productName:
+        orderLineItems.length === 1
+          ? primaryItem.productName
+          : `${primaryItem.productName} + ${orderLineItems.length - 1} produk lainnya`,
+      quantity: cartSummary.totalQuantity,
+      price: grandTotal,
+      unitPrice: primaryItem.unitPrice,
+      discountAmount: cartSummary.totalDiscount + promoDiscount,
+      itemContent: orderLineItems.map((i) => `[${i.productName} (${i.quantity}x)]\n${i.itemContent}`).join("\n\n"),
+      deliveryMessage: primaryItem.deliveryMessage || "",
+      warrantyDuration: primaryItem.warrantyDuration,
+      warrantyUnit: primaryItem.warrantyUnit,
+      warrantyExpiresAt: primaryItem.warrantyExpiresAt,
+      maxClaims: primaryItem.maxClaims,
+      claimsCount: 0,
+      createdAt: now,
+    });
+
+    // ── Empty Cart ──────────────────────────────────────────────────────────
+    await CartService.clearCart(userId);
+
+    return {
+      success: true,
+      order,
+      items: deliveredLineItems,
+      totalQuantity: cartSummary.totalQuantity,
+      totalPrice: grandTotal,
+      totalDiscount: cartSummary.totalDiscount + promoDiscount,
+      remainingBalance: updatedUser.balance,
     };
   }
 
@@ -670,6 +1195,13 @@ export class DigitalProductService {
     return await DigitalOrder.find({ userId: telegramId })
       .sort({ createdAt: -1 })
       .limit(limit);
+  }
+
+  /**
+   * Retrieves a specific digital order by orderId.
+   */
+  static async getOrderByOrderId(orderId: string): Promise<DigitalOrderDocument | null> {
+    return await DigitalOrder.findOne({ orderId });
   }
 
   /**

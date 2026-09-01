@@ -1,4 +1,5 @@
 import { PromoCode } from "../models/PromoCode.js";
+import { AntiFraudService } from "./antiFraudService.js";
 
 // ============================================================================
 //  Promo / Voucher Service
@@ -9,7 +10,7 @@ export interface PromoValidationResult {
   discountAmount: number;
   discountedPrice: number;
   message: string;
-  promoDoc?: import("../models/PromoCode.js").IPromoCode;
+  promoDoc?: import("../models/PromoCode.js").IPromoCode | undefined;
 }
 
 /**
@@ -24,10 +25,31 @@ export async function validatePromo(
 ): Promise<PromoValidationResult> {
   const normalizedCode = code.trim().toUpperCase();
 
+  // 1. Check if user is temporarily blocked from promo attempts
+  const lockCheck = await AntiFraudService.checkPromoAttempt(userId);
+  if (lockCheck.blocked) {
+    const minutesLeft = Math.max(1, Math.ceil((lockCheck.remainingSeconds || 0) / 60));
+    return {
+      valid: false,
+      discountAmount: 0,
+      discountedPrice: purchaseAmount,
+      message: `⛔ <b>Input Promo Diblokir Sementara!</b>\n\nKamu telah gagal memasukkan kode promo sebanyak 5 kali berturut-turut.\nSilakan coba lagi dalam <b>${minutesLeft} menit</b>.`,
+    };
+  }
+
   const promo = await PromoCode.findOne({ code: normalizedCode });
 
   if (!promo) {
-    return { valid: false, discountAmount: 0, discountedPrice: purchaseAmount, message: "❌ Kode promo tidak ditemukan." };
+    const failRes = await AntiFraudService.recordPromoFailure(userId);
+    const failWarning = failRes.blocked
+      ? `\n\n⛔ <i>Batas percobaan terlampaui. Input promo dikunci selama ${Math.ceil((failRes.remainingSeconds || 0) / 60)} menit.</i>`
+      : ` (Percobaan gagal: ${failRes.attempts}/5)`;
+    return {
+      valid: false,
+      discountAmount: 0,
+      discountedPrice: purchaseAmount,
+      message: `❌ Kode promo tidak ditemukan.${failWarning}`,
+    };
   }
 
   if (!promo.isActive) {
@@ -54,6 +76,9 @@ export async function validatePromo(
       message: `❌ Minimal pembelian untuk kode ini adalah Rp ${promo.minSpend.toLocaleString("id-ID")}.`,
     };
   }
+
+  // Reset failed attempts on valid code
+  await AntiFraudService.resetPromoFailure(userId);
 
   // Calculate discount
   let discount = 0;
@@ -92,6 +117,7 @@ export async function applyPromo(code: string, userId: string): Promise<void> {
       $push: { usedBy: userId },
     }
   );
+  await AntiFraudService.resetPromoFailure(userId);
 }
 
 /**

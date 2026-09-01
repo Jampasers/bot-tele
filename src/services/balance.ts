@@ -64,7 +64,7 @@ export async function adjustBalance(
       ? { telegramId: userId, balance: { $gte: absAmount } }
       : { telegramId: userId },
     { $inc: { balance: delta } },
-    { new: true }
+    { returnDocument: "after" }
   );
 
   if (!updated) {

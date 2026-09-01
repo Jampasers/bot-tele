@@ -119,6 +119,8 @@ export async function generateQris(amountIDR: number): Promise<GeneratedQris> {
   return { buffer, dataUri, payload };
 }
 
+import { AntiFraudService } from "../antiFraudService.js";
+
 /**
  * Checks if a pending TopupSession has a matching GoPay QRIS settlement.
  */
@@ -145,13 +147,35 @@ export async function checkSessionSettlement(
     const isTimeValid = tx.paidAt >= session.createdAt.getTime() - 60_000;
 
     if (isSettled && isAmountMatch && isTimeValid) {
-      // Ensure this transaction wasn't already claimed by another session
+      // 1. Payment Idempotency & Replay Attack signature check
+      const signature = AntiFraudService.computePaymentSignature(
+        "GOPAY",
+        tx.amount,
+        tx.paidAt,
+        tx.transactionId
+      );
+
+      const replayCheck = await AntiFraudService.checkPaymentReplay(signature, {
+        userId: session.telegramId,
+        amount: tx.amount,
+        txId: tx.transactionId,
+        issuer: "GOPAY",
+      });
+
+      if (replayCheck.isReplay) {
+        console.warn(`[Payment] Blocked replay attack for transaction ${tx.transactionId}`);
+        continue;
+      }
+
+      // 2. Ensure this transaction wasn't already claimed by another session in MongoDB
       const alreadyClaimed = await TopupSession.exists({
         matchedTransactionId: tx.transactionId,
         _id: { $ne: session._id },
       });
 
       if (!alreadyClaimed) {
+        // Record idempotency signature (TTL: 48h)
+        await AntiFraudService.recordPaymentSignature(signature);
         return tx;
       }
     }

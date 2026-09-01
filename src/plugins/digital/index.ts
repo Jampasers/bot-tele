@@ -1,9 +1,10 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
-import { DigitalProduct } from "../../models/DigitalProduct.js";
+import { DigitalProduct, DeliveryType } from "../../models/DigitalProduct.js";
 import { TopupSession, ITopupSession } from "../../models/TopupSession.js";
 import { DigitalProductService, ProductWithStock } from "../../services/digitalProduct.js";
+import { CartService, CartSummary } from "../../services/cartService.js";
 import { TestimonialService } from "../../services/testimonial.js";
 import { ActivityLogService } from "../../services/activityLog.js";
 import { generateQris, checkSessionSettlement, getUniquePaymentAmount } from "../../services/payment/index.js";
@@ -12,6 +13,7 @@ import { RestockAlert } from "../../models/RestockAlert.js";
 import { validatePromo, applyPromo } from "../../services/promo.js";
 import { awardCommission } from "../../services/affiliate.js";
 import { WarrantyService } from "../../services/warranty.js";
+import { TotpService } from "../../services/totp.js";
 
 // ============================================================================
 //  CONSTANTS & TIMINGS
@@ -79,6 +81,34 @@ function formatDate(date: Date): string {
   }).format(date);
 }
 
+function getDeliveryTypeLabel(type?: DeliveryType): string {
+  switch (type) {
+    case "FILE":
+      return "📁 File / Unduhan Dokumen";
+    case "DYNAMIC_API":
+      return "⚡ API Generator Instan";
+    case "MANUAL_PREORDER":
+      return "⏳ Pre-Order / Proses Manual";
+    case "CREDENTIAL":
+    default:
+      return "🔑 Akun / Kredensial Instan";
+  }
+}
+
+function getDeliveryTypeIcon(type?: DeliveryType): string {
+  switch (type) {
+    case "FILE":
+      return "📁";
+    case "DYNAMIC_API":
+      return "⚡";
+    case "MANUAL_PREORDER":
+      return "⏳";
+    case "CREDENTIAL":
+    default:
+      return "🔑";
+  }
+}
+
 /** Helper to edit text or send a fresh message if the previous one is photo/deleted */
 async function safeEditOrReply(
   ctx: Context,
@@ -110,10 +140,11 @@ async function safeEditOrReply(
 // ============================================================================
 
 /** Main Digital Categories / Catalog Landing */
-async function buildCategoriesView(): Promise<{ text: string; keyboard: InlineKeyboard }> {
+async function buildCategoriesView(userId?: string): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const categories = await DigitalProductService.getActiveCategories();
   const allProducts = await DigitalProductService.getAllProducts({ onlyActive: true });
   const totalStock = allProducts.reduce((sum, p) => sum + p.stockCount, 0);
+  const cartCount = userId ? await CartService.getItemCount(userId) : 0;
 
   const text =
     `📦 <b>Katalog Produk Digital</b>\n` +
@@ -124,6 +155,10 @@ async function buildCategoriesView(): Promise<{ text: string; keyboard: InlineKe
     `<i>⚡ Pengiriman instan otomatis begitu transaksi berhasil!</i>`;
 
   const kb = new InlineKeyboard();
+
+  // Cart Button on top
+  const cartLabel = cartCount > 0 ? `🛒 Keranjang Belanja (${cartCount} item)` : `🛒 Keranjang Belanja [0]`;
+  kb.text(cartLabel, "dg_cart_view").row();
 
   if (categories.length === 0) {
     kb.text("🔙 Kembali ke Katalog", CB_CATALOG);
@@ -154,13 +189,15 @@ async function buildCategoriesView(): Promise<{ text: string; keyboard: InlineKe
 async function buildProductsView(
   categoryName: string,
   categoryIndex: number,
-  page: number = 0
+  page: number = 0,
+  userId?: string
 ): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const products = await DigitalProductService.getAllProducts({
     onlyActive: true,
     category: categoryName,
   });
 
+  const cartCount = userId ? await CartService.getItemCount(userId) : 0;
   const totalPages = Math.max(1, Math.ceil(products.length / ITEMS_PER_PAGE));
   const safePage = Math.max(0, Math.min(page, totalPages - 1));
   const chunk = products.slice(safePage * ITEMS_PER_PAGE, (safePage + 1) * ITEMS_PER_PAGE);
@@ -172,6 +209,10 @@ async function buildProductsView(
     `<i>Halaman ${safePage + 1} dari ${totalPages}</i>`;
 
   const kb = new InlineKeyboard();
+
+  if (cartCount > 0) {
+    kb.text(`🛒 Keranjang (${cartCount} item)`, "dg_cart_view").row();
+  }
 
   if (chunk.length === 0) {
     kb.text("🔙 Kembali ke Kategori", "product_digital");
@@ -185,8 +226,11 @@ async function buildProductsView(
   }
 
   for (const prod of chunk) {
-    const icon = prod.stockCount > 0 ? "🟢" : "🔴";
-    const label = `${icon} ${prod.name} — ${formatPrice(prod.price)} [Stok: ${prod.stockCount}]`;
+    const isAvail = prod.deliveryType !== "CREDENTIAL" || prod.stockCount > 0;
+    const icon = isAvail ? "🟢" : "🔴";
+    const typeIcon = getDeliveryTypeIcon(prod.deliveryType);
+    const stockLabel = prod.deliveryType === "CREDENTIAL" ? ` [Stok: ${prod.stockCount}]` : "";
+    const label = `${icon} ${typeIcon} ${prod.name} — ${formatPrice(prod.price)}${stockLabel}`;
     kb.text(label, `dg_p_${prod.id}_${categoryIndex}_${safePage}`).row();
   }
 
@@ -209,12 +253,20 @@ async function buildProductDetailView(
   productId: string,
   userBalance: number,
   categoryIndex: number,
-  page: number
+  page: number,
+  userId?: string
 ): Promise<{ text: string; keyboard: InlineKeyboard } | null> {
   const prod = await DigitalProductService.getProductWithStock(productId);
   if (!prod) return null;
 
-  const stockStatus = prod.stockCount > 0 ? `🟢 <b>${prod.stockCount} item</b> (Tersedia)` : `🔴 <b>Habis</b>`;
+  const cartCount = userId ? await CartService.getItemCount(userId) : 0;
+  const deliveryType = prod.deliveryType || "CREDENTIAL";
+  const stockStatus =
+    deliveryType === "CREDENTIAL"
+      ? (prod.stockCount > 0 ? `🟢 <b>${prod.stockCount} item</b> (Tersedia)` : `🔴 <b>Habis</b>`)
+      : `🟢 <b>Sedia Instan</b>`;
+
+  const deliveryLabel = getDeliveryTypeLabel(deliveryType);
   const warrantyText = WarrantyService.formatWarrantyText(prod.warrantyDuration, prod.warrantyUnit, prod.maxClaims);
   const desc = prod.description ? `\n📝 <b>Deskripsi:</b>\n${prod.description}\n` : "";
 
@@ -231,22 +283,28 @@ async function buildProductDetailView(
   const text =
     `📦 <b>${prod.name}</b>\n` +
     `${"─".repeat(30)}\n\n` +
-    `📂 <b>Kategori:</b> ${prod.category}\n` +
-    `💰 <b>Harga:</b>    <b>${formatPrice(prod.price)}</b>\n` +
-    `🛡️ <b>Garansi:</b>  <b>${warrantyText}</b>\n` +
-    `📊 <b>Stok:</b>     ${stockStatus}\n` +
-    `🪙 <b>Saldo Anda:</b> ${formatPrice(userBalance)}\n` +
+    `📂 <b>Kategori:</b>       ${prod.category}\n` +
+    `🚚 <b>Format Kirim:</b>   <b>${deliveryLabel}</b>\n` +
+    `💰 <b>Harga:</b>          <b>${formatPrice(prod.price)}</b>\n` +
+    `🛡️ <b>Garansi:</b>        <b>${warrantyText}</b>\n` +
+    `📊 <b>Stok:</b>           ${stockStatus}\n` +
+    `🪙 <b>Saldo Anda:</b>     ${formatPrice(userBalance)}\n` +
     bulkSection +
     desc +
-    `\n<i>⚡ Data item akan langsung dikirim ke chat ini setelah dibeli.</i>`;
+    `\n<i>⚡ Transaksi diproses otomatis dan instan begitu pembayaran terkonfirmasi.</i>`;
 
   const kb = new InlineKeyboard();
 
-  if (prod.stockCount > 0 && prod.isActive) {
-    kb.text(`🛒 Beli Produk (${formatPrice(prod.price)})`, `dg_qty_${prod.id}_1_${categoryIndex}_${page}`).row();
+  if ((deliveryType !== "CREDENTIAL" || prod.stockCount > 0) && prod.isActive) {
+    kb.text(`🛒 Beli Sekarang (${formatPrice(prod.price)})`, `dg_qty_${prod.id}_1_${categoryIndex}_${page}`).row();
+    kb.text(`➕ Masukkan Keranjang`, `dg_cart_add_${prod.id}_1_${categoryIndex}_${page}`).row();
   } else {
     kb.text("❌ Stok Sedang Habis", "dg_noop").row();
     kb.text("🔔 Ingatkan Saat Restock", `dg_restock_${prod.id}`).row();
+  }
+
+  if (cartCount > 0) {
+    kb.text(`🛒 Lihat Keranjang (${cartCount} item)`, "dg_cart_view").row();
   }
 
   kb.text("🔙 Kembali ke Daftar", `dg_catpg_${categoryIndex}_${page}`);
@@ -260,12 +318,16 @@ async function buildQuantitySelectorView(
   userBalance: number,
   quantity: number,
   categoryIndex: number,
-  page: number
+  page: number,
+  userId?: string
 ): Promise<{ text: string; keyboard: InlineKeyboard } | null> {
   const prod = await DigitalProductService.getProductWithStock(productId);
   if (!prod || !prod.isActive) return null;
 
-  if (prod.stockCount <= 0) {
+  const deliveryType = prod.deliveryType || "CREDENTIAL";
+  const maxStock = deliveryType === "CREDENTIAL" ? prod.stockCount : 999;
+
+  if (deliveryType === "CREDENTIAL" && prod.stockCount <= 0) {
     const kb = new InlineKeyboard().text("🔙 Kembali", `dg_catpg_${categoryIndex}_${page}`);
     return {
       text:
@@ -277,7 +339,7 @@ async function buildQuantitySelectorView(
   }
 
   // Safe quantity clamp: strictly positive integer between 1 and available stock
-  const safeQty = Math.max(1, Math.min(prod.stockCount, Math.floor(quantity)));
+  const safeQty = Math.max(1, Math.min(maxStock, Math.floor(quantity)));
   const pricing = DigitalProductService.calculatePricing(prod, safeQty);
   const totalPrice = pricing.totalPrice;
   const shortage = Math.max(0, totalPrice - userBalance);
@@ -290,7 +352,7 @@ async function buildQuantitySelectorView(
   }
 
   let nextTierHint = "";
-  if (pricing.nextTier && pricing.nextTier.neededQty <= (prod.stockCount - safeQty)) {
+  if (pricing.nextTier && pricing.nextTier.neededQty <= (maxStock - safeQty)) {
     nextTierHint = `💡 <i>Beli ${pricing.nextTier.neededQty} item lagi untuk dapat harga grosir <b>${formatPrice(pricing.nextTier.pricePerUnit)}/item</b> (-${pricing.nextTier.discountPercent}%)!</i>\n\n`;
   }
 
@@ -298,8 +360,9 @@ async function buildQuantitySelectorView(
     `📦 <b>Beli Produk: ${prod.name}</b>\n` +
     `${"─".repeat(30)}\n\n` +
     `📂 <b>Kategori:</b>       ${prod.category}\n` +
+    `🚚 <b>Format Kirim:</b>   ${getDeliveryTypeLabel(deliveryType)}\n` +
     unitPriceText +
-    `📊 <b>Stok Tersedia:</b>  <b>${prod.stockCount} item</b>\n` +
+    `📊 <b>Stok Tersedia:</b>  <b>${deliveryType === "CREDENTIAL" ? `${prod.stockCount} item` : "Tersedia"}</b>\n` +
     `🪙 <b>Saldo Anda:</b>     <b>${formatPrice(userBalance)}</b>\n` +
     `${"─".repeat(30)}\n` +
     `🔢 <b>Jumlah Beli:</b>    <b>${safeQty} item</b>\n` +
@@ -319,8 +382,8 @@ async function buildQuantitySelectorView(
   // Row 1: Stepper (-5, -1, [Qty], +1, +5)
   const qMinus5 = Math.max(1, safeQty - 5);
   const qMinus1 = Math.max(1, safeQty - 1);
-  const qPlus1 = Math.min(prod.stockCount, safeQty + 1);
-  const qPlus5 = Math.min(prod.stockCount, safeQty + 5);
+  const qPlus1 = Math.min(maxStock, safeQty + 1);
+  const qPlus5 = Math.min(maxStock, safeQty + 5);
 
   kb.text("➖ 5", `dg_qset_${prod.id}_${qMinus5}_${categoryIndex}_${page}`)
     .text("➖ 1", `dg_qset_${prod.id}_${qMinus1}_${categoryIndex}_${page}`)
@@ -331,19 +394,19 @@ async function buildQuantitySelectorView(
 
   // Row 2: Quick Presets (1x, bulk tiers, Maks)
   const presetSet = new Set<number>([1]);
-  if (prod.stockCount >= 2) presetSet.add(2);
-  if (prod.stockCount >= 5) presetSet.add(5);
-  if (prod.stockCount >= 10) presetSet.add(10);
+  if (maxStock >= 2) presetSet.add(2);
+  if (maxStock >= 5) presetSet.add(5);
+  if (maxStock >= 10) presetSet.add(10);
   if (prod.bulkDiscounts && prod.bulkDiscounts.length > 0) {
     for (const t of prod.bulkDiscounts) {
-      if (t.minQty <= prod.stockCount) {
+      if (t.minQty <= maxStock) {
         presetSet.add(t.minQty);
       }
     }
   }
 
   // Pick up to 4 presets + Max
-  const sortedPresets = Array.from(presetSet).sort((a, b) => a - b).filter((q) => q < prod.stockCount);
+  const sortedPresets = Array.from(presetSet).sort((a, b) => a - b).filter((q) => q < maxStock);
   const selectedPresets = sortedPresets.slice(0, 4);
 
   for (const q of selectedPresets) {
@@ -351,7 +414,9 @@ async function buildQuantitySelectorView(
     const label = isTier ? `🏷️ ${q}x` : `${q}x`;
     kb.text(label, `dg_qset_${prod.id}_${q}_${categoryIndex}_${page}`);
   }
-  kb.text(`🌟 Maks (${prod.stockCount})`, `dg_qset_${prod.id}_${prod.stockCount}_${categoryIndex}_${page}`);
+  if (maxStock < 999) {
+    kb.text(`🌟 Maks (${maxStock})`, `dg_qset_${prod.id}_${maxStock}_${categoryIndex}_${page}`);
+  }
   kb.row();
 
   // Row 3: Manual Input Button
@@ -360,15 +425,98 @@ async function buildQuantitySelectorView(
   // Row 4: Promo Voucher
   kb.text("🎟️ Pakai Voucher / Kode Promo", `dg_promo_${prod.id}_${safeQty}_${categoryIndex}_${page}`).row();
 
-  // Row 5: Confirm Purchase Button
+  // Row 5: Add to Cart button
+  kb.text(`➕ Masukkan Keranjang (${safeQty}x)`, `dg_cart_add_${prod.id}_${safeQty}_${categoryIndex}_${page}`).row();
+
+  // Row 6: Confirm Purchase Button
   const confirmLabel = pricing.discountAmount > 0
-    ? `🛒 Beli (${safeQty} item — ${formatPrice(totalPrice)} | -${pricing.discountPercent}%)`
-    : `🛒 Konfirmasi Beli (${safeQty} item — ${formatPrice(totalPrice)})`;
+    ? `🛒 Beli Sekarang (${safeQty} item — ${formatPrice(totalPrice)} | -${pricing.discountPercent}%)`
+    : `🛒 Beli Sekarang (${safeQty} item — ${formatPrice(totalPrice)})`;
 
   kb.text(confirmLabel, `dg_confirmbuy_${prod.id}_${safeQty}_${categoryIndex}_${page}`).row();
 
-  // Row 6: Back to Product Detail
+  // Row 7: Back to Product Detail
   kb.text("🔙 Kembali ke Detail Produk", `dg_p_${prod.id}_${categoryIndex}_${page}`);
+
+  return { text, keyboard: kb };
+}
+
+/** Shopping Cart View */
+async function buildCartView(
+  userId: string,
+  userBalance: number
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const summary = await CartService.getCartSummary(userId);
+  const kb = new InlineKeyboard();
+
+  if (summary.items.length === 0) {
+    kb.text("🛍️ Belanja Produk Digital", "product_digital").row();
+    kb.text("🔙 Menu Utama", CB_CATALOG);
+    return {
+      text:
+        `🛒 <b>Keranjang Belanja Kosong</b>\n` +
+        `${"─".repeat(30)}\n\n` +
+        `<i>Keranjang belanja Anda saat ini masih kosong. Silakan pilih produk dari katalog untuk menambahkannya ke keranjang!</i>`,
+      keyboard: kb,
+    };
+  }
+
+  let itemsText = "";
+  for (let idx = 0; idx < summary.items.length; idx++) {
+    const item = summary.items[idx]!;
+    const num = idx + 1;
+    const typeIcon = getDeliveryTypeIcon(item.deliveryType);
+    const statusText = item.isAvailable
+      ? (item.deliveryType === "CREDENTIAL" ? `🟢 Tersedia (Stok: ${item.availableStock})` : `🟢 Siap Kirim`)
+      : `🔴 <b>${item.unavailableReason || "Stok Tidak Cukup"}</b>`;
+
+    const discText = item.discountAmount > 0 ? ` <i>(Diskon -${formatPrice(item.discountAmount)})</i>` : "";
+
+    itemsText +=
+      `<b>${num}. ${typeIcon} ${item.productName}</b>\n` +
+      `   • Kuantitas: <b>${item.quantity} item</b> × ${formatPrice(item.unitPrice)} = <b>${formatPrice(item.lineTotalPrice)}</b>${discText}\n` +
+      `   • Status: ${statusText}\n\n`;
+
+    // Row for each item: [1. ➖] [1. ➕] [1. 🗑 Hapus]
+    kb.text(`${num}. ➖ 1`, `dg_cart_dec_${item.productId}`)
+      .text(`${num}. ➕ 1`, `dg_cart_inc_${item.productId}`)
+      .text(`${num}. 🗑 Hapus`, `dg_cart_del_${item.productId}`)
+      .row();
+  }
+
+  const shortage = Math.max(0, summary.totalPrice - userBalance);
+  let balanceStatusText = "";
+  if (userBalance >= summary.totalPrice) {
+    balanceStatusText = `✅ <i>Saldo Anda mencukupi untuk checkout instan!</i>`;
+  } else {
+    balanceStatusText = `⚠️ <i>Saldo Anda kurang ${formatPrice(shortage)}. Silakan Top-up saldo terlebih dahulu.</i>`;
+  }
+
+  const text =
+    `🛒 <b>Keranjang Belanja Anda</b>\n` +
+    `${"─".repeat(30)}\n\n` +
+    itemsText +
+    `${"─".repeat(30)}\n` +
+    `🔢 <b>Total Item:</b>        <b>${summary.totalQuantity} item</b> (${summary.totalUniqueItems} produk)\n` +
+    `💰 <b>Subtotal:</b>          ${formatPrice(summary.totalRawPrice)}\n` +
+    `🏷️ <b>Total Diskon:</b>      -${formatPrice(summary.totalDiscount)}\n` +
+    `💵 <b>Total Pembayaran:</b>  <b>${formatPrice(summary.totalPrice)}</b>\n` +
+    `🪙 <b>Saldo Anda:</b>        ${formatPrice(userBalance)}\n` +
+    `${"─".repeat(30)}\n\n` +
+    balanceStatusText;
+
+  if (summary.isCartValid && userBalance >= summary.totalPrice) {
+    kb.text(`💳 Checkout Semua (${formatPrice(summary.totalPrice)})`, "dg_cart_checkout").row();
+  } else if (!summary.isCartValid) {
+    kb.text("⚠️ Periksa Item yang Tidak Tersedia", "dg_noop").row();
+  } else {
+    kb.text(`💳 Saldo Kurang — Topup Saldo`, "menu_topup").row();
+  }
+
+  kb.text("🗑 Kosongkan Keranjang", "dg_cart_clear")
+    .text("🛍️ Tambah Produk", "product_digital")
+    .row();
+  kb.text("🔙 Kembali ke Katalog", CB_CATALOG);
 
   return { text, keyboard: kb };
 }
@@ -396,7 +544,7 @@ function startDigitalQrisPolling(
       // ── 1. Timeout Check ──────────────────────────────────────────────────
       if (Date.now() - startedAt >= QRIS_TIMEOUT_MS) {
         clearDigitalQrisPoll(orderId);
-        const expiredSession = await TopupSession.findByIdAndUpdate(sessionId, { status: "EXPIRED" }, { new: true });
+        const expiredSession = await TopupSession.findByIdAndUpdate(sessionId, { status: "EXPIRED" }, { returnDocument: "after" });
         if (expiredSession) {
           ActivityLogService.logTopupCancelled(bot.api, {
             session: expiredSession,
@@ -439,13 +587,13 @@ function startDigitalQrisPolling(
         const updatedUser = await User.findOneAndUpdate(
           { telegramId },
           { $inc: { balance: amountIDR } },
-          { new: true }
+          { returnDocument: "after" }
         ).lean();
 
         const settledSession = await TopupSession.findByIdAndUpdate(sessionId, {
           status: "SETTLED",
           matchedTransactionId: matchedTx.transactionId,
-        }, { new: true });
+        }, { returnDocument: "after" });
 
         if (settledSession) {
           ActivityLogService.logTopupSettled(bot.api, {
@@ -597,8 +745,9 @@ const digitalPlugin: Plugin = {
     bot.command("produk", async (ctx) => {
       try {
         const from = ctx.from;
+        const telegramId = from ? String(from.id) : undefined;
         if (from) userManualQtyState.delete(String(from.id));
-        const { text, keyboard } = await buildCategoriesView();
+        const { text, keyboard } = await buildCategoriesView(telegramId);
         await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
       } catch (err) {
         console.error("[digital] /produk error:", err);
@@ -658,9 +807,10 @@ const digitalPlugin: Plugin = {
     bot.callbackQuery("product_digital", async (ctx) => {
       await ctx.answerCallbackQuery();
       const from = ctx.from;
+      const telegramId = from ? String(from.id) : undefined;
       if (from) userManualQtyState.delete(String(from.id));
       try {
-        const { text, keyboard } = await buildCategoriesView();
+        const { text, keyboard } = await buildCategoriesView(telegramId);
         await safeEditOrReply(ctx, text, {
           parse_mode: "HTML",
           reply_markup: keyboard,
@@ -670,10 +820,292 @@ const digitalPlugin: Plugin = {
       }
     });
 
+    // ── dg_cart_view — Open Shopping Cart View ──────────────────────────────
+    bot.callbackQuery("dg_cart_view", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      userManualQtyState.delete(telegramId);
+
+      const user = await User.findOne({ telegramId }).lean();
+      const balance = user?.balance ?? 0;
+
+      const { text, keyboard } = await buildCartView(telegramId, balance);
+      await safeEditOrReply(ctx, text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    });
+
+    // ── dg_cart_add_<productId>_<qty>_<catIdx>_<page> — Add item to Cart ────
+    bot.callbackQuery(/^dg_cart_add_([a-f0-9]+)_(\d+)(?:_(\d+)_(\d+))?$/, async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const productId = ctx.match[1]!;
+      const qty = parseInt(ctx.match[2]!, 10) || 1;
+      const catIdx = ctx.match[3] !== undefined ? parseInt(ctx.match[3], 10) : 0;
+      const page = ctx.match[4] !== undefined ? parseInt(ctx.match[4], 10) : 0;
+
+      const addRes = await CartService.addToCart(telegramId, productId, qty);
+      if (addRes.success) {
+        await ctx.answerCallbackQuery({
+          text: `🛒 Ditambahkan ke keranjang! (${addRes.cart.totalQuantity} item di keranjang)`,
+          show_alert: false,
+        });
+
+        const user = await User.findOne({ telegramId }).lean();
+        const balance = user?.balance ?? 0;
+
+        const detail = await buildProductDetailView(productId, balance, catIdx, page, telegramId);
+        if (detail) {
+          await safeEditOrReply(ctx, detail.text, {
+            parse_mode: "HTML",
+            reply_markup: detail.keyboard,
+          });
+        }
+      } else {
+        await ctx.answerCallbackQuery({
+          text: `⚠️ ${addRes.message}`,
+          show_alert: true,
+        });
+      }
+    });
+
+    // ── dg_cart_inc_<productId> — Increment Cart Item ───────────────────────
+    bot.callbackQuery(/^dg_cart_inc_([a-f0-9]+)$/, async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const productId = ctx.match[1]!;
+
+      const cart = await CartService.getCartSummary(telegramId);
+      const item = cart.items.find((i) => i.productId === productId);
+      const currentQty = item?.quantity ?? 0;
+
+      const updateRes = await CartService.updateQuantity(telegramId, productId, currentQty + 1);
+      if (!updateRes.success) {
+        await ctx.answerCallbackQuery({ text: `⚠️ ${updateRes.message}`, show_alert: true });
+        return;
+      }
+
+      await ctx.answerCallbackQuery({ text: `➕ Jumlah diubah: ${currentQty + 1}` });
+      const user = await User.findOne({ telegramId }).lean();
+      const { text, keyboard } = await buildCartView(telegramId, user?.balance ?? 0);
+      await safeEditOrReply(ctx, text, { parse_mode: "HTML", reply_markup: keyboard });
+    });
+
+    // ── dg_cart_dec_<productId> — Decrement Cart Item ───────────────────────
+    bot.callbackQuery(/^dg_cart_dec_([a-f0-9]+)$/, async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const productId = ctx.match[1]!;
+
+      const cart = await CartService.getCartSummary(telegramId);
+      const item = cart.items.find((i) => i.productId === productId);
+      const currentQty = item?.quantity ?? 1;
+
+      const updateRes = await CartService.updateQuantity(telegramId, productId, currentQty - 1);
+      if (!updateRes.success) {
+        await ctx.answerCallbackQuery({ text: `⚠️ ${updateRes.message}`, show_alert: true });
+        return;
+      }
+
+      await ctx.answerCallbackQuery({ text: currentQty - 1 <= 0 ? "🗑 Item dihapus" : `➖ Jumlah diubah: ${currentQty - 1}` });
+      const user = await User.findOne({ telegramId }).lean();
+      const { text, keyboard } = await buildCartView(telegramId, user?.balance ?? 0);
+      await safeEditOrReply(ctx, text, { parse_mode: "HTML", reply_markup: keyboard });
+    });
+
+    // ── dg_cart_del_<productId> — Delete Cart Item ───────────────────────────
+    bot.callbackQuery(/^dg_cart_del_([a-f0-9]+)$/, async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const productId = ctx.match[1]!;
+
+      await CartService.removeFromCart(telegramId, productId);
+      await ctx.answerCallbackQuery({ text: "🗑 Item dihapus dari keranjang." });
+
+      const user = await User.findOne({ telegramId }).lean();
+      const { text, keyboard } = await buildCartView(telegramId, user?.balance ?? 0);
+      await safeEditOrReply(ctx, text, { parse_mode: "HTML", reply_markup: keyboard });
+    });
+
+    // ── dg_cart_clear — Empty Cart ──────────────────────────────────────────
+    bot.callbackQuery("dg_cart_clear", async (ctx) => {
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+
+      await CartService.clearCart(telegramId);
+      await ctx.answerCallbackQuery({ text: "🗑 Keranjang berhasil dikosongkan." });
+
+      const user = await User.findOne({ telegramId }).lean();
+      const { text, keyboard } = await buildCartView(telegramId, user?.balance ?? 0);
+      await safeEditOrReply(ctx, text, { parse_mode: "HTML", reply_markup: keyboard });
+    });
+
+    // ── dg_cart_checkout — Execute atomic Cart Checkout ─────────────────────
+    bot.callbackQuery("dg_cart_checkout", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+      const telegramId = String(from.id);
+      const chatId = ctx.chat?.id ?? from.id;
+
+      const user = await User.findOne({ telegramId }).lean();
+      const currentBalance = user?.balance ?? 0;
+
+      const summary = await CartService.getCartSummary(telegramId);
+      if (summary.items.length === 0) {
+        await ctx.answerCallbackQuery({ text: "⚠️ Keranjang belanja Anda kosong.", show_alert: true });
+        return;
+      }
+
+      if (!summary.isCartValid) {
+        await ctx.answerCallbackQuery({
+          text: `⚠️ Beberapa produk tidak dapat dicheckout:\n${summary.validationErrors.join("\n")}`,
+          show_alert: true,
+        });
+        return;
+      }
+
+      if (currentBalance < summary.totalPrice) {
+        await ctx.answerCallbackQuery({
+          text: `⚠️ Saldo tidak mencukupi. Saldo: ${formatPrice(currentBalance)}, Total: ${formatPrice(summary.totalPrice)}`,
+          show_alert: true,
+        });
+        return;
+      }
+
+      await safeEditOrReply(
+        ctx,
+        `⏳ <b>Memproses Checkout Keranjang…</b>\n\n` +
+        `🔢 <b>Total:</b> ${summary.totalQuantity} item (${summary.totalUniqueItems} produk)\n` +
+        `💰 <b>Total Bayar:</b> ${formatPrice(summary.totalPrice)}\n\n` +
+        `<i>Sedang memproses pembayaran dan menyiapkan data pesanan Anda…</i>`,
+        { parse_mode: "HTML" }
+      );
+
+      const result = await DigitalProductService.checkoutCart(telegramId);
+      if (!result.success) {
+        await safeEditOrReply(
+          ctx,
+          `❌ <b>Checkout Gagal</b>\n\n` +
+          `<i>${result.message}</i>`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🛒 Lihat Keranjang", "dg_cart_view"),
+          }
+        );
+        return;
+      }
+
+      // Format itemized delivered content breakdown
+      let deliverySection = "";
+      for (let idx = 0; idx < result.items.length; idx++) {
+        const itm = result.items[idx]!;
+        const num = idx + 1;
+        const typeIcon = getDeliveryTypeIcon(itm.deliveryType);
+        const delivNote = itm.deliveryMessage ? `\n💬 <i>Catatan: ${itm.deliveryMessage}</i>` : "";
+
+        deliverySection +=
+          `📦 <b>${num}. ${typeIcon} ${itm.productName} (${itm.quantity}x)</b>\n` +
+          `🔑 <code>${itm.itemContent}</code>${delivNote}\n\n`;
+      }
+
+      const successMsg =
+        `🎉 <b>Checkout Berhasil & Lunas!</b>\n` +
+        `${"─".repeat(30)}\n\n` +
+        `🆔 <b>Order ID:</b> <code>${result.order.orderId}</code>\n` +
+        `🔢 <b>Total Item:</b> ${result.totalQuantity} item\n` +
+        `💰 <b>Total Bayar:</b> ${formatPrice(result.totalPrice)}\n` +
+        `🪙 <b>Sisa Saldo:</b> ${formatPrice(result.remainingBalance)}\n` +
+        `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
+        `${"─".repeat(30)}\n` +
+        `<b>DATA PENGIRIMAN PRODUK:</b>\n\n` +
+        deliverySection +
+        `⚠️ <i>Harap simpan data di atas. Data pesanan juga dapat diakses di menu Riwayat Pesanan kapan saja.</i>`;
+
+      let cartHas2Fa = false;
+      for (const itm of result.items) {
+        if (itm.itemContent && TotpService.extractSecret(itm.itemContent)) {
+          cartHas2Fa = true;
+          break;
+        }
+      }
+
+      const kb = new InlineKeyboard();
+      if (cartHas2Fa) {
+        kb.text("🔐 Minta Kode OTP (2FA)", `dg_totp_ord_${result.order.orderId}`).row();
+      }
+      kb.text("📜 Riwayat Pesanan", "dg_myorders")
+        .row()
+        .text("🛍️ Belanja Lagi", "product_digital");
+
+      await safeEditOrReply(ctx, successMsg, {
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+
+      // Dispatch file attachments for items with FILE deliveryType
+      for (const itm of result.items) {
+        if (itm.deliveryType === "FILE" && itm.fileId) {
+          try {
+            await ctx.api.sendDocument(chatId, itm.fileId, {
+              caption: `📄 <b>File: ${itm.productName}</b>\n\n${itm.deliveryMessage || "Berikut file pesanan Anda."}`,
+              parse_mode: "HTML",
+            });
+          } catch (fileErr) {
+            console.error(`[digital] sendDocument error for ${itm.productName}:`, fileErr);
+          }
+        }
+      }
+
+      // Affiliate commission
+      awardCommission(telegramId, result.totalPrice, "DIGITAL_PURCHASE", result.order.orderId)
+        .catch((err) => console.error("[digital] affiliate commission error on cart checkout:", err));
+
+      // Broadcast testimonial
+      TestimonialService.sendDigitalPurchaseTestimonial(ctx.api, {
+        orderId: result.order.orderId,
+        productName: result.order.productName || "Produk Digital",
+        quantity: result.totalQuantity,
+        totalPrice: result.totalPrice,
+        method: "SALDO AKUN (CART)",
+        buyer: {
+          telegramId,
+          firstName: ctx.from?.first_name,
+          username: ctx.from?.username,
+        },
+        date: result.order.createdAt,
+      }).catch((err) => console.error("[digital] Testimonial broadcast error on cart checkout:", err));
+
+      // Broadcast audit log
+      ActivityLogService.logDigitalPurchase(ctx.api, {
+        orderId: result.order.orderId,
+        productName: result.order.productName || "Produk Digital",
+        quantity: result.totalQuantity,
+        totalPrice: result.totalPrice,
+        method: "SALDO AKUN (CART)",
+        buyer: {
+          telegramId,
+          firstName: ctx.from?.first_name,
+          username: ctx.from?.username,
+        },
+        remainingBalance: result.remainingBalance,
+        date: result.order.createdAt,
+      }).catch((err) => console.error("[digital] ActivityLog digital purchase error on cart checkout:", err));
+    });
+
     // ── dg_cat_<index> — Select category ────────────────────────────────────
     bot.callbackQuery(/^dg_cat_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
       const from = ctx.from;
+      const telegramId = from ? String(from.id) : undefined;
       if (from) userManualQtyState.delete(String(from.id));
       const catIdx = parseInt(ctx.match[1]!, 10);
 
@@ -684,7 +1116,7 @@ const digitalPlugin: Plugin = {
         return;
       }
 
-      const { text, keyboard } = await buildProductsView(catName, catIdx, 0);
+      const { text, keyboard } = await buildProductsView(catName, catIdx, 0, telegramId);
       await safeEditOrReply(ctx, text, {
         parse_mode: "HTML",
         reply_markup: keyboard,
@@ -695,6 +1127,7 @@ const digitalPlugin: Plugin = {
     bot.callbackQuery(/^dg_catpg_(\d+)_(\d+)$/, async (ctx) => {
       await ctx.answerCallbackQuery();
       const from = ctx.from;
+      const telegramId = from ? String(from.id) : undefined;
       if (from) userManualQtyState.delete(String(from.id));
       const catIdx = parseInt(ctx.match[1]!, 10);
       const page = parseInt(ctx.match[2]!, 10);
@@ -706,7 +1139,7 @@ const digitalPlugin: Plugin = {
         return;
       }
 
-      const { text, keyboard } = await buildProductsView(catName, catIdx, page);
+      const { text, keyboard } = await buildProductsView(catName, catIdx, page, telegramId);
       await safeEditOrReply(ctx, text, {
         parse_mode: "HTML",
         reply_markup: keyboard,
@@ -718,16 +1151,17 @@ const digitalPlugin: Plugin = {
       await ctx.answerCallbackQuery();
       const from = ctx.from;
       if (!from) return;
-      userManualQtyState.delete(String(from.id));
+      const telegramId = String(from.id);
+      userManualQtyState.delete(telegramId);
 
       const productId = ctx.match[1]!;
       const catIdx = parseInt(ctx.match[2]!, 10);
       const page = parseInt(ctx.match[3]!, 10);
 
-      const user = await User.findOne({ telegramId: String(from.id) }).lean();
+      const user = await User.findOne({ telegramId }).lean();
       const balance = user?.balance ?? 0;
 
-      const detail = await buildProductDetailView(productId, balance, catIdx, page);
+      const detail = await buildProductDetailView(productId, balance, catIdx, page, telegramId);
       if (!detail) {
         await ctx.answerCallbackQuery({ text: "⚠️ Produk tidak ditemukan.", show_alert: true });
         return;
@@ -744,17 +1178,18 @@ const digitalPlugin: Plugin = {
       await ctx.answerCallbackQuery();
       const from = ctx.from;
       if (!from) return;
-      userManualQtyState.delete(String(from.id));
+      const telegramId = String(from.id);
+      userManualQtyState.delete(telegramId);
 
       const productId = ctx.match[1]!;
       const qty = parseInt(ctx.match[2]!, 10);
       const catIdx = parseInt(ctx.match[3]!, 10);
       const page = parseInt(ctx.match[4]!, 10);
 
-      const user = await User.findOne({ telegramId: String(from.id) }).lean();
+      const user = await User.findOne({ telegramId }).lean();
       const balance = user?.balance ?? 0;
 
-      const view = await buildQuantitySelectorView(productId, balance, qty, catIdx, page);
+      const view = await buildQuantitySelectorView(productId, balance, qty, catIdx, page, telegramId);
       if (!view) {
         await ctx.answerCallbackQuery({ text: "⚠️ Produk tidak ditemukan.", show_alert: true });
         return;
@@ -962,7 +1397,12 @@ const digitalPlugin: Plugin = {
               new Date() < result.order.warrantyExpiresAt
             );
 
+            const has2Fa = Boolean(TotpService.extractSecret(result.itemContent));
+
             const kb = new InlineKeyboard();
+            if (has2Fa) {
+              kb.text("🔐 Minta Kode OTP (2FA)", `dg_totp_ord_${result.order.orderId}`).row();
+            }
             if (hasWarranty) {
               kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
             }
@@ -974,6 +1414,18 @@ const digitalPlugin: Plugin = {
               parse_mode: "HTML",
               reply_markup: kb,
             });
+
+            // If deliveryType is FILE and fileId exists, send document
+            if (result.deliveryType === "FILE" && result.fileId) {
+              try {
+                await ctx.api.sendDocument(chatId, result.fileId, {
+                  caption: `📄 <b>File: ${result.productName}</b>\n\n${result.deliveryMessage || "Berikut file pesanan Anda."}`,
+                  parse_mode: "HTML",
+                });
+              } catch (fileErr) {
+                console.error(`[digital] sendDocument error for ${result.productName}:`, fileErr);
+              }
+            }
 
             // Affiliate commission
             awardCommission(telegramId, result.price, "DIGITAL_PURCHASE", result.order.orderId)
@@ -1248,13 +1700,13 @@ const digitalPlugin: Plugin = {
         const updatedUser = await User.findOneAndUpdate(
           { telegramId },
           { $inc: { balance: session.amountIDR } },
-          { new: true }
+          { returnDocument: "after" }
         ).lean();
 
         const settledSession = await TopupSession.findByIdAndUpdate(session._id, {
           status: "SETTLED",
           matchedTransactionId: matchedTx.transactionId,
-        }, { new: true });
+        }, { returnDocument: "after" });
 
         if (settledSession) {
           ActivityLogService.logTopupSettled(ctx.api, {
@@ -1374,7 +1826,7 @@ const digitalPlugin: Plugin = {
 
         if (session) {
           clearDigitalQrisPoll(session.orderId);
-          const cancelledSession = await TopupSession.findByIdAndUpdate(session._id, { status: "CANCELLED" }, { new: true });
+          const cancelledSession = await TopupSession.findByIdAndUpdate(session._id, { status: "CANCELLED" }, { returnDocument: "after" });
           if (cancelledSession) {
             ActivityLogService.logTopupCancelled(ctx.api, {
               session: cancelledSession,
@@ -1461,17 +1913,26 @@ const digitalPlugin: Plugin = {
               warrantyLine = `🛡️ <b>Garansi:</b> Aktif s/d ${wStatus.expiresAt ? formatDate(wStatus.expiresAt) : "—"} (${wStatus.claimsCount}/${wStatus.maxClaims}x klaim)\n`;
               if (!claimableOrders.includes(ord.orderId)) {
                 claimableOrders.push(ord.orderId);
-                kb.text(`🛡️ Klaim: ${ord.productName.slice(0, 18)} (${ord.orderId.slice(-6)})`, `dg_claim_${ord.orderId}`).row();
+                const pName = ord.productName || ord.items?.[0]?.productName || "Produk Digital";
+                kb.text(`🛡️ Klaim: ${pName.slice(0, 18)} (${ord.orderId.slice(-6)})`, `dg_claim_${ord.orderId}`).row();
               }
             }
           }
 
+          // Check if order contains a 2FA TOTP secret
+          const totpSecret = TotpService.extractSecret(ord.itemContent || ord.items?.[0]?.itemContent || "");
+          if (totpSecret) {
+            const pName = ord.productName || ord.items?.[0]?.productName || "Produk Digital";
+            kb.text(`🔐 OTP 2FA: ${pName.slice(0, 14)} (${ord.orderId.slice(-6)})`, `dg_totp_ord_${ord.orderId}`).row();
+          }
+
+          const displayName = ord.productName || ord.items?.[0]?.productName || "Produk Digital";
           msg +=
-            `📦 <b>${ord.productName}</b>${qtyText}\n` +
+            `📦 <b>${displayName}</b>${qtyText}\n` +
             `🆔 <code>${ord.orderId}</code> | ${formatPrice(ord.price)}\n` +
             `📅 ${formatDate(ord.createdAt)}\n` +
             warrantyLine +
-            `🔑 <code>${ord.itemContent}</code>\n` +
+            `🔑 <code>${ord.itemContent || "—"}</code>\n` +
             delivNote +
             `\n`;
         }
@@ -1486,6 +1947,52 @@ const digitalPlugin: Plugin = {
         });
       } catch (err) {
         console.error("[digital] dg_myorders error:", err);
+      }
+    });
+
+    // ── dg_totp_ord_<orderId> — Show live 2FA OTP for a purchased order ─────
+    bot.callbackQuery(/^dg_totp_ord_(.+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      const from = ctx.from;
+      if (!from) return;
+
+      const orderId = ctx.match[1];
+      if (!orderId) return;
+
+      try {
+        const order = await DigitalProductService.getOrderByOrderId(orderId);
+        if (!order || order.userId !== String(from.id)) {
+          await ctx.answerCallbackQuery({
+            text: "⚠️ Pesanan tidak ditemukan atau bukan milik akun ini.",
+            show_alert: true,
+          });
+          return;
+        }
+
+        const rawContent = order.itemContent || order.items?.[0]?.itemContent || "";
+        const secret = TotpService.extractSecret(rawContent);
+
+        if (!secret) {
+          await ctx.answerCallbackQuery({
+            text: "⚠️ Tidak ada 2FA secret key yang terdeteksi pada pesanan ini.",
+            show_alert: true,
+          });
+          return;
+        }
+
+        const displayName = order.productName || order.items?.[0]?.productName || "Akun Digital";
+        const { text, keyboard } = TotpService.buildTotpView(secret, {
+          label: `${displayName} (Order: ${order.orderId})`,
+          backCallback: "dg_myorders",
+          backLabel: "🔙 Kembali ke Riwayat Pesanan",
+        });
+
+        await safeEditOrReply(ctx, text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      } catch (err) {
+        console.error("[digital] dg_totp_ord error:", err);
       }
     });
 

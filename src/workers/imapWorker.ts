@@ -340,15 +340,11 @@ class ImapChildWorker {
             hasPendingCheck = false;
             const searchRange = `${Math.max(1, lastKnownUid + 1)}:*`;
 
-            // Parallel fast query: search new UID range and unread (seen: false) emails
-            const [rangeUids, unseenUids] = await Promise.all([
-              this.client.search({ uid: searchRange }, { uid: true }).catch(() => [] as number[]),
-              this.client.search({ seen: false }, { uid: true }).catch(() => [] as number[]),
-            ]);
+            // Query only new incoming UIDs (strictly higher than baseline lastKnownUid)
+            const rangeUids = await this.client.search({ uid: searchRange }, { uid: true }).catch(() => [] as number[]);
 
-            const combinedUids = Array.from(new Set([...(rangeUids || []), ...(unseenUids || [])]));
-            const newUids = combinedUids.filter(
-              (uid) => !this.processedUids.has(uid) && (uid > lastKnownUid || (unseenUids && unseenUids.includes(uid)))
+            const newUids = (rangeUids || []).filter(
+              (uid) => !this.processedUids.has(uid) && uid > lastKnownUid
             );
 
             if (newUids.length === 0) break;

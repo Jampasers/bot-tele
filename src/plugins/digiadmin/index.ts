@@ -1,4 +1,4 @@
-import { Bot, Context, InlineKeyboard } from "grammy";
+import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { DigitalProductService, ProductWithStock } from "../../services/digitalProduct.js";
 import { WarrantyService } from "../../services/warranty.js";
@@ -11,10 +11,12 @@ import { isAdmin } from "../../core/admin.js";
 // ============================================================================
 
 const ITEMS_PER_PAGE = 10;
+const STOCK_ITEMS_PER_PAGE = 5;
 
 interface AdminState {
   action:
     | "ADD_STOCK"
+    | "TAKE_STOCK_QTY"
     | "EDIT_PRICE"
     | "EDIT_DESC"
     | "EDIT_DELIVERY_MSG"
@@ -285,7 +287,7 @@ async function buildProductDetailCard(productId: string, page: number): Promise<
 
   const kb = new InlineKeyboard()
     .text("📥 ➕ Tambah Stok", `dga_stk_add_${prod.id}`)
-    .text("📋 👀 Lihat Stok", `dga_stk_view_${prod.id}`)
+    .text("📦 📋 Kelola & Ambil Stok", `dga_stk_view_${prod.id}_0`)
     .row()
     .text("✏️ 💰 Ubah Harga", `dga_price_${prod.id}`)
     .text("🏷️ Atur Diskon Grosir", `dga_bulk_${prod.id}_${page}`)
@@ -302,6 +304,121 @@ async function buildProductDetailCard(productId: string, page: number): Promise<
     .text("🗑️ Hapus Produk", `dga_del_${prod.id}_${page}`)
     .row()
     .text("🔙 Kembali ke Daftar Produk", `dga_list_${page}`);
+
+  return { text, keyboard: kb };
+}
+
+async function buildStockListPage(
+  productId: string,
+  page: number = 0
+): Promise<{ text: string; keyboard: InlineKeyboard } | null> {
+  const prod = await DigitalProductService.getProductWithStock(productId);
+  if (!prod) return null;
+
+  const { items, total, totalPages, page: safePage } = await DigitalProductService.getUnsoldStockPaginated(
+    productId,
+    page,
+    STOCK_ITEMS_PER_PAGE
+  );
+
+  let text =
+    `📦 <b>Kelola & Ambil Stok: ${prod.name}</b>\n` +
+    `${"─".repeat(32)}\n\n` +
+    `📊 <b>Total Stok Tersedia:</b> <b>${total} item</b>\n`;
+
+  if (total === 0) {
+    text +=
+      `<i>Tidak ada stok yang tersedia saat ini.</i>\n\n` +
+      `Silakan tambah stok baru menggunakan tombol di bawah.`;
+
+    const kb = new InlineKeyboard()
+      .text("📥 ➕ Tambah Stok", `dga_stk_add_${productId}`)
+      .row()
+      .text("🔙 Kembali ke Detail Produk", `dga_p_${productId}_0`);
+
+    return { text, keyboard: kb };
+  }
+
+  text +=
+    `📄 <b>Halaman:</b> ${safePage + 1} dari ${Math.max(1, totalPages)}\n\n` +
+    `<b>Daftar Item Stok Belum Terjual:</b>\n` +
+    `<i>(Klik tombol '📤 Ambil' untuk langsung mengambil & mengeluarkan item dari stok)</i>\n\n`;
+
+  items.forEach((stk, idx) => {
+    const itemNum = safePage * STOCK_ITEMS_PER_PAGE + idx + 1;
+    const dateStr = stk.createdAt
+      ? new Date(stk.createdAt).toLocaleDateString("id-ID", {
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "-";
+    const preview = stk.content.length > 45 ? stk.content.substring(0, 42) + "..." : stk.content;
+    text += `<b>${itemNum}.</b> <code>${preview}</code>\n   🕒 <i>Masuk: ${dateStr}</i>\n`;
+  });
+
+  const kb = new InlineKeyboard();
+
+  // Individual item action buttons
+  items.forEach((stk, idx) => {
+    const itemNum = safePage * STOCK_ITEMS_PER_PAGE + idx + 1;
+    kb.text(`📤 Ambil #${itemNum}`, `dga_stk_take_${stk._id}_${safePage}`)
+      .text(`🔍 #${itemNum}`, `dga_stk_det_${stk._id}_${safePage}`)
+      .text(`🗑️`, `dga_stk_del_${stk._id}_${safePage}`)
+      .row();
+  });
+
+  // Batch quick-take buttons
+  kb.text("⚡ Ambil 1 Teratas (FIFO)", `dga_stk_take_first_${productId}_${safePage}`)
+    .text("🔢 Ambil N Stok...", `dga_stk_take_n_${productId}_${safePage}`)
+    .row();
+
+  // Pagination row if multiple pages
+  const hasPrev = safePage > 0;
+  const hasNext = safePage < totalPages - 1;
+  if (hasPrev || hasNext) {
+    if (hasPrev) kb.text("⬅️ Prev", `dga_stk_view_${productId}_${safePage - 1}`);
+    kb.text(`📄 ${safePage + 1}/${totalPages}`, `dga_stk_view_${productId}_${safePage}`);
+    if (hasNext) kb.text("Next ➡️", `dga_stk_view_${productId}_${safePage + 1}`);
+    kb.row();
+  }
+
+  // Stock utilities
+  kb.text("📥 ➕ Tambah Stok", `dga_stk_add_${productId}`)
+    .text("🧹 Kosongkan Semua", `dga_stk_clr_${productId}`)
+    .row()
+    .text("🔙 Kembali ke Detail Produk", `dga_p_${productId}_0`);
+
+  return { text, keyboard: kb };
+}
+
+async function buildStockItemDetailCard(
+  stockId: string,
+  page: number
+): Promise<{ text: string; keyboard: InlineKeyboard } | null> {
+  const item = await DigitalProductService.getSingleStockItem(stockId);
+  if (!item) return null;
+
+  const prod = await DigitalProductService.getProductWithStock(String(item.productId));
+  const dateStr = item.createdAt ? new Date(item.createdAt).toLocaleString("id-ID") : "-";
+
+  let text =
+    `🔍 <b>Detail Item Stok</b>\n` +
+    `${"─".repeat(30)}\n\n` +
+    `📦 <b>Produk:</b>      ${prod?.name ?? "—"}\n` +
+    `🆔 <b>Stock ID:</b>    <code>${item._id}</code>\n` +
+    `🕒 <b>Ditambahkan:</b> ${dateStr}\n` +
+    `⚙️ <b>Status:</b>      ${item.isSold ? "🔴 Sudah Terjual" : "🟢 Tersedia (Belum Terjual)"}\n\n` +
+    `🔑 <b>Isi Stok / Data (Tap untuk salin):</b>\n` +
+    `<code>${item.content}</code>\n`;
+
+  const kb = new InlineKeyboard();
+  if (!item.isSold) {
+    kb.text("📤 Ambil & Keluarkan dari Stok", `dga_stk_take_${item._id}_${page}`).row();
+    kb.text("🗑️ Hapus Tanpa Mengambil", `dga_stk_del_${item._id}_${page}`).row();
+  }
+  kb.text("🔙 Kembali ke Daftar Stok", `dga_stk_view_${item.productId}_${page}`);
 
   return { text, keyboard: kb };
 }
@@ -544,35 +661,193 @@ const digiAdminPlugin: Plugin = {
       );
     });
 
-    // ── dga_stk_view_<id> — View unsold stock ────────────────────────────────
-    bot.callbackQuery(/^dga_stk_view_([a-f0-9]+)$/, async (ctx) => {
+    // ── dga_stk_view_<id> / dga_stk_view_<id>_<page> — View unsold stock ────
+    bot.callbackQuery(/^dga_stk_view_([a-f0-9]+)(?:_(\d+))?$/, async (ctx) => {
       await ctx.answerCallbackQuery();
       if (!isAdmin(ctx)) return;
 
       const productId = ctx.match[1]!;
-      const prod = await DigitalProductService.getProductWithStock(productId);
-      if (!prod) return;
+      const page = ctx.match[2] ? parseInt(ctx.match[2], 10) : 0;
 
-      const stockItems = await DigitalProductService.getUnsoldStock(productId, 30);
-
-      if (stockItems.length === 0) {
-        await ctx.reply(
-          `📋 <b>Stok Produk: ${prod.name}</b>\n\n` +
-          `<i>Tidak ada stok yang tersedia saat ini.</i>`,
-          { parse_mode: "HTML" }
-        );
+      const stockList = await buildStockListPage(productId, page);
+      if (!stockList) {
+        await ctx.reply("❌ Produk tidak ditemukan.");
         return;
       }
 
-      let text =
-        `📋 <b>Daftar Stok Belum Terjual: ${prod.name} (${stockItems.length} item)</b>\n` +
-        `${"─".repeat(30)}\n\n`;
+      await ctx.editMessageText(stockList.text, { parse_mode: "HTML", reply_markup: stockList.keyboard });
+    });
 
-      stockItems.forEach((stk, idx) => {
-        text += `${idx + 1}. <code>${stk.content}</code>\n`;
+    // ── dga_stk_det_<stockId>_<page> — Single stock item details ─────────────
+    bot.callbackQuery(/^dga_stk_det_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx)) return;
+
+      const stockId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+
+      const detail = await buildStockItemDetailCard(stockId, page);
+      if (!detail) {
+        await ctx.reply("⚠️ Data item stok tidak ditemukan.");
+        return;
+      }
+
+      await ctx.editMessageText(detail.text, { parse_mode: "HTML", reply_markup: detail.keyboard });
+    });
+
+    // ── dga_stk_take_<stockId>_<page> — Take specific stock item ─────────────
+    bot.callbackQuery(/^dga_stk_take_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      const stockId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+
+      const taken = await DigitalProductService.takeStockItem(stockId);
+      if (!taken) {
+        await ctx.answerCallbackQuery({ text: "⚠️ Item stok sudah tidak tersedia.", show_alert: true });
+        return;
+      }
+
+      await ctx.answerCallbackQuery({ text: "✅ 1 Item stok berhasil diambil!" });
+
+      const prod = await DigitalProductService.getProductWithStock(String(taken.productId));
+      const remaining = prod?.stockCount ?? 0;
+
+      await ctx.reply(
+        `📤 <b>1 Item Stok Berhasil Diambil & Dikeluarkan!</b>\n` +
+        `${"─".repeat(35)}\n\n` +
+        `📦 <b>Produk:</b> <b>${prod?.name ?? "—"}</b>\n` +
+        `📊 <b>Sisa Stok:</b> <b>${remaining} item</b>\n\n` +
+        `🔑 <b>Data Stok (Tap untuk menyalin):</b>\n` +
+        `<code>${taken.content}</code>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("📦 Kelola Stok Lagi", `dga_stk_view_${taken.productId}_${page}`)
+            .text("🔙 Detail Produk", `dga_p_${taken.productId}_0`),
+        }
+      );
+
+      try {
+        const stockList = await buildStockListPage(String(taken.productId), page);
+        if (stockList) {
+          await ctx.editMessageText(stockList.text, { parse_mode: "HTML", reply_markup: stockList.keyboard });
+        }
+      } catch {
+        // Ignored if message cannot be edited
+      }
+    });
+
+    // ── dga_stk_take_first_<productId>_<page> — Take 1 FIFO stock item ───────
+    bot.callbackQuery(/^dga_stk_take_first_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      const productId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+
+      const items = await DigitalProductService.takeStockBulk(productId, 1);
+      if (items.length === 0) {
+        await ctx.answerCallbackQuery({ text: "⚠️ Stok kosong / tidak ada item tersedia.", show_alert: true });
+        return;
+      }
+
+      await ctx.answerCallbackQuery({ text: "✅ 1 Item stok FIFO berhasil diambil!" });
+      const taken = items[0]!;
+      const prod = await DigitalProductService.getProductWithStock(productId);
+      const remaining = prod?.stockCount ?? 0;
+
+      await ctx.reply(
+        `📤 <b>1 Item Stok Teratas Berhasil Diambil!</b>\n` +
+        `${"─".repeat(35)}\n\n` +
+        `📦 <b>Produk:</b> <b>${prod?.name ?? "—"}</b>\n` +
+        `📊 <b>Sisa Stok:</b> <b>${remaining} item</b>\n\n` +
+        `🔑 <b>Data Stok (Tap untuk menyalin):</b>\n` +
+        `<code>${taken.content}</code>`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("📦 Kelola Stok Lagi", `dga_stk_view_${productId}_${page}`)
+            .text("🔙 Detail Produk", `dga_p_${productId}_0`),
+        }
+      );
+
+      try {
+        const stockList = await buildStockListPage(productId, page);
+        if (stockList) {
+          await ctx.editMessageText(stockList.text, { parse_mode: "HTML", reply_markup: stockList.keyboard });
+        }
+      } catch {}
+    });
+
+    // ── dga_stk_take_n_<productId>_<page> — Prompt to take N stock items ─────
+    bot.callbackQuery(/^dga_stk_take_n_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx)) return;
+
+      const productId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+      const prod = await DigitalProductService.getProductWithStock(productId);
+      if (!prod) return;
+
+      if (prod.stockCount <= 0) {
+        await ctx.reply("⚠️ Stok produk ini sedang kosong.", {
+          reply_markup: new InlineKeyboard().text("🔙 Buka Produk", `dga_p_${productId}_0`),
+        });
+        return;
+      }
+
+      adminInputState.set(String(ctx.from?.id), {
+        action: "TAKE_STOCK_QTY",
+        productId,
+        page,
       });
 
-      await ctx.reply(text, { parse_mode: "HTML" });
+      const kb = new InlineKeyboard().text("❌ Batal Ambil Stok", `dga_stk_view_${productId}_${page}`);
+
+      await ctx.reply(
+        `📤 <b>Ambil Sejumlah N Stok: ${prod.name}</b>\n` +
+        `${"─".repeat(32)}\n\n` +
+        `📊 Total stok tersedia: <b>${prod.stockCount} item</b>\n\n` +
+        `Ketik <b>jumlah stok</b> yang ingin kamu ambil & keluarkan dari database:\n` +
+        `<i>(Contoh: <code>1</code>, <code>5</code>, <code>10</code>)</i>`,
+        { parse_mode: "HTML", reply_markup: kb }
+      );
+    });
+
+    // ── dga_stk_del_<stockId>_<page> — Delete single stock item ─────────────
+    bot.callbackQuery(/^dga_stk_del_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      const stockId = ctx.match[1]!;
+      const page = parseInt(ctx.match[2]!, 10);
+
+      const item = await DigitalProductService.getSingleStockItem(stockId);
+      const productId = item ? String(item.productId) : null;
+
+      const deleted = await DigitalProductService.deleteStockItem(stockId);
+      if (!deleted) {
+        await ctx.answerCallbackQuery({ text: "⚠️ Item stok sudah tidak ditemukan.", show_alert: true });
+      } else {
+        await ctx.answerCallbackQuery({ text: "🗑️ 1 Item stok berhasil dihapus." });
+      }
+
+      if (productId) {
+        try {
+          const stockList = await buildStockListPage(productId, page);
+          if (stockList) {
+            await ctx.editMessageText(stockList.text, { parse_mode: "HTML", reply_markup: stockList.keyboard });
+          }
+        } catch {}
+      }
     });
 
     // ── dga_stk_clr_<id> — Clear unsold stock confirmation ───────────────────
@@ -1098,6 +1373,84 @@ const digiAdminPlugin: Plugin = {
           );
         } catch (err: any) {
           await ctx.reply(`❌ Gagal menambah stok: ${err?.message || "Kesalahan internal."}`);
+        }
+        return;
+      }
+
+      // ── Handle TAKE_STOCK_QTY ──────────────────────────────────────────────
+      if (state.action === "TAKE_STOCK_QTY" && state.productId) {
+        adminInputState.delete(adminId);
+        const qty = parseInt(text.replace(/[^0-9]/g, ""), 10);
+        if (isNaN(qty) || qty <= 0) {
+          await ctx.reply("⚠️ Jumlah tidak valid. Masukkan angka positif (misal: <code>5</code>).", {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Kelola Stok", `dga_stk_view_${state.productId}_${state.page ?? 0}`),
+          });
+          return;
+        }
+
+        try {
+          const prodBefore = await DigitalProductService.getProductWithStock(state.productId);
+          if (!prodBefore) {
+            await ctx.reply("❌ Produk tidak ditemukan.");
+            return;
+          }
+
+          if (prodBefore.stockCount === 0) {
+            await ctx.reply("⚠️ Stok produk ini sedang kosong.", {
+              reply_markup: new InlineKeyboard().text("🔙 Buka Produk", `dga_p_${state.productId}_0`),
+            });
+            return;
+          }
+
+          const takeQty = Math.min(qty, prodBefore.stockCount);
+          const takenItems = await DigitalProductService.takeStockBulk(state.productId, takeQty);
+
+          if (takenItems.length === 0) {
+            await ctx.reply("⚠️ Tidak ada stok yang berhasil diambil (mungkin sudah habis).", {
+              reply_markup: new InlineKeyboard().text("🔙 Kelola Stok", `dga_stk_view_${state.productId}_${state.page ?? 0}`),
+            });
+            return;
+          }
+
+          const prodAfter = await DigitalProductService.getProductWithStock(state.productId);
+          const remaining = prodAfter?.stockCount ?? 0;
+
+          const combinedText = takenItems.map((i) => i.content).join("\n");
+
+          let replyMsg =
+            `✅ <b>Berhasil Mengambil ${takenItems.length} Item Stok!</b>\n` +
+            `${"─".repeat(35)}\n\n` +
+            `📦 <b>Produk:</b> <b>${prodBefore.name}</b>\n` +
+            `📊 <b>Sisa Stok:</b> <b>${remaining} item</b>\n\n` +
+            `🔑 <b>Daftar Stok yang Diambil (Tap untuk menyalin):</b>\n`;
+
+          if (takenItems.length <= 15) {
+            takenItems.forEach((item, idx) => {
+              replyMsg += `<b>${idx + 1}.</b> <code>${item.content}</code>\n`;
+            });
+          } else {
+            takenItems.slice(0, 10).forEach((item, idx) => {
+              replyMsg += `<b>${idx + 1}.</b> <code>${item.content}</code>\n`;
+            });
+            replyMsg += `\n<i>... dan ${takenItems.length - 10} item lainnya terlampir pada file dokumen.</i>\n`;
+          }
+
+          const kb = new InlineKeyboard()
+            .text("📦 Kelola Stok Lagi", `dga_stk_view_${state.productId}_${state.page ?? 0}`)
+            .text("🔙 Detail Produk", `dga_p_${state.productId}_0`);
+
+          await ctx.reply(replyMsg, { parse_mode: "HTML", reply_markup: kb });
+
+          if (takenItems.length > 5) {
+            const buffer = Buffer.from(combinedText, "utf-8");
+            const filename = `stok_${prodBefore.name.replace(/[^a-zA-Z0-9_-]/g, "_")}_${Date.now()}.txt`;
+            await ctx.replyWithDocument(new InputFile(buffer, filename), {
+              caption: `📄 File export ${takenItems.length} item stok yang diambil.`,
+            });
+          }
+        } catch (err: any) {
+          await ctx.reply(`❌ Gagal mengambil stok: ${err?.message || "Kesalahan internal."}`);
         }
         return;
       }

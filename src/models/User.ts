@@ -44,6 +44,21 @@ export interface IUser {
    */
   totalEarnedAffiliate: number;
 
+  /** Whether the user is banned from accessing the bot */
+  isBanned?: boolean | undefined;
+
+  /** Reason for user ban */
+  banReason?: string | undefined;
+
+  /** Account security lifecycle status */
+  accountStatus?: "ACTIVE" | "UNDER_REVIEW" | "BANNED" | undefined;
+
+  /** Calculated security fraud risk score */
+  fraudScore?: number | undefined;
+
+  /** Timestamp when account was flagged for review */
+  flaggedAt?: Date | undefined;
+
   /** Timestamp set automatically by Mongoose on first insert. */
   createdAt: Date;
 
@@ -100,6 +115,31 @@ const userSchema = new Schema<IUser>(
       type: Number,
       default: 0,
       min: [0, "totalEarnedAffiliate cannot be negative"],
+    },
+    isBanned: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    banReason: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+    accountStatus: {
+      type: String,
+      enum: ["ACTIVE", "UNDER_REVIEW", "BANNED"],
+      default: "ACTIVE",
+      index: true,
+    },
+    fraudScore: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    flaggedAt: {
+      type: Date,
+      default: undefined,
     },
   },
   {

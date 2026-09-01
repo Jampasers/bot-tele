@@ -117,6 +117,25 @@ export interface SmsStats {
   }>;
 }
 
+export type RevenuePeriod = "today" | "week" | "month" | "date";
+
+export interface RevenuePeriodRange {
+  period: RevenuePeriod;
+  label: string;
+  start: Date;
+  end: Date;
+}
+
+export interface RevenueStats {
+  period: RevenuePeriodRange;
+  digitalRevenue: number;
+  digitalOrders: number;
+  smsRevenue: number;
+  smsOrders: number;
+  totalRevenue: number;
+  totalOrders: number;
+}
+
 // ============================================================================
 //  Date Boundary Utilities
 // ============================================================================
@@ -143,11 +162,112 @@ export function getStartOfMonth(): Date {
   return now;
 }
 
+export function getRevenuePeriodRange(
+  period: Exclude<RevenuePeriod, "date"> | "date",
+  dateInput?: string,
+  now = new Date()
+): RevenuePeriodRange {
+  const end = new Date(now);
+  let start: Date;
+  let label: string;
+
+  if (period === "date") {
+    if (!dateInput || !/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+      throw new Error("Tanggal harus berformat YYYY-MM-DD.");
+    }
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateInput);
+    if (!match) throw new Error("Tanggal harus berformat YYYY-MM-DD.");
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    start = new Date(year, month - 1, day);
+    if (
+      start.getFullYear() !== year ||
+      start.getMonth() !== month - 1 ||
+      start.getDate() !== day
+    ) {
+      throw new Error("Tanggal tidak valid.");
+    }
+    end.setTime(start.getTime());
+    end.setDate(end.getDate() + 1);
+    label = start.toLocaleDateString("id-ID", {
+      day: "2-digit",
+      month: "long",
+      year: "numeric",
+    });
+  } else {
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    start = dayStart;
+
+    if (period === "week") {
+      const day = start.getDay();
+      start.setDate(start.getDate() - (day === 0 ? 6 : day - 1));
+      label = "Minggu Ini";
+    } else if (period === "month") {
+      start.setDate(1);
+      label = "Bulan Ini";
+    } else {
+      label = "Hari Ini";
+    }
+  }
+
+  return { period, label, start, end };
+}
+
 // ============================================================================
 //  Bot Stats Service
 // ============================================================================
 
 export class BotStatsService {
+  /** Revenue from completed digital and SMS orders for one selected period. */
+  static async getRevenueStats(
+    period: Exclude<RevenuePeriod, "date"> | "date" = "today",
+    dateInput?: string,
+    now = new Date()
+  ): Promise<RevenueStats> {
+    const range = getRevenuePeriodRange(period, dateInput, now);
+    const createdAt = { $gte: range.start, $lt: range.end };
+
+    const [digital, sms] = await Promise.all([
+      DigitalOrder.aggregate<{ revenue: number; orders: number }>([
+        { $match: { createdAt } },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: "$price" },
+            orders: { $sum: 1 },
+          },
+        },
+      ]),
+      Order.aggregate<{ revenue: number; orders: number }>([
+        { $match: { status: "COMPLETED", createdAt } },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: "$cost" },
+            orders: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const digitalRevenue = digital[0]?.revenue ?? 0;
+    const digitalOrders = digital[0]?.orders ?? 0;
+    const smsRevenue = sms[0]?.revenue ?? 0;
+    const smsOrders = sms[0]?.orders ?? 0;
+
+    return {
+      period: range,
+      digitalRevenue,
+      digitalOrders,
+      smsRevenue,
+      smsOrders,
+      totalRevenue: digitalRevenue + smsRevenue,
+      totalOrders: digitalOrders + smsOrders,
+    };
+  }
+
   /**
    * Returns top-level aggregated overview metrics for the entire bot.
    */

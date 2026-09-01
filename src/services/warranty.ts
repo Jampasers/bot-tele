@@ -7,6 +7,7 @@ import { WarrantyClaim, IWarrantyClaim, WarrantyClaimDocument, ClaimStatus } fro
 import { User } from "../models/User.js";
 import { BalanceLog } from "../models/BalanceLog.js";
 import { ActivityLogService } from "./activityLog.js";
+import { AntiFraudService } from "./antiFraudService.js";
 import { getAdminIds } from "../core/admin.js";
 
 // ============================================================================
@@ -221,6 +222,15 @@ export class WarrantyService {
     claim?: WarrantyClaimDocument | undefined;
     message: string;
   }> {
+    // 1. Anti-Fraud & Warranty Abuse Guard check
+    const abuseCheck = await AntiFraudService.checkWarrantyAbuse(data.userId, data.api);
+    if (!abuseCheck.allowed) {
+      return {
+        success: false,
+        message: abuseCheck.reason || "Klaim garansi ditangguhkan untuk pemeriksaan keamanan.",
+      };
+    }
+
     const check = await this.validateClaimEligibility(data.orderId, data.userId);
     if (!check.eligible || !check.order) {
       return {
@@ -237,9 +247,9 @@ export class WarrantyService {
       orderId: order.orderId,
       userId: data.userId,
       userHandle: data.userHandle || "",
-      productId: order.productId,
-      productName: order.productName,
-      itemContentSnapshot: order.itemContent,
+      productId: order.productId || order.items?.[0]?.productId || new Types.ObjectId(),
+      productName: order.productName || order.items?.[0]?.productName || "Produk Digital",
+      itemContentSnapshot: order.itemContent || order.items?.[0]?.itemContent || "",
       reason: data.reason.trim(),
       status: "PENDING",
       createdAt: new Date(),
@@ -252,7 +262,7 @@ export class WarrantyService {
     ActivityLogService.logWarrantyClaimCreated(data.api, {
       claimId,
       orderId: order.orderId,
-      productName: order.productName,
+      productName: order.productName || order.items?.[0]?.productName || "Produk Digital",
       user: {
         telegramId: data.userId,
         username: data.userHandle,
@@ -333,7 +343,7 @@ export class WarrantyService {
           orderId: `${claim.orderId}-REP`,
         },
       },
-      { sort: { createdAt: 1 }, new: true }
+      { sort: { createdAt: 1 }, returnDocument: "after" }
     );
 
     if (!stock) {
