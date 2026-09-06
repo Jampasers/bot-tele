@@ -13,8 +13,8 @@ export type OrderStatus = "PENDING" | "COMPLETED" | "CANCELED";
  * field name the request specifies.
  */
 export interface IOrder {
-  /** Telegram numeric user ID — mirrors User.telegramId but stored as Number. */
-  userId: number;
+  /** User identifier — Telegram numeric user ID or WhatsApp string ID. */
+  userId: number | string;
 
   /** SMSBower activation ID — used for status polling and cancellation. */
   activationId: string;
@@ -51,7 +51,7 @@ export interface IOrder {
 const orderSchema = new Schema<IOrder>(
   {
     userId: {
-      type:     Number,
+      type:     Schema.Types.Mixed,
       required: [true, "userId is required"],
       index:    true, // fast look-ups by user
     },

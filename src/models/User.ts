@@ -59,6 +59,15 @@ export interface IUser {
   /** Timestamp when account was flagged for review */
   flaggedAt?: Date | undefined;
 
+  /** Platform the user registered from */
+  platform?: "telegram" | "whatsapp" | undefined;
+
+  /** Phone number of the user (e.g. for WhatsApp users) */
+  phoneNumber?: string | undefined;
+
+  /** WhatsApp JID (e.g. 628xxx@s.whatsapp.net) */
+  whatsappJid?: string | undefined;
+
   /** Timestamp set automatically by Mongoose on first insert. */
   createdAt: Date;
 
@@ -139,6 +148,22 @@ const userSchema = new Schema<IUser>(
     },
     flaggedAt: {
       type: Date,
+      default: undefined,
+    },
+    platform: {
+      type: String,
+      enum: ["telegram", "whatsapp"],
+      default: "telegram",
+      index: true,
+    },
+    phoneNumber: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+    whatsappJid: {
+      type: String,
+      trim: true,
       default: undefined,
     },
   },

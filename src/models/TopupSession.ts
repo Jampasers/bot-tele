@@ -15,14 +15,17 @@ export type TopupSessionStatus =
   | "CANCELLED"; // User dismissed or admin cancelled
 
 export interface ITopupSession extends Document {
-  /** Telegram numeric user ID (string to avoid JS integer overflow). */
+  /** User identifier (telegram numeric ID or WA formatted ID). */
   telegramId: string;
 
-  /** Chat ID where the QRIS invoice message was sent. */
-  chatId: number;
+  /** Platform the topup was initiated on ("telegram" | "whatsapp"). */
+  platform?: "telegram" | "whatsapp";
 
-  /** The Telegram message_id of the QRIS invoice message (used to edit/delete it). */
-  messageId: number;
+  /** Chat ID / JID where the QRIS invoice message was sent. */
+  chatId: number | string;
+
+  /** The message ID of the QRIS invoice message (Telegram message_id or WhatsApp key ID). */
+  messageId: number | string;
 
   /** Unique order/session ID, format: `topup-<telegramId>-<timestamp>` */
   orderId: string;
@@ -79,12 +82,18 @@ const topupSessionSchema = new Schema<ITopupSession>(
       required: true,
       index: true,
     },
+    platform: {
+      type: String,
+      enum: ["telegram", "whatsapp"],
+      default: "telegram",
+      index: true,
+    },
     chatId: {
-      type: Number,
+      type: Schema.Types.Mixed,
       required: true,
     },
     messageId: {
-      type: Number,
+      type: Schema.Types.Mixed,
       required: true,
     },
     orderId: {

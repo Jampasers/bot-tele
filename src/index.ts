@@ -6,6 +6,7 @@ import { SMSBowerService } from "./services/smsbower.js";
 import { scheduleDailyBackup } from "./services/backup.js";
 import { ImapOtpService } from "./services/imapOtp.js";
 import { CurrencyService } from "./services/currency.js";
+import { WhatsAppBotService } from "./whatsapp/index.js";
 
 // ---------------------------------------------------------------------------
 // Environment validation
@@ -83,11 +84,24 @@ async function main(): Promise<void> {
   console.log(`✅  Bot @${botInfo.username} is online and polling (Concurrent Runner active)! 🚀\n`);
   scheduleDailyBackup(bot.api);
 
+  // Step 6: Initialize and start WhatsApp Bot if enabled.
+  const isWhatsAppEnabled =
+    process.env["WHATSAPP_ENABLED"] === "true" ||
+    Boolean(process.env["WHATSAPP_PAIRING_PHONE"]);
+
+  if (isWhatsAppEnabled) {
+    WhatsAppBotService.start().catch((err) => {
+      console.error("❌  Failed to start WhatsApp bot:", err);
+    });
+  } else {
+    console.log("ℹ️   WhatsApp Bot is currently disabled (WHATSAPP_ENABLED != true).\n");
+  }
+
   const runner = run(bot);
 
   // ---------------------------------------------------------------------------
   // Graceful shutdown
-  // Sequence: stop runner → stop IMAP child process → close DB → exit.
+  // Sequence: stop runner → stop WA → stop IMAP child process → close DB → exit.
   // ---------------------------------------------------------------------------
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n⚡  Received ${signal}. Shutting down gracefully…`);
@@ -98,10 +112,15 @@ async function main(): Promise<void> {
       console.log("🛑  Bot runner stopped.");
     }
 
-    // 2. Stop IMAP worker process.
+    // 2. Stop WhatsApp client.
+    if (isWhatsAppEnabled) {
+      await WhatsAppBotService.stop();
+    }
+
+    // 3. Stop IMAP worker process.
     await ImapOtpService.stop();
 
-    // 3. Flush pending Mongoose operations and close the connection pool.
+    // 4. Flush pending Mongoose operations and close the connection pool.
     await disconnectDatabase();
 
     console.log("✅  Shutdown complete. Goodbye!");
