@@ -1,3 +1,4 @@
+import { TenantMap } from "../tenant/TenantMap.js";
 import { Api, InlineKeyboard } from "grammy";
 import { BotConfig, IBotConfig } from "../models/BotConfig.js";
 
@@ -5,8 +6,8 @@ import { BotConfig, IBotConfig } from "../models/BotConfig.js";
 // Force Sub Service
 // ---------------------------------------------------------------------------
 
-let cachedConfig: IBotConfig | null = null;
-let lastCacheTime = 0;
+const configCache = new TenantMap<string, { config: IBotConfig; cachedAt: number }>();
+
 const CACHE_TTL_MS = 10_000; // Cache config for 10 seconds to minimize DB hits
 
 interface MemberCacheEntry {
@@ -15,7 +16,7 @@ interface MemberCacheEntry {
 }
 
 // In-memory member status cache to eliminate repetitive getChatMember calls
-const memberCache = new Map<string, MemberCacheEntry>();
+const memberCache = new TenantMap<string, MemberCacheEntry>();
 const MEMBER_CACHE_SUCCESS_TTL_MS = 180_000; // 3 minutes cache for verified members
 const MEMBER_CACHE_FAIL_TTL_MS = 10_000;     // 10 seconds cache for non-members
 
@@ -25,12 +26,13 @@ export class ForceSubService {
    */
   static async getConfig(): Promise<IBotConfig> {
     const now = Date.now();
-    if (cachedConfig && now - lastCacheTime < CACHE_TTL_MS) {
-      return cachedConfig;
+    const cached = configCache.get("config");
+    if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+      return cached.config;
     }
-    cachedConfig = await BotConfig.getOrCreate();
-    lastCacheTime = now;
-    return cachedConfig;
+    const config = await BotConfig.getOrCreate();
+    configCache.set("config", { config, cachedAt: now });
+    return config;
   }
 
   /**
@@ -40,8 +42,8 @@ export class ForceSubService {
     const config = await BotConfig.getOrCreate();
     Object.assign(config, updates);
     await config.save();
-    cachedConfig = config;
-    lastCacheTime = Date.now();
+    configCache.set("config", { config, cachedAt: Date.now() });
+
     // Clear member cache on config changes
     memberCache.clear();
     return config;

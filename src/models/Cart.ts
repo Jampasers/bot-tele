@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document, Types } from "mongoose";
 
 // ============================================================================
@@ -22,6 +23,7 @@ export interface ICartItem {
 }
 
 export interface ICart {
+  tenantId: string;
   /** Telegram numeric user ID owning this shopping cart */
   userId: string;
 
@@ -99,5 +101,7 @@ cartSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 86400 });
 // ============================================================================
 //  3. Model
 // ============================================================================
+
+cartSchema.plugin(tenantPlugin);
 
 export const Cart: Model<ICart> = model<ICart>("Cart", cartSchema);

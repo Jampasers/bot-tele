@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document, Types } from "mongoose";
 
 // ============================================================================
@@ -7,6 +8,7 @@ import { Schema, model, Model, Document, Types } from "mongoose";
 export type ClaimStatus = "PENDING" | "APPROVED_REPLACE" | "APPROVED_REFUND" | "REJECTED";
 
 export interface IWarrantyClaim {
+  tenantId: string;
   /** Unique Claim Reference (e.g. "CLM-1718000000-1234") */
   claimId: string;
 
@@ -153,6 +155,8 @@ warrantyClaimSchema.index({ orderId: 1, status: 1 });
 // ============================================================================
 //  3. Model
 // ============================================================================
+
+warrantyClaimSchema.plugin(tenantPlugin);
 
 export const WarrantyClaim: Model<IWarrantyClaim> = model<IWarrantyClaim>(
   "WarrantyClaim",

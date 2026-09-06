@@ -1,3 +1,5 @@
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
+import { TenantMap } from "../../tenant/TenantMap.js";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
@@ -23,14 +25,14 @@ const QRIS_POLL_INTERVAL_MS = 10_000;      // 10 seconds
 const QRIS_TIMEOUT_MS = 14 * 60 * 1_000;  // 14 minutes
 const ITEMS_PER_PAGE = 8;
 
-const activeDigitalQrisPolls = new Map<string, NodeJS.Timeout>();
+const activeDigitalQrisPolls = new TenantMap<string, NodeJS.Timeout>();
 
 interface ManualQtyState {
   productId: string;
   catIdx: number;
   page: number;
 }
-const userManualQtyState = new Map<string, ManualQtyState>();
+const userManualQtyState = new TenantMap<string, ManualQtyState>();
 
 // Promo code input state
 interface PromoInputState {
@@ -39,7 +41,7 @@ interface PromoInputState {
   catIdx: number;
   page: number;
 }
-const userPromoState = new Map<string, PromoInputState>();
+const userPromoState = new TenantMap<string, PromoInputState>();
 
 // Active promo codes per user (validated but not yet applied)
 interface ActivePromo {
@@ -47,13 +49,13 @@ interface ActivePromo {
   discountAmount: number;
   discountedPrice: number;
 }
-const userActivePromo = new Map<string, ActivePromo>();
+const userActivePromo = new TenantMap<string, ActivePromo>();
 
 // Warranty claim input state
 interface ClaimInputState {
   orderId: string;
 }
-const userClaimState = new Map<string, ClaimInputState>();
+const userClaimState = new TenantMap<string, ClaimInputState>();
 
 function clearDigitalQrisPoll(orderId: string): void {
   const handle = activeDigitalQrisPolls.get(orderId);
@@ -731,6 +733,7 @@ function startDigitalQrisPolling(
 // ============================================================================
 
 const digitalPlugin: Plugin = {
+  feature: "digital",
   name: "digital-products",
   version: "1.1.0",
 
@@ -1489,7 +1492,7 @@ const digitalPlugin: Plugin = {
       );
 
       try {
-        const { baseAmount, uniqueCode, totalAmount } = await getUniquePaymentAmount(shortage);
+        const { baseAmount, uniqueCode, totalAmount, paymentMerchantId, paymentConfigVersion } = await getUniquePaymentAmount(shortage);
         const orderId = `topup-digi-${telegramId}-${Date.now()}`;
         const qrisResult = await generateQris(totalAmount);
 
@@ -1501,6 +1504,8 @@ const digitalPlugin: Plugin = {
           baseAmount,
           uniqueCode,
           amountIDR: totalAmount,
+          paymentMerchantId,
+          paymentConfigVersion,
           pendingProductType: "DIGITAL",
           pendingDigitalProductId: productId,
           pendingQuantity: rawQty,
@@ -1680,6 +1685,11 @@ const digitalPlugin: Plugin = {
           return;
         }
 
+        if (session.telegramId !== telegramId) {
+          await ctx.reply("⛔ Invoice ini bukan milik kamu.");
+          return;
+        }
+
         if (session.status === "SETTLED") {
           await ctx.reply("✅ Pembayaran ini sudah berhasil diproses.");
           return;
@@ -1824,9 +1834,13 @@ const digitalPlugin: Plugin = {
           (await TopupSession.findById(idParam).catch(() => null)) ??
           (await TopupSession.findOne({ orderId: idParam }));
 
+        if (session && session.telegramId !== String(ctx.from?.id)) {
+          await ctx.reply("⛔ Invoice ini bukan milik kamu.");
+          return;
+        }
         if (session) {
           clearDigitalQrisPoll(session.orderId);
-          const cancelledSession = await TopupSession.findByIdAndUpdate(session._id, { status: "CANCELLED" }, { returnDocument: "after" });
+          const cancelledSession = await TopupSession.findOneAndUpdate({ _id: session._id, telegramId: String(ctx.from?.id), status: "PENDING" }, { status: "CANCELLED" }, { returnDocument: "after" });
           if (cancelledSession) {
             ActivityLogService.logTopupCancelled(ctx.api, {
               session: cancelledSession,

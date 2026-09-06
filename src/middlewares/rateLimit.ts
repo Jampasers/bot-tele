@@ -1,3 +1,4 @@
+import { TenantMap } from "../tenant/TenantMap.js";
 import { Context, MiddlewareFn } from "grammy";
 import { isAdmin } from "../core/admin.js";
 
@@ -9,7 +10,7 @@ interface WindowEntry {
   timestamps: number[];
 }
 
-const userWindows = new Map<string, WindowEntry>();
+const userWindows = new TenantMap<string, WindowEntry>();
 
 const WINDOW_MS = 1000;   // 1-second sliding window
 const MAX_REQUESTS = 3;   // max 3 requests per window

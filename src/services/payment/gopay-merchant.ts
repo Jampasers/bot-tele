@@ -10,6 +10,8 @@ export interface AccessTokenProvider {
 }
 
 export interface GopayMerchantOptions {
+  clientId?: string;
+  clientSecret?: string;
   accessToken?: string;
   accessTokenProvider?: AccessTokenProvider;
   email?: string;
@@ -39,6 +41,8 @@ export class GopayMerchant {
         email: options.email,
         fetchImpl: this.fetchImpl,
         password: options.password,
+        ...(options.clientId ? { clientId: options.clientId } : {}),
+        ...(options.clientSecret ? { clientSecret: options.clientSecret } : {}),
         timeoutMs: this.timeoutMs,
       });
     } else {

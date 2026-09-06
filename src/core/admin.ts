@@ -1,4 +1,5 @@
 import { Context } from "grammy";
+import { getTenantContext } from "../tenant/context.js";
 
 // ============================================================================
 //  Admin Authorization Helper — Multi-Admin Support
@@ -10,6 +11,11 @@ import { Context } from "grammy";
  * e.g. "123456789,987654321" or "123456789 987654321"
  */
 export function getAdminIds(): string[] {
+  const tenant = getTenantContext();
+  if (tenant.rentalId) {
+    return [tenant.ownerTelegramId, ...(tenant.adminTelegramIds ?? [])]
+      .filter((id): id is string => typeof id === "string" && /^\d+$/.test(id));
+  }
   const raw = process.env["ADMIN_ID"] ?? "";
   if (!raw.trim()) return [];
 

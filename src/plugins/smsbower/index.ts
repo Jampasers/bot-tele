@@ -1,3 +1,4 @@
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User } from "../../models/User.js";
@@ -1072,6 +1073,7 @@ async function safeEditOrReply(
 // ============================================================================
 
 const smsBowerPlugin: Plugin = {
+  internalOnly: true,
   name: "smsbower",
   version: "3.1.0",
   commands: [
@@ -1789,7 +1791,7 @@ const smsBowerPlugin: Plugin = {
         );
 
         // Generate unique code & total payment amount to uniquely identify this transaction
-        const { baseAmount, uniqueCode, totalAmount } =
+        const { baseAmount, uniqueCode, totalAmount, paymentMerchantId, paymentConfigVersion } =
           await getUniquePaymentAmount(shortage);
 
         // Generate unique order ID
@@ -1807,6 +1809,8 @@ const smsBowerPlugin: Plugin = {
           baseAmount,
           uniqueCode,
           amountIDR: totalAmount,
+          paymentMerchantId,
+          paymentConfigVersion,
           pendingServiceCode: serviceCode,
           pendingCountryId: countryId,
           status: "PENDING",

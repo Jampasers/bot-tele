@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -10,6 +11,7 @@ export type AffiliateSourceType =
   | "OTP_PURCHASE";
 
 export interface IAffiliateLog extends Document {
+  tenantId: string;
   /** Telegram ID of the referrer who earns the commission */
   referrerId: string;
 
@@ -78,6 +80,8 @@ affiliateLogSchema.index({ referredUserId: 1, createdAt: -1 });
 // ---------------------------------------------------------------------------
 // 3. Model
 // ---------------------------------------------------------------------------
+
+affiliateLogSchema.plugin(tenantPlugin);
 
 export const AffiliateLog: Model<IAffiliateLog> = model<IAffiliateLog>(
   "AffiliateLog",

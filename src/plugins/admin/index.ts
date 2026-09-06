@@ -1367,6 +1367,7 @@ async function buildStatsSmsText(): Promise<string> {
 // ── Plugin definition ─────────────────────────────────────────────────────────
 
 const adminPlugin: Plugin = {
+  internalOnly: true,
   name:    "admin",
   version: "2.0.0",
 

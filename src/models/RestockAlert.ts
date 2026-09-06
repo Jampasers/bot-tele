@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model, Types } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -5,6 +6,7 @@ import { Schema, model, Document, Model, Types } from "mongoose";
 // ---------------------------------------------------------------------------
 
 export interface IRestockAlert extends Document {
+  tenantId: string;
   /** ObjectId reference to the DigitalProduct */
   productId: Types.ObjectId;
 
@@ -50,6 +52,8 @@ restockAlertSchema.index({ productId: 1 });
 // ---------------------------------------------------------------------------
 // 3. Model
 // ---------------------------------------------------------------------------
+
+restockAlertSchema.plugin(tenantPlugin);
 
 export const RestockAlert: Model<IRestockAlert> = model<IRestockAlert>(
   "RestockAlert",

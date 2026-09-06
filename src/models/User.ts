@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -9,6 +10,7 @@ import { Schema, model, Document, Model } from "mongoose";
  * Use this type anywhere you work with User documents in TypeScript.
  */
 export interface IUser {
+  tenantId: string;
   /** Telegram numeric user ID (stored as a string to avoid JS integer overflow). */
   telegramId: string;
 
@@ -190,4 +192,6 @@ const userSchema = new Schema<IUser>(
  * const existing = await User.findOne({ telegramId: String(ctx.from.id) });
  * ```
  */
+userSchema.plugin(tenantPlugin);
+
 export const User: Model<IUser> = model<IUser>("User", userSchema);

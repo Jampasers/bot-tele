@@ -70,6 +70,7 @@ async function buildAffiliateDashboard(
 // ── Plugin definition ─────────────────────────────────────────────────────────
 
 const affiliatePlugin: Plugin = {
+  feature: "affiliate",
   name: "affiliate",
   version: "1.0.0",
 

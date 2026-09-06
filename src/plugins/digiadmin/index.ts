@@ -1,3 +1,4 @@
+import { TenantMap } from "../../tenant/TenantMap.js";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { DigitalProductService, ProductWithStock } from "../../services/digitalProduct.js";
@@ -30,7 +31,7 @@ interface AdminState {
   page?: number;
 }
 
-const adminInputState = new Map<string, AdminState>();
+const adminInputState = new TenantMap<string, AdminState>();
 
 function formatPrice(amount: number): string {
   return new Intl.NumberFormat("id-ID", {
@@ -469,6 +470,7 @@ async function buildBulkDiscountsCard(productId: string, page: number): Promise<
 // ── Plugin Definition ─────────────────────────────────────────────────────────
 
 const digiAdminPlugin: Plugin = {
+  feature: "digital",
   name: "digiadmin",
   version: "1.0.0",
 

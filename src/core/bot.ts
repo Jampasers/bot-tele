@@ -5,13 +5,17 @@ import { forceSubMiddleware } from "../middlewares/forceSub.js";
 import { rateLimitMiddleware } from "../middlewares/rateLimit.js";
 import { maintenanceMiddleware } from "../middlewares/maintenance.js";
 import { antiFraudMiddleware } from "../middlewares/antiFraud.js";
+import { platformContext, runWithTenant, type TenantContext } from "../tenant/context.js";
+import { rentalMiddleware } from "../rental/rental.middleware.js";
 
 /**
  * Creates the grammY Bot instance and wires up the dynamic plugin loader.
  * Returns the fully configured bot, ready to be started.
  */
-export async function createBot(token: string): Promise<Bot<Context>> {
+export async function createBot(token: string, tenant: TenantContext = platformContext()): Promise<Bot<Context>> {
   const bot = new Bot<Context>(token);
+  await bot.init();
+  bot.use((_ctx, next) => runWithTenant(tenant, next));
 
   // Transform API calls to silently handle benign Telegram errors (e.g. expired callback queries)
   bot.api.config.use(async (prev, method, payload, signal) => {
@@ -34,8 +38,7 @@ export async function createBot(token: string): Promise<Bot<Context>> {
   bot.catch((err) => {
     const ctx = err.ctx;
     console.error(
-      `❌  Unhandled error while processing update ${ctx.update.update_id}:`,
-      err.error
+      `[Rental:${tenant.rentalId ?? "platform"}] [Tenant:${tenant.tenantId}] [@${bot.botInfo.username}] Update ${ctx.update.update_id} failed.`
     );
   });
 
@@ -47,6 +50,8 @@ export async function createBot(token: string): Promise<Bot<Context>> {
 
   // 1. Rate Limiter — drop spam before anything else runs
   bot.use(rateLimitMiddleware);
+  // Renewal must work even when business, maintenance or subscription gates block.
+  bot.use(rentalMiddleware);
 
   // 2. Anti-Fraud & Velocity Guard — checks banned users and burst rate
   bot.use(antiFraudMiddleware);
@@ -58,7 +63,7 @@ export async function createBot(token: string): Promise<Bot<Context>> {
   bot.use(forceSubMiddleware);
 
   // Dynamically load and register all plugins from src/plugins/.
-  await loadPlugins(bot);
+  await runWithTenant(tenant, () => loadPlugins(bot));
 
   return bot;
 }

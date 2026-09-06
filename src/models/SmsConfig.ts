@@ -1,3 +1,5 @@
+import { getTenantId, PLATFORM_TENANT_ID, tenantEnvironment } from "../tenant/context.js";
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -11,6 +13,7 @@ import { Schema, model, Document, Model } from "mongoose";
  * Use `SmsConfig.getOrCreate()` to retrieve (or lazily create) it.
  */
 export interface ISmsConfig extends Document {
+  tenantId: string;
   /**
    * Whether OTP SMS virtual number service is enabled.
    */
@@ -58,7 +61,7 @@ const smsConfigSchema = new Schema<ISmsConfig>(
   {
     enabled: {
       type:    Boolean,
-      default: () => process.env.OTP_ENABLED !== "false",
+      default: () => getTenantId() === PLATFORM_TENANT_ID && tenantEnvironment().OTP_ENABLED !== "false",
     },
     allowedCountries: {
       type:    [String],
@@ -106,11 +109,11 @@ export interface ISmsConfigModel extends Model<ISmsConfig> {
 
 smsConfigSchema.static("getOrCreate", async function (): Promise<ISmsConfig> {
   let doc = await this.findOne();
-  const defaultEnabled = process.env.OTP_ENABLED !== "false";
+  const defaultEnabled = getTenantId() === PLATFORM_TENANT_ID && tenantEnvironment().OTP_ENABLED !== "false";
   if (!doc) {
-    doc = await this.create({
+    doc = await this.findOneAndUpdate({}, { $setOnInsert: {
       enabled: defaultEnabled,
-    });
+    } }, { upsert: true, returnDocument: "after" });
     console.log("   🆕  SmsConfig document created with defaults.");
   } else if (doc.enabled === undefined) {
     doc.enabled = defaultEnabled;
@@ -131,6 +134,8 @@ smsConfigSchema.static("getOrCreate", async function (): Promise<ISmsConfig> {
  * await config.save();
  * ```
  */
+smsConfigSchema.plugin(tenantPlugin, { singleton: true });
+
 export const SmsConfig = model<ISmsConfig, ISmsConfigModel>(
   "SmsConfig",
   smsConfigSchema

@@ -1,3 +1,4 @@
+import { TenantMap } from "../tenant/TenantMap.js";
 import { Api, InlineKeyboard, InputFile } from "grammy";
 import { BotConfig, IBotConfig } from "../models/BotConfig.js";
 import { ReceiptService } from "./receipt.js";
@@ -37,11 +38,11 @@ export interface OtpTestimonialData {
 //  Cache & Helpers
 // ============================================================================
 
-let cachedConfig: IBotConfig | null = null;
-let lastCacheTime = 0;
+const configCache = new TenantMap<string, { config: IBotConfig; cachedAt: number }>();
+
 const CACHE_TTL_MS = 10_000; // 10 seconds
 
-let cachedBotUsername: string | null = null;
+const botUsernameCache = new WeakMap<Api, string>();
 
 function escapeHtml(text: string): string {
   return text
@@ -110,12 +111,13 @@ export class TestimonialService {
    */
   static async getConfig(): Promise<IBotConfig> {
     const now = Date.now();
-    if (cachedConfig && now - lastCacheTime < CACHE_TTL_MS) {
-      return cachedConfig;
+    const cached = configCache.get("config");
+    if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+      return cached.config;
     }
-    cachedConfig = await BotConfig.getOrCreate();
-    lastCacheTime = now;
-    return cachedConfig;
+    const config = await BotConfig.getOrCreate();
+    configCache.set("config", { config, cachedAt: now });
+    return config;
   }
 
   /**
@@ -125,8 +127,8 @@ export class TestimonialService {
     const config = await BotConfig.getOrCreate();
     Object.assign(config, updates);
     await config.save();
-    cachedConfig = config;
-    lastCacheTime = Date.now();
+    configCache.set("config", { config, cachedAt: Date.now() });
+
     return config;
   }
 
@@ -134,11 +136,12 @@ export class TestimonialService {
    * Helper to retrieve bot username for CTA buttons.
    */
   static async getBotUsername(api: Api): Promise<string | undefined> {
+    const cachedBotUsername = botUsernameCache.get(api);
     if (cachedBotUsername) return cachedBotUsername;
     try {
       const me = await api.getMe();
       if (me.username) {
-        cachedBotUsername = me.username;
+        botUsernameCache.set(api, me.username);
         return me.username;
       }
     } catch {

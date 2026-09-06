@@ -1,0 +1,102 @@
+﻿# Inventaris file rental
+
+Daftar berdasarkan working tree implementasi, sebelum commit.
+
+## File dibuat
+
+- `docs/RENTAL_IMPLEMENTATION.md`
+- `docs/RENTAL_OPERATIONS.md`
+- `src/models/BotRental.ts`
+- `src/models/PaymentLedger.ts`
+- `src/models/RentalPayment.ts`
+- `src/models/RentalPlan.ts`
+- `src/models/TenantPaymentConfig.ts`
+- `src/payments/payment.integration.test.ts`
+- `src/payments/payment.test.ts`
+- `src/payments/paymentConfigValidation.ts`
+- `src/payments/paymentLedger.service.ts`
+- `src/payments/platformPayment.service.ts`
+- `src/payments/tenantPayment.service.ts`
+- `src/plugins/rental/index.ts`
+- `src/plugins/rentaladmin/index.ts`
+- `src/rental/renewal.integration.test.ts`
+- `src/rental/rental.lifecycle.test.ts`
+- `src/rental/rental.middleware.ts`
+- `src/rental/rental.service.ts`
+- `src/rental/rentalNotification.service.ts`
+- `src/rental/rentalPayment.service.ts`
+- `src/rental/rentalWebhook.test.ts`
+- `src/rental/rentalWebhook.ts`
+- `src/runtime/BotInstance.ts`
+- `src/runtime/BotManager.ts`
+- `src/runtime/RentalScheduler.test.ts`
+- `src/runtime/RentalScheduler.ts`
+- `src/runtime/logging.ts`
+- `src/runtime/runtime.test.ts`
+- `src/runtime/tenantTimers.ts`
+- `src/scripts/migrateTenantData.ts`
+- `src/scripts/rentalAdmin.ts`
+- `src/services/crypto.ts`
+- `src/tenant/TenantMap.ts`
+- `src/tenant/context.ts`
+- `src/tenant/features.ts`
+- `src/tenant/migration.ts`
+- `src/tenant/models.ts`
+- `src/tenant/tenantPlugin.integration.test.ts`
+- `src/tenant/tenantPlugin.test.ts`
+- `src/tenant/tenantPlugin.ts`
+- `docs/RENTAL_FILES.md`
+
+## File diubah
+
+- `.env.example`
+- `README.md`
+- `package.json`
+- `src/core/admin.ts`
+- `src/core/bot.ts`
+- `src/core/db.ts`
+- `src/core/pluginLoader.ts`
+- `src/index.ts`
+- `src/middlewares/antiFraud.ts`
+- `src/middlewares/maintenance.ts`
+- `src/middlewares/rateLimit.ts`
+- `src/models/AffiliateLog.ts`
+- `src/models/BalanceLog.ts`
+- `src/models/BotConfig.ts`
+- `src/models/Cart.ts`
+- `src/models/DigitalOrder.ts`
+- `src/models/DigitalProduct.ts`
+- `src/models/DigitalStock.ts`
+- `src/models/FraudLog.ts`
+- `src/models/Order.ts`
+- `src/models/PromoCode.ts`
+- `src/models/RestockAlert.ts`
+- `src/models/SmsConfig.ts`
+- `src/models/TopupSession.ts`
+- `src/models/User.ts`
+- `src/models/WarrantyClaim.ts`
+- `src/plugins/admin/index.ts`
+- `src/plugins/affiliate/index.ts`
+- `src/plugins/digiadmin/index.ts`
+- `src/plugins/digital/index.ts`
+- `src/plugins/info/index.ts`
+- `src/plugins/panel/index.ts`
+- `src/plugins/smsbower/index.ts`
+- `src/plugins/totp/index.ts`
+- `src/scripts/inspectImap.ts`
+- `src/services/activityLog.ts`
+- `src/services/antiFraudService.ts`
+- `src/services/backup.ts`
+- `src/services/forceSub.ts`
+- `src/services/imapOtp.ts`
+- `src/services/payment/gobiz-auth.ts`
+- `src/services/payment/gopay-merchant.ts`
+- `src/services/payment/paymentService.ts`
+- `src/services/receipt.ts`
+- `src/services/testimonial.ts`
+- `src/types/Plugin.ts`
+- `src/whatsapp/client.ts`
+- `src/whatsapp/controllers/digitalController.ts`
+- `src/whatsapp/controllers/otpController.ts`
+- `src/whatsapp/controllers/topupController.ts`
+- `src/workers/imapWorker.ts`

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { getTenantId } from "../tenant/context.js";
 import { Api, InlineKeyboard } from "grammy";
 import { FraudLog, IFraudLog, FraudType, FraudSeverity, FraudAction, FraudLogDocument } from "../models/FraudLog.js";
 import { User, IUser } from "../models/User.js";
@@ -35,6 +36,7 @@ class MemoryTtlStore {
   }
 
   public get<T = any>(key: string): T | null {
+    key = `${getTenantId()}:${key}`;
     const entry = this.store.get(key);
     if (!entry) return null;
     if (entry.expiresAt <= Date.now()) {
@@ -45,6 +47,7 @@ class MemoryTtlStore {
   }
 
   public set<T = any>(key: string, value: T, ttlSeconds: number): void {
+    key = `${getTenantId()}:${key}`;
     this.store.set(key, {
       value,
       expiresAt: Date.now() + ttlSeconds * 1000,
@@ -52,6 +55,7 @@ class MemoryTtlStore {
   }
 
   public delete(key: string): boolean {
+    key = `${getTenantId()}:${key}`;
     return this.store.delete(key);
   }
 
@@ -60,6 +64,7 @@ class MemoryTtlStore {
   }
 
   public getRemainingTtl(key: string): number {
+    key = `${getTenantId()}:${key}`;
     const entry = this.store.get(key);
     if (!entry) return 0;
     const rem = Math.ceil((entry.expiresAt - Date.now()) / 1000);

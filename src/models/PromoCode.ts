@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -7,6 +8,7 @@ import { Schema, model, Document, Model } from "mongoose";
 export type DiscountType = "FIXED" | "PERCENTAGE";
 
 export interface IPromoCode extends Document {
+  tenantId: string;
   /** Promo code string — always stored uppercase */
   code: string;
 
@@ -112,6 +114,8 @@ promoCodeSchema.index({ isActive: 1, expiresAt: 1 });
 // ---------------------------------------------------------------------------
 // 3. Model
 // ---------------------------------------------------------------------------
+
+promoCodeSchema.plugin(tenantPlugin);
 
 export const PromoCode: Model<IPromoCode> = model<IPromoCode>(
   "PromoCode",

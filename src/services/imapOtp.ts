@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { fork, ChildProcess } from "node:child_process";
 import { Api } from "grammy";
+import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { BotConfig } from "../models/BotConfig.js";
 
 // ============================================================================
@@ -75,6 +76,7 @@ export class ImapOtpService {
    * Starts the dedicated IMAP child process worker.
    */
   public static async start(_api?: Api): Promise<void> {
+    if (getTenantId() !== PLATFORM_TENANT_ID) throw new Error("IMAP is only available to the platform bot.");
     const supervisor = this.getInstance();
     await supervisor.startWorker();
   }
@@ -208,23 +210,15 @@ export class ImapOtpService {
     }
 
     if (this.child) {
-      try {
-        if (this.child.connected) {
-          this.child.send({ type: "STOP" });
-        }
-        // Give it 2 seconds to gracefully exit, otherwise force kill
-        const childRef = this.child;
-        setTimeout(() => {
-          try {
-            if (childRef && !childRef.killed) {
-              childRef.kill("SIGKILL");
-            }
-          } catch {
-            // ignore
-          }
-        }, 2000);
-      } catch {
-        // ignore
+      const childRef = this.child;
+      if (childRef.exitCode === null && childRef.signalCode === null) {
+        await new Promise<void>((resolve, reject) => {
+          const force = setTimeout(() => { childRef.kill("SIGKILL"); }, 2000);
+          const deadline = setTimeout(() => { clearTimeout(force); reject(new Error("IMAP worker did not exit.")); }, 7000);
+          childRef.once("exit", () => { clearTimeout(force); clearTimeout(deadline); resolve(); });
+          try { if (childRef.connected) childRef.send({ type: "STOP" }); else childRef.kill("SIGTERM"); }
+          catch { childRef.kill("SIGKILL"); }
+        });
       }
       this.child = null;
     }

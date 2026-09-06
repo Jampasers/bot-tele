@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model } from "mongoose";
 
 // ============================================================================
@@ -13,6 +14,7 @@ export type OrderStatus = "PENDING" | "COMPLETED" | "CANCELED";
  * field name the request specifies.
  */
 export interface IOrder {
+  tenantId: string;
   /** User identifier — Telegram numeric user ID or WhatsApp string ID. */
   userId: number | string;
 
@@ -116,4 +118,6 @@ const orderSchema = new Schema<IOrder>(
  * import { Order } from "../../models/Order.js";
  * const order = await Order.findOne({ activationId: "12345" });
  */
+orderSchema.plugin(tenantPlugin);
+
 export const Order: Model<IOrder> = model<IOrder>("Order", orderSchema);

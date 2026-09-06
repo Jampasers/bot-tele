@@ -61,6 +61,10 @@ function formatPriceNumber(amount: string | number): string {
 // ============================================================================
 
 export class ReceiptService {
+  static async shutdown(): Promise<void> {
+    if (browserInstance) await browserInstance.close();
+    browserInstance = null;
+  }
   /**
    * Generates a modern receipt image buffer using Puppeteer.
    */

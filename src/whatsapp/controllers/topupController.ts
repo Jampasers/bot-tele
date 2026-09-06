@@ -1,3 +1,4 @@
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
 import { WASocket } from "@whiskeysockets/baileys";
 import { IUser, User } from "../../models/User.js";
 import { TopupSession } from "../../models/TopupSession.js";
@@ -65,7 +66,7 @@ export class WaTopupController {
     });
 
     try {
-      const { baseAmount, uniqueCode, totalAmount } = await getUniquePaymentAmount(cleanAmount);
+      const { baseAmount, uniqueCode, totalAmount, paymentMerchantId, paymentConfigVersion } = await getUniquePaymentAmount(cleanAmount);
       const orderId = `topup-wa-${cleanJid(jid)}-${Date.now()}`;
       const qrisResult = await generateQris(totalAmount);
 
@@ -78,6 +79,8 @@ export class WaTopupController {
         baseAmount,
         uniqueCode,
         amountIDR: totalAmount,
+        paymentMerchantId,
+        paymentConfigVersion,
         status: "PENDING",
       });
 

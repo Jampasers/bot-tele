@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document, Types } from "mongoose";
 
 // ============================================================================
@@ -5,6 +6,7 @@ import { Schema, model, Model, Document, Types } from "mongoose";
 // ============================================================================
 
 export interface IDigitalStock {
+  tenantId: string;
   /** The product this stock item belongs to */
   productId: Types.ObjectId;
 
@@ -83,6 +85,8 @@ digitalStockSchema.index({ productId: 1, isSold: 1, createdAt: 1 });
 // ============================================================================
 //  3. Model
 // ============================================================================
+
+digitalStockSchema.plugin(tenantPlugin);
 
 export const DigitalStock: Model<IDigitalStock> = model<IDigitalStock>(
   "DigitalStock",

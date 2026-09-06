@@ -1,5 +1,14 @@
 # 🤖 grammY Plugin Bot
 
+## Telegram Bot Rental SaaS
+
+Repository ini mendukung bot platform dan banyak bot rental dalam satu proses Node.
+Panduan migrasi, environment, arsitektur, dan batas validasi: [Implementasi rental](docs/RENTAL_IMPLEMENTATION.md).
+Cara membuat paket/rental dan mengatur toko: [Operasi rental](docs/RENTAL_OPERATIONS.md).
+
+**Upgrade database existing memerlukan migrasi tenant sebelum aplikasi dijalankan.**
+Periksa `npm run migrate:tenants` terlebih dahulu; penulisan hanya dilakukan dengan `--apply`.
+
 A **production-ready, plugin-based Telegram bot** boilerplate built with [grammY](https://grammy.dev/) and TypeScript.
 
 ## ✨ Key Features

@@ -41,11 +41,13 @@ export async function connectDatabase(): Promise<void> {
   mongoose.connection.on("disconnected", () =>
     console.warn("⚠️   MongoDB disconnected.")
   );
-  mongoose.connection.on("error", (err: Error) =>
-    console.error("❌  MongoDB connection error:", err)
+  mongoose.connection.on("error", () =>
+    console.error("❌  MongoDB connection error. Check connectivity privately.")
   );
 
   await mongoose.connect(MONGODB_URI, {
+    autoIndex: false,
+    autoCreate: false,
     // Let the driver pick the best server automatically.
     serverSelectionTimeoutMS: 5_000, // fail fast if the server is unreachable
     socketTimeoutMS: 45_000,

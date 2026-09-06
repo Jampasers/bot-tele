@@ -25,6 +25,7 @@ import { ActivityLogService } from "./activityLog.js";
 import { SMSBowerService } from "./smsbower.js";
 import { clearMaintenanceCache } from "../middlewares/maintenance.js";
 import { getAdminIds } from "../core/admin.js";
+import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 
 // ============================================================================
 //  Database Backup & Rollback Service
@@ -282,6 +283,17 @@ export async function executeRollback(
   api?: Api,
   adminUser?: { telegramId: string | number; firstName?: string | undefined; username?: string | undefined }
 ): Promise<RollbackResult> {
+  if (getTenantId() !== PLATFORM_TENANT_ID) throw new Error("Database rollback is platform-only.");
+  // Validate every document before deleting anything. Legacy archives are
+  // accepted only into the platform tenant; foreign tenant IDs are rejected.
+  for (const item of collectionsData) {
+    for (const doc of item.docs) {
+      if (!doc || typeof doc !== "object" || (doc.tenantId != null && doc.tenantId !== PLATFORM_TENANT_ID)) {
+        throw new Error("Backup contains a document from another tenant.");
+      }
+      doc.tenantId = PLATFORM_TENANT_ID;
+    }
+  }
   // 1. Safety Backup
   if (api) {
     try {
@@ -361,7 +373,10 @@ export async function executeRollback(
  * Schedules a daily backup at 00:00 WIB (UTC+7 = UTC-17:00 = 17:00 UTC previous day).
  * Uses a recursive setTimeout that recalculates the next midnight on every tick.
  */
-export function scheduleDailyBackup(api: Api): void {
+export function scheduleDailyBackup(api: Api): () => Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pending: Promise<void> | undefined;
+  let stopped = false;
   function getMsUntilMidnightWIB(): number {
     const now = new Date();
     // WIB = UTC+7
@@ -374,18 +389,22 @@ export function scheduleDailyBackup(api: Api): void {
   }
 
   function scheduleNext() {
+    if (stopped) return;
     const msUntilMidnight = getMsUntilMidnightWIB();
     console.log(`[backup] Daily backup scheduled in ${Math.round(msUntilMidnight / 3_600_000)}h.`);
 
-    setTimeout(async () => {
+    timer = setTimeout(() => {
+      pending = (async () => {
       try {
         await createAndSendBackup(api);
       } catch (err) {
         console.error("[backup] Scheduled backup error:", err);
       }
       scheduleNext(); // reschedule for the next midnight
+      })();
     }, msUntilMidnight);
   }
 
   scheduleNext();
+  return async () => { stopped = true; if (timer) clearTimeout(timer); await pending; };
 }

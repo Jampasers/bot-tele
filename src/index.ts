@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { run } from "@grammyjs/runner";
+import type { Server } from "node:http";
 import { createBot } from "./core/bot.js";
 import { connectDatabase, disconnectDatabase } from "./core/db.js";
 import { SMSBowerService } from "./services/smsbower.js";
@@ -7,131 +7,115 @@ import { scheduleDailyBackup } from "./services/backup.js";
 import { ImapOtpService } from "./services/imapOtp.js";
 import { CurrencyService } from "./services/currency.js";
 import { WhatsAppBotService } from "./whatsapp/index.js";
+import { ReceiptService } from "./services/receipt.js";
+import { validateEncryptionKey } from "./services/crypto.js";
+import { platformContext, runWithTenant } from "./tenant/context.js";
+import { assertTenantMigrationReady } from "./tenant/migration.js";
+import { BotManager } from "./runtime/BotManager.js";
+import { BotInstance } from "./runtime/BotInstance.js";
+import { RentalScheduler } from "./runtime/RentalScheduler.js";
+import { createRentalWebhookServer } from "./rental/rentalWebhook.js";
+import { installRentalLogContext } from "./runtime/logging.js";
 
-// ---------------------------------------------------------------------------
-// Environment validation
-// ---------------------------------------------------------------------------
-const { BOT_TOKEN, MONGODB_URI } = process.env;
+installRentalLogContext();
 
-if (!BOT_TOKEN || BOT_TOKEN.trim() === "") {
-  console.error(
-    "❌  BOT_TOKEN is not set.\n" +
-      "    1. Copy .env.example to .env\n" +
-      "    2. Fill in your token from @BotFather\n"
-  );
-  process.exit(1);
-}
-
-if (!MONGODB_URI || MONGODB_URI.trim() === "") {
-  console.error(
-    "❌  MONGODB_URI is not set.\n" +
-      "    Add it to your .env file:\n" +
-      "    MONGODB_URI=mongodb://localhost:27017/grammy-bot\n"
-  );
-  process.exit(1);
-}
-
-// ---------------------------------------------------------------------------
-// Bootstrap
-// ---------------------------------------------------------------------------
 async function main(): Promise<void> {
-  console.log("═══════════════════════════════════════");
-  console.log("  🤖  grammY Plugin Bot — Starting up  ");
-  console.log("═══════════════════════════════════════\n");
+  const token = process.env.BOT_TOKEN?.trim();
+  if (!token || !process.env.MONGODB_URI?.trim()) throw new Error("BOT_TOKEN and MONGODB_URI are required.");
+  const rentalEnabled = process.env.RENTAL_ENABLED === "true";
+  if (rentalEnabled) validateEncryptionKey();
+  const context = platformContext();
+  let platform: BotInstance | undefined;
+  let manager: BotManager | undefined;
+  let scheduler: RentalScheduler | undefined;
+  let webhook: Server | undefined;
+  let stopBackup: (() => Promise<void>) | undefined;
+  let shuttingDown: Promise<void> | undefined;
+  let startup: Promise<void> | undefined;
+  let stopRequested = false;
+  const backgroundStarts: Promise<unknown>[] = [];
 
-  // Step 1: Connect to the database FIRST.
-  console.log("🔗  Connecting to MongoDB…");
-  await connectDatabase();
-
-  // Step 2: Pre-fetch SMSBower countries + services and realtime currency rate.
-  await Promise.all([
-    SMSBowerService.loadData(),
-    CurrencyService.getUsdRate().then((rate) => {
-      console.log(`💱  Kurs Realtime aktif: 1 USD = Rp ${Math.round(rate).toLocaleString("id-ID")}`);
-    }).catch(() => {}),
-  ]);
-
-  // Step 3: Create the bot and load all plugins.
-  const bot = await createBot(BOT_TOKEN as string);
-
-  // Gracefully log and survive transient network errors (e.g. Telegram TCP drops).
-  bot.catch((err) => {
-    const msg = err.message ?? String(err);
-    if (
-      msg.includes("stream reading error") ||
-      msg.includes("connection was aborted") ||
-      msg.includes("ECONNRESET") ||
-      msg.includes("ETIMEDOUT")
-    ) {
-      console.warn("⚠️  Transient network error (auto-reconnecting):", msg.split("\n")[0]);
-      return;
-    }
-    if (msg.includes("query is too old") || msg.includes("message is not modified")) {
-      console.warn("⚠️  Benign Telegram update warning:", msg.split("\n")[0]);
-      return;
-    }
-    console.error("❌  Unhandled bot error:", err);
-  });
-
-  // Step 4: Start IMAP OTP Child Process Worker.
-  ImapOtpService.start(bot.api).catch((imapErr) => {
-    console.warn("⚠️  IMAP service background start error:", imapErr);
-  });
-
-  // Step 5: Initialize bot info & start high-concurrency runner.
-  await bot.init();
-  const botInfo = bot.botInfo;
-  console.log(`✅  Bot @${botInfo.username} is online and polling (Concurrent Runner active)! 🚀\n`);
-  scheduleDailyBackup(bot.api);
-
-  // Step 6: Initialize and start WhatsApp Bot if enabled.
-  const isWhatsAppEnabled =
-    process.env["WHATSAPP_ENABLED"] === "true" ||
-    Boolean(process.env["WHATSAPP_PAIRING_PHONE"]);
-
-  if (isWhatsAppEnabled) {
-    WhatsAppBotService.start().catch((err) => {
-      console.error("❌  Failed to start WhatsApp bot:", err);
+  const shutdown = (): Promise<void> => {
+    if (shuttingDown) return shuttingDown;
+    stopRequested = true;
+    manager?.requestStop();
+    shuttingDown = runWithTenant(context, async () => {
+      await startup?.catch(() => {});
+      await Promise.allSettled(backgroundStarts);
+      // No new billing work while runtime instances are being drained.
+      const failures: unknown[] = [];
+      const stopSteps = [
+        () => scheduler?.stop(),
+        () => webhook ? new Promise<void>(resolve => { webhook!.close(() => resolve()); webhook!.closeIdleConnections(); }) : undefined,
+        () => stopBackup?.(),
+        () => manager?.stopAll(),
+        () => platform?.stop(),
+        () => WhatsAppBotService.stop(),
+        () => ImapOtpService.stop(),
+        () => ReceiptService.shutdown(),
+        () => disconnectDatabase(),
+      ];
+      for (const stop of stopSteps) {
+        try { await stop(); } catch (error) { failures.push(error); }
+      }
+      if (failures.length) throw new Error("One or more resources failed to stop cleanly.");
+      console.log("Shutdown complete: all bot runners and workers stopped.");
     });
-  } else {
-    console.log("ℹ️   WhatsApp Bot is currently disabled (WHATSAPP_ENABLED != true).\n");
-  }
-
-  const runner = run(bot);
-
-  // ---------------------------------------------------------------------------
-  // Graceful shutdown
-  // Sequence: stop runner → stop WA → stop IMAP child process → close DB → exit.
-  // ---------------------------------------------------------------------------
-  const shutdown = async (signal: string): Promise<void> => {
-    console.log(`\n⚡  Received ${signal}. Shutting down gracefully…`);
-
-    // 1. Stop runner if active.
-    if (runner.isRunning()) {
-      await runner.stop();
-      console.log("🛑  Bot runner stopped.");
-    }
-
-    // 2. Stop WhatsApp client.
-    if (isWhatsAppEnabled) {
-      await WhatsAppBotService.stop();
-    }
-
-    // 3. Stop IMAP worker process.
-    await ImapOtpService.stop();
-
-    // 4. Flush pending Mongoose operations and close the connection pool.
-    await disconnectDatabase();
-
-    console.log("✅  Shutdown complete. Goodbye!");
-    process.exit(0);
+    return shuttingDown;
   };
 
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+  const onSignal = () => {
+    void shutdown().then(() => process.exit(0)).catch(() => { console.error("Shutdown failed; inspect worker state privately."); process.exit(1); });
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    startup = (async () => {
+    await connectDatabase();
+    await assertTenantMigrationReady();
+    if (stopRequested) return;
+    await Promise.all([
+      SMSBowerService.loadData(),
+      CurrencyService.getUsdRate().catch(() => {}),
+    ]);
+    const bot = await createBot(token, context);
+    if (stopRequested) return;
+    platform = new BotInstance(bot, context);
+    platform.start();
+    stopBackup = scheduleDailyBackup(bot.api);
+    backgroundStarts.push(ImapOtpService.start(bot.api).catch(() => console.warn("[Platform] IMAP startup failed.")));
+    if (process.env.WHATSAPP_ENABLED === "true" || Boolean(process.env.WHATSAPP_PAIRING_PHONE)) {
+      backgroundStarts.push(WhatsAppBotService.start().catch(() => console.warn("[Platform] WhatsApp startup failed.")));
+    }
+
+    if (rentalEnabled) {
+      manager = new BotManager(String(bot.botInfo.id));
+      await manager.startAllActiveRentals();
+      if (stopRequested) return;
+      scheduler = new RentalScheduler(manager);
+      scheduler.start();
+      const port = Number(process.env.RENTAL_WEBHOOK_PORT || "0");
+      if (port !== 0) {
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid RENTAL_WEBHOOK_PORT.");
+        webhook = createRentalWebhookServer(process.env.RENTAL_WEBHOOK_SECRET || "");
+        await new Promise<void>((resolve, reject) => {
+          webhook!.once("error", reject);
+          webhook!.listen(port, "127.0.0.1", resolve);
+        });
+      }
+    }
+    console.log(`[Platform] @${bot.botInfo.username} ready. Rental runtime ${rentalEnabled ? "enabled" : "disabled"}.`);
+    })();
+    await startup;
+  } catch (error) {
+    await shutdown().catch(() => {});
+    throw error;
+  }
 }
 
-main().catch((err) => {
-  console.error("💥  Fatal error during startup:", err);
-  process.exit(1);
+runWithTenant(platformContext(), main).catch((error: unknown) => {
+  // Mongo/Telegram errors can contain credential-bearing request objects.
+  const message = error instanceof Error ? error.message : "";
+  console.error(message.startsWith("Tenant migration required") ? message : "Startup failed. Check environment, tenant migration and provider connectivity privately.");
+  process.exitCode = 1;
 });

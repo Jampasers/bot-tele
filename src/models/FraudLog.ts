@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ============================================================================
@@ -21,6 +22,7 @@ export type FraudAction =
   | "AUTO_BANNED";
 
 export interface IFraudLog {
+  tenantId: string;
   fraudType: FraudType;
   userId: string;
   userHandle?: string | undefined;
@@ -126,5 +128,7 @@ fraudLogSchema.index({ resolved: 1, createdAt: -1 });
 // ============================================================================
 //  3. Model Export
 // ============================================================================
+
+fraudLogSchema.plugin(tenantPlugin);
 
 export const FraudLog: Model<IFraudLog> = model<IFraudLog>("FraudLog", fraudLogSchema);

@@ -1,3 +1,4 @@
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
 import { WASocket } from "@whiskeysockets/baileys";
 import { IUser } from "../../models/User.js";
 import { DigitalProductService } from "../../services/digitalProduct.js";
@@ -390,7 +391,7 @@ export class WaDigitalController {
 
       try {
         const shortage = totalPrice;
-        const { baseAmount, uniqueCode, totalAmount } = await getUniquePaymentAmount(shortage);
+        const { baseAmount, uniqueCode, totalAmount, paymentMerchantId, paymentConfigVersion } = await getUniquePaymentAmount(shortage);
         const orderId = `topup-wa-${cleanJid(jid)}-${Date.now()}`;
         const qrisResult = await generateQris(totalAmount);
 
@@ -403,6 +404,8 @@ export class WaDigitalController {
           baseAmount,
           uniqueCode,
           amountIDR: totalAmount,
+          paymentMerchantId,
+          paymentConfigVersion,
           pendingProductType: "DIGITAL",
           ...(productId ? { pendingDigitalProductId: productId } : {}),
           pendingQuantity: quantity,

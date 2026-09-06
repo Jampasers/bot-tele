@@ -3,6 +3,8 @@ import { readdirSync, statSync } from "fs";
 import { join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import { Plugin, PluginCommand } from "../types/Plugin.js";
+import { getTenantContext } from "../tenant/context.js";
+import { hasFeature } from "../tenant/features.js";
 
 // ---------------------------------------------------------------------------
 // Resolve the absolute path to `src/plugins/` regardless of CWD.
@@ -134,14 +136,29 @@ export async function loadPlugins(bot: Bot<Context>): Promise<void> {
         continue;
       }
 
-      // 1. Register the plugin's handlers on the bot instance.
-      plugin.register(bot);
+      const tenant = getTenantContext();
+      if ((tenant.rentalId && plugin.internalOnly) || (!tenant.rentalId && plugin.rentalOnly)) {
+        continue;
+      }
+
+      // A child Bot is only a handler container: it never polls. Checking the
+      // feature on each update allows plan changes without restarting polling.
+      if (tenant.rentalId && plugin.feature) {
+        const handlers = new Bot<Context>(bot.token);
+        await plugin.register(handlers);
+        bot.use(async (ctx, next) => {
+          if (hasFeature(plugin.feature!)) await handlers.middleware()(ctx, next);
+          else await next();
+        });
+      } else {
+        await plugin.register(bot);
+      }
 
       // 2. Collect commands declared by this plugin (optional field).
       if (plugin.commands !== undefined) {
         if (isValidCommands(plugin.commands)) {
           // Spread into the collector so each plugin's commands are appended.
-          collectedCommands.push(...plugin.commands);
+          if (!plugin.feature || hasFeature(plugin.feature)) collectedCommands.push(...plugin.commands);
 
           const names = plugin.commands
             .map((c) => `/${c.command}`)
@@ -166,8 +183,8 @@ export async function loadPlugins(bot: Bot<Context>): Promise<void> {
       }
 
       loadedCount++;
-    } catch (err) {
-      console.error(`❌  [${folder}] Failed to load plugin:`, err);
+    } catch {
+      throw new Error(`Plugin ${folder} failed to register; bot startup aborted.`);
     }
   }
 

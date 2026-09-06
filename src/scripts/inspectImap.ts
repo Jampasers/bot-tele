@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import mongoose from "mongoose";
@@ -175,4 +176,4 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+runWithTenant(platformContext(), main).catch(() => console.error("IMAP inspection failed. Check configuration privately."));

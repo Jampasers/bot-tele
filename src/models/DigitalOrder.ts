@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document, Types } from "mongoose";
 import { DeliveryType, WarrantyUnit } from "./DigitalProduct.js";
 
@@ -65,6 +66,7 @@ export interface IDigitalOrderItem {
 }
 
 export interface IDigitalOrder {
+  tenantId: string;
   /** Unique Order Reference (e.g. "DIGI-1718000000-1234") */
   orderId: string;
 
@@ -328,6 +330,8 @@ const digitalOrderSchema = new Schema<IDigitalOrder>(
 // ============================================================================
 //  3. Model
 // ============================================================================
+
+digitalOrderSchema.plugin(tenantPlugin);
 
 export const DigitalOrder: Model<IDigitalOrder> = model<IDigitalOrder>(
   "DigitalOrder",

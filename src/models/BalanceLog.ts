@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,7 @@ export type BalanceLogType =
   | "TOPUP";
 
 export interface IBalanceLog extends Document {
+  tenantId: string;
   /** Telegram ID of the user whose balance changed */
   userId: string;
 
@@ -88,6 +90,8 @@ balanceLogSchema.index({ userId: 1, createdAt: -1 });
 // ---------------------------------------------------------------------------
 // 3. Model
 // ---------------------------------------------------------------------------
+
+balanceLogSchema.plugin(tenantPlugin);
 
 export const BalanceLog: Model<IBalanceLog> = model<IBalanceLog>(
   "BalanceLog",

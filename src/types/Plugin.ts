@@ -30,6 +30,10 @@ export interface PluginCommand {
  * a default object implementing this interface — the loader handles the rest.
  */
 export interface Plugin {
+  readonly internalOnly?: boolean;
+  readonly rentalOnly?: boolean;
+  /** Optional plan feature checked at registration and on every update. */
+  readonly feature?: string;
   /** Unique, human-readable identifier for the plugin (e.g. "ping"). */
   readonly name: string;
 
@@ -59,5 +63,5 @@ export interface Plugin {
    *
    * @param bot - The shared grammY Bot instance.
    */
-  register(bot: Bot<Context>): void;
+  register(bot: Bot<Context>): void | Promise<void>;
 }

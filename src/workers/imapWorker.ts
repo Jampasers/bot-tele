@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ImapFlow, type SearchObject } from "imapflow";
 import { simpleParser, type ParsedMail } from "mailparser";
 import { Api } from "grammy";
@@ -1100,7 +1101,7 @@ async function bootstrap() {
   const worker = new ImapChildWorker();
 
   // Handle IPC messages from Parent Process
-  process.on("message", async (msg: any) => {
+  process.on("message", (msg: any) => runWithTenant(platformContext(), async () => {
     if (!msg || typeof msg !== "object") return;
 
     try {
@@ -1155,7 +1156,7 @@ async function bootstrap() {
     } catch (msgErr) {
       console.error("[IMAP Worker] Error processing IPC message:", msgErr);
     }
-  });
+  }));
 
   // Start immediately upon bootstrap
   await worker.start();
@@ -1172,7 +1173,7 @@ async function bootstrap() {
   process.on("disconnect", cleanup);
 }
 
-bootstrap().catch((err) => {
+runWithTenant(platformContext(), bootstrap).catch((err) => {
   console.error("[IMAP Worker] Startup failed:", err);
   process.exit(1);
 });

@@ -4,6 +4,8 @@ import { User, IUser } from "../../models/User.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
 import { ActivityLogService } from "../../services/activityLog.js";
 import { HydratedDocument } from "mongoose";
+import { getTenantContext } from "../../tenant/context.js";
+import { hasFeature } from "../../tenant/features.js";
 
 // ============================================================================
 //  EXPORTS used by other plugins
@@ -52,17 +54,19 @@ export function buildMainMenuReplyKeyboard(): Keyboard {
  * navigates "Back to Catalog" from the OTP service picker.
  */
 export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
-  const config = await SmsConfig.getOrCreate();
   const kb = new InlineKeyboard();
 
+  if (hasFeature("smsbower")) {
+  const config = await SmsConfig.getOrCreate();
   if (config.enabled !== false) {
     kb.text("💬 OTP SMS (Virtual Number)", "product_otp");
   } else {
     kb.text("💬 OTP SMS (🔴 Nonaktif)", "product_otp_disabled");
   }
+  }
 
-  kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
-  kb.row().text("👥 Program Afiliasi", "aff_home");
+  if (hasFeature("digital")) kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
+  if (hasFeature("affiliate")) kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
 }
 
@@ -119,8 +123,8 @@ function buildInfoText(user: HydratedDocument<IUser>): string {
  * Exported so the smsbower plugin can redraw this message when navigating back.
  */
 export async function buildCatalogText(): Promise<string> {
-  const config = await SmsConfig.getOrCreate();
-  const otpDesc = config.enabled !== false
+  const config = hasFeature("smsbower") ? await SmsConfig.getOrCreate() : null;
+  const otpDesc = !config ? "" : config.enabled !== false
     ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
     : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
 
@@ -135,6 +139,7 @@ export async function buildCatalogText(): Promise<string> {
 }
 
 function buildTopupText(): string {
+  if (getTenantContext().rentalId) return "💳 Pilih produk di Catalog untuk membayar langsung melalui QRIS toko. Untuk pengisian saldo, hubungi administrator toko.";
   return (
     `💳 <b>Topup Balance</b>\n` +
     `${"─".repeat(28)}\n\n` +
@@ -145,6 +150,8 @@ function buildTopupText(): string {
 }
 
 function buildHelpText(): string {
+  const tenant = getTenantContext();
+  if (tenant.rentalId) return `❓ <b>Bantuan Toko</b>\n\nGunakan /start untuk membuka katalog dan melihat saldo.\nHubungi <a href="tg://user?id=${tenant.ownerTelegramId}">administrator toko</a> untuk bantuan pesanan.\n\nAdmin: /settings, /status, /renew.`;
   return (
     `❓ <b>Help & Support</b>\n` +
     `${"─".repeat(28)}\n\n` +

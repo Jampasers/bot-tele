@@ -2,6 +2,8 @@ const DEFAULT_GOBIZ_TOKEN_ENDPOINT = "https://api.gobiz.co.id/goid/token";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 export interface GobizAuthServiceOptions {
+  clientId?: string;
+  clientSecret?: string;
   email: string;
   endpoint?: string;
   fetchImpl?: typeof fetch;
@@ -45,7 +47,8 @@ export class GobizAuthService {
     try {
       const response = await this.fetchImpl(this.endpoint, {
         body: JSON.stringify({
-          client_id: "go-biz-web-new",
+          client_id: this.options.clientId || "go-biz-web-new",
+          ...(this.options.clientSecret ? { client_secret: this.options.clientSecret } : {}),
           data: {
             email: this.options.email.trim(),
             password: this.options.password,

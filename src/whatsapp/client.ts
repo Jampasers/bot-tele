@@ -8,9 +8,15 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import { WaMessageHandler } from "./handler.js";
+import { getTenantId, PLATFORM_TENANT_ID, platformContext, runWithTenant } from "../tenant/context.js";
+import { stopTenantTimers } from "../runtime/tenantTimers.js";
 
 let waSocketInstance: WASocket | null = null;
 let isStopping = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let pairingTimer: ReturnType<typeof setTimeout> | undefined;
+let reconnecting: Promise<unknown> | undefined;
+const pendingMessages = new Set<Promise<void>>();
 
 export class WhatsAppBotService {
   static getSocket(): WASocket | null {
@@ -21,6 +27,7 @@ export class WhatsAppBotService {
    * Initializes and starts the WhatsApp bot socket using Baileys.
    */
   static async start(): Promise<WASocket | null> {
+    if (getTenantId() !== PLATFORM_TENANT_ID) throw new Error("WhatsApp is only available to the platform bot.");
     const authDir = process.env["WHATSAPP_AUTH_DIR"] || "./auth_baileys";
     const pairingPhone = process.env["WHATSAPP_PAIRING_PHONE"]?.trim();
 
@@ -45,7 +52,8 @@ export class WhatsAppBotService {
 
     // Handle Pairing Code jika nomor telepon dikonfigurasi dan belum terdaftar
     if (pairingPhone && !sock.authState.creds.registered) {
-      setTimeout(async () => {
+      pairingTimer = setTimeout(async () => {
+        if (isStopping) return;
         try {
           const cleanPhone = pairingPhone.replace(/[^0-9]/g, "");
           console.log(`📱 [WhatsApp] Requesting Pairing Code for: +${cleanPhone}…`);
@@ -84,10 +92,11 @@ export class WhatsAppBotService {
         );
 
         if (shouldReconnect) {
-          setTimeout(() => {
-            WhatsAppBotService.start().catch((err) =>
-              console.error("❌ [WhatsApp] Reconnect error:", err)
-            );
+          reconnectTimer = setTimeout(() => {
+            if (isStopping) return;
+            reconnecting = runWithTenant(platformContext(), () => WhatsAppBotService.start()).catch(() =>
+              console.error("❌ [WhatsApp] Reconnect failed.")
+            ).finally(() => { reconnecting = undefined; });
           }, 5000);
         } else {
           console.log("🛑 [WhatsApp] Session logged out or stopped.");
@@ -99,8 +108,9 @@ export class WhatsAppBotService {
     });
 
     // Handle incoming messages
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
+    sock.ev.on("messages.upsert", ({ messages, type }) => {
+      if (type !== "notify" || isStopping) return;
+      const pending = runWithTenant(platformContext(), async () => {
 
       for (const msg of messages) {
         try {
@@ -109,6 +119,9 @@ export class WhatsAppBotService {
           console.error("[WhatsApp] Error processing message update:", msgErr);
         }
       }
+      });
+      pendingMessages.add(pending);
+      void pending.finally(() => pendingMessages.delete(pending));
     });
 
     return sock;
@@ -118,6 +131,11 @@ export class WhatsAppBotService {
    * Gracefully closes the WhatsApp socket.
    */
   static async stop(): Promise<void> {
+    isStopping = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (pairingTimer) clearTimeout(pairingTimer);
+    await reconnecting;
+    // A reconnect already in flight can finish after the stop request.
     isStopping = true;
     if (waSocketInstance) {
       try {
@@ -129,5 +147,7 @@ export class WhatsAppBotService {
         waSocketInstance = null;
       }
     }
+    await Promise.allSettled([...pendingMessages]);
+    await stopTenantTimers(PLATFORM_TENANT_ID);
   }
 }

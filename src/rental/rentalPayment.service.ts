@@ -1,0 +1,112 @@
+import { randomUUID } from "node:crypto";
+import { Types } from "mongoose";
+import { BotRental } from "../models/BotRental.js";
+import { RentalPlan } from "../models/RentalPlan.js";
+import { RentalPayment, type IRentalPayment } from "../models/RentalPayment.js";
+import { getTenantContext, PLATFORM_TENANT_ID } from "../tenant/context.js";
+import { generatePlatformQris, getPlatformPaymentClients } from "../payments/platformPayment.service.js";
+import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
+import { applyRenewal, refreshRentalState, type RentalRuntimeState } from "./rental.service.js";
+
+export interface RentalPaymentResult { status: IRentalPayment["status"]; rental?: RentalRuntimeState }
+const invoiceLocks = new Map<string, Promise<void>>();
+
+async function authorizeRental(rentalId: string, actorTelegramId: string): Promise<void> {
+  const context = getTenantContext();
+  if (context.rentalId !== rentalId || !Types.ObjectId.isValid(rentalId)) throw new Error("Rental access denied.");
+  const rental = await BotRental.findOne({ _id: rentalId, tenantId: context.tenantId, status: { $ne: "terminated" } }).lean();
+  if (!rental || (rental.ownerTelegramId !== actorTelegramId && !rental.adminTelegramIds.includes(actorTelegramId))) throw new Error("Rental access denied.");
+}
+
+export async function createRentalInvoice(rentalId: string, actorTelegramId: string, planId: string) {
+  await authorizeRental(rentalId, actorTelegramId);
+  if (!Types.ObjectId.isValid(planId)) throw new Error("Paket tidak valid.");
+  const before = invoiceLocks.get(rentalId) ?? Promise.resolve();
+  let release!: () => void;
+  const done = new Promise<void>(resolve => { release = resolve; });
+  const lock = before.then(() => done);
+  invoiceLocks.set(rentalId, lock);
+  await before;
+  try {
+    // Reuse an active invoice, limiting repeated button taps to one reservation.
+    let payment = await RentalPayment.findOne({ rentalId, status: "pending", expiresAt: { $gt: new Date() } }).lean();
+    if (!payment) {
+      const plan = await RentalPlan.findOne({ _id: planId, enabled: true }).lean();
+      if (!plan) throw new Error("Paket tidak tersedia.");
+      const rental = await BotRental.findById(rentalId).lean();
+      if (!rental) throw new Error("Rental tidak ditemukan.");
+      const { merchantId } = getPlatformPaymentClients();
+      const amount = await reservePaymentAmount(merchantId, rental.tenantId, plan.price);
+      payment = (await RentalPayment.create({
+        rentalId, tenantId: rental.tenantId, ownerTelegramId: rental.ownerTelegramId,
+        planId: String(plan._id), durationDays: plan.durationDays, baseAmount: plan.price,
+        amount: amount.totalAmount, merchantId, provider: "GOPAY", providerReference: randomUUID(),
+        status: "pending", expiresAt: new Date(Date.now() + 15 * 60_000),
+      })).toObject();
+    }
+    if (payment.merchantId !== getPlatformPaymentClients().merchantId) throw new Error("Payment platform berubah; hubungi platform.");
+    return { payment, qris: await generatePlatformQris(payment.amount) };
+  } finally {
+    release();
+    if (invoiceLocks.get(rentalId) === lock) invoiceLocks.delete(rentalId);
+  }
+}
+
+export async function checkRentalPayment(providerReference: string, actorTelegramId?: string): Promise<RentalPaymentResult> {
+  if (!/^[A-Za-z0-9_-]{1,96}$/.test(providerReference)) throw new Error("Referensi invoice tidak valid.");
+  const payment = await RentalPayment.findOne({ providerReference }).lean();
+  if (!payment) throw new Error("Invoice tidak ditemukan.");
+  if (actorTelegramId !== undefined) await authorizeRental(payment.rentalId, actorTelegramId);
+  else if (getTenantContext().tenantId !== PLATFORM_TENANT_ID) throw new Error("Payment reconciliation requires platform context.");
+  if (payment.status === "paid") {
+    const rental = await refreshRentalState(payment.rentalId);
+    return rental ? { status: "paid", rental } : { status: "paid" };
+  }
+  if (payment.status === "expired") return { status: "expired" };
+  if (payment.status !== "processing") {
+    const clients = getPlatformPaymentClients();
+    if (clients.merchantId !== payment.merchantId) throw new Error("Platform merchant changed; invoice needs reconciliation.");
+    const transactions = await clients.merchant.getQrisSettlements({
+      startTime: payment.createdAt, endTime: new Date(Math.min(Date.now(), payment.expiresAt.getTime())),
+    });
+    let found = false;
+    for (const transaction of transactions) {
+      if (!matchesSettlement(transaction, payment)) continue;
+      const claim = await claimSettlement({ merchantId: payment.merchantId, tenantId: payment.tenantId,
+        invoiceReference: payment.providerReference, kind: "rental", transaction });
+      if (!claim.owned) continue;
+      await RentalPayment.updateOne({ _id: payment._id, status: "pending" }, { $set: {
+        status: "processing", matchedTransactionId: transaction.transactionId, paidAt: new Date(transaction.paidAt),
+      } });
+      found = true;
+      break;
+    }
+    if (!found) {
+      // Allow five minutes for provider indexing, still matching the invoice's
+      // original payment window; late transfers never extend another invoice.
+      if (payment.expiresAt.getTime() + 5 * 60_000 < Date.now()) {
+        await RentalPayment.updateOne({ _id: payment._id, status: "pending" }, { $set: { status: "expired" } });
+      }
+      const latest = await RentalPayment.findById(payment._id).lean();
+      return { status: latest?.status ?? "pending" };
+    }
+  }
+  const durablePayment = await RentalPayment.findById(payment._id).lean();
+  if (!durablePayment || !["processing", "paid"].includes(durablePayment.status)) {
+    return { status: durablePayment?.status ?? "pending" };
+  }
+  // Retry after a crash is safe: the payment receipt and expiry change are one
+  // atomic update inside BotRental, before this separate ledger is marked paid.
+  const rental = await applyRenewal(payment.rentalId, payment.providerReference, payment.durationDays, payment.planId);
+  await RentalPayment.updateOne({ _id: payment._id, status: "processing" }, { $set: { status: "paid" } });
+  return { status: "paid", rental };
+}
+
+export async function pollPendingRentalPayments(): Promise<void> {
+  if (getTenantContext().tenantId !== PLATFORM_TENANT_ID) throw new Error("Platform context required.");
+  const cursor = RentalPayment.find({ status: { $in: ["pending", "processing"] } }).select("providerReference rentalId").lean().cursor();
+  for await (const invoice of cursor) {
+    try { await checkRentalPayment(invoice.providerReference); }
+    catch { console.warn(`[Rental:${invoice.rentalId}] Payment reconciliation failed; retry pending.`); }
+  }
+}

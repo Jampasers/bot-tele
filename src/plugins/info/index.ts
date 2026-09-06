@@ -9,6 +9,7 @@ import { Plugin } from "../../types/Plugin.js";
  * provides the full interactive main-menu experience.
  */
 const infoPlugin: Plugin = {
+  internalOnly: true,
   name: "info",
   version: "1.0.0",
 

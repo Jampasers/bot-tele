@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document } from "mongoose";
 
 // ============================================================================
@@ -15,6 +16,9 @@ export type TopupSessionStatus =
   | "CANCELLED"; // User dismissed or admin cancelled
 
 export interface ITopupSession extends Document {
+  tenantId: string;
+  paymentMerchantId?: string;
+  paymentConfigVersion?: number;
   /** User identifier (telegram numeric ID or WA formatted ID). */
   telegramId: string;
 
@@ -77,6 +81,8 @@ export interface ITopupSession extends Document {
 
 const topupSessionSchema = new Schema<ITopupSession>(
   {
+    paymentMerchantId: { type: String },
+    paymentConfigVersion: { type: Number },
     telegramId: {
       type: String,
       required: true,
@@ -168,6 +174,8 @@ const topupSessionSchema = new Schema<ITopupSession>(
 // ─────────────────────────────────────────────────────────────────────────────
 //  Model
 // ─────────────────────────────────────────────────────────────────────────────
+
+topupSessionSchema.plugin(tenantPlugin);
 
 export const TopupSession: Model<ITopupSession> = model<ITopupSession>(
   "TopupSession",

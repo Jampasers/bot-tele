@@ -1,3 +1,4 @@
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
 import { WASocket } from "@whiskeysockets/baileys";
 import { IUser, User } from "../../models/User.js";
 import { Order } from "../../models/Order.js";

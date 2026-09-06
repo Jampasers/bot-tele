@@ -1,3 +1,4 @@
+import { TenantMap } from "../tenant/TenantMap.js";
 import { Api, InlineKeyboard } from "grammy";
 import { BotConfig, IBotConfig } from "../models/BotConfig.js";
 import { ITopupSession } from "../models/TopupSession.js";
@@ -114,8 +115,8 @@ export interface WarrantyClaimResolvedLogData {
 //  Cache & Helpers
 // ============================================================================
 
-let cachedConfig: IBotConfig | null = null;
-let lastCacheTime = 0;
+const configCache = new TenantMap<string, { config: IBotConfig; cachedAt: number }>();
+
 const CACHE_TTL_MS = 10_000; // 10 seconds
 
 function escapeHtml(text: string): string {
@@ -166,12 +167,13 @@ export class ActivityLogService {
    */
   static async getConfig(): Promise<IBotConfig> {
     const now = Date.now();
-    if (cachedConfig && now - lastCacheTime < CACHE_TTL_MS) {
-      return cachedConfig;
+    const cached = configCache.get("config");
+    if (cached && now - cached.cachedAt < CACHE_TTL_MS) {
+      return cached.config;
     }
-    cachedConfig = await BotConfig.getOrCreate();
-    lastCacheTime = now;
-    return cachedConfig;
+    const config = await BotConfig.getOrCreate();
+    configCache.set("config", { config, cachedAt: now });
+    return config;
   }
 
   /**
@@ -181,8 +183,8 @@ export class ActivityLogService {
     const config = await BotConfig.getOrCreate();
     Object.assign(config, updates);
     await config.save();
-    cachedConfig = config;
-    lastCacheTime = Date.now();
+    configCache.set("config", { config, cachedAt: Date.now() });
+
     return config;
   }
 
@@ -226,7 +228,7 @@ export class ActivityLogService {
         errMsg.includes("have no rights to send a message")
       ) {
         console.error(
-          `❌ [ActivityLog] PENTING: Pastikan bot telah ditambahkan sebagai ADMINISTRATOR di channel log (${cachedConfig?.logChannel}) dengan izin 'Post Messages'!`
+          `❌ [ActivityLog] PENTING: Pastikan bot telah ditambahkan sebagai ADMINISTRATOR di channel log (${configCache.get("config")?.config.logChannel}) dengan izin 'Post Messages'!`
         );
       }
       return false;

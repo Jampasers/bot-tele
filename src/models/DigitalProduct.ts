@@ -1,3 +1,4 @@
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Model, Document, Types } from "mongoose";
 
 // ============================================================================
@@ -17,6 +18,7 @@ export interface IBulkDiscountTier {
 }
 
 export interface IDigitalProduct {
+  tenantId: string;
   /** Display name of the digital product (e.g. "Netflix Premium 1 Bulan") */
   name: string;
 
@@ -175,6 +177,8 @@ digitalProductSchema.index({ category: 1, isActive: 1 });
 // ============================================================================
 //  3. Model
 // ============================================================================
+
+digitalProductSchema.plugin(tenantPlugin);
 
 export const DigitalProduct: Model<IDigitalProduct> = model<IDigitalProduct>(
   "DigitalProduct",

@@ -1,3 +1,5 @@
+import { getTenantId, PLATFORM_TENANT_ID, tenantEnvironment } from "../tenant/context.js";
+import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
 // ---------------------------------------------------------------------------
@@ -5,6 +7,7 @@ import { Schema, model, Document, Model } from "mongoose";
 // ---------------------------------------------------------------------------
 
 export interface IBotConfig extends Document {
+  tenantId: string;
   /** Apakah fitur wajib join channel diaktifkan */
   forceSubEnabled: boolean;
 
@@ -170,42 +173,42 @@ const botConfigSchema = new Schema<IBotConfig>(
   {
     forceSubEnabled: {
       type: Boolean,
-      default: () => process.env.FORCE_SUB_ENABLED !== "false",
+      default: () => tenantEnvironment().FORCE_SUB_ENABLED !== "false",
     },
     forceSubChannel: {
       type: String,
-      default: () => process.env.FORCE_SUB_CHANNEL?.trim() || "",
+      default: () => tenantEnvironment().FORCE_SUB_CHANNEL?.trim() || "",
       trim: true,
     },
     forceSubLink: {
       type: String,
-      default: () => process.env.FORCE_SUB_LINK?.trim() || "",
+      default: () => tenantEnvironment().FORCE_SUB_LINK?.trim() || "",
       trim: true,
     },
     forceSubName: {
       type: String,
-      default: () => process.env.FORCE_SUB_NAME?.trim() || "Channel Resmi",
+      default: () => tenantEnvironment().FORCE_SUB_NAME?.trim() || "Channel Resmi",
       trim: true,
     },
     testimonialEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.TESTIMONIAL_ENABLED === "false") return false;
-        const envTesti = process.env.TESTIMONIAL_CHANNEL || process.env.TESTI_CHANNEL_ID || process.env.CHANNEL_TESTIMONI;
+        if (tenantEnvironment().TESTIMONIAL_ENABLED === "false") return false;
+        const envTesti = tenantEnvironment().TESTIMONIAL_CHANNEL || tenantEnvironment().TESTI_CHANNEL_ID || tenantEnvironment().CHANNEL_TESTIMONI;
         return !!envTesti && envTesti.trim().length > 0;
       },
     },
     testimonialChannel: {
       type: String,
-      default: () => (process.env.TESTIMONIAL_CHANNEL || process.env.TESTI_CHANNEL_ID || process.env.CHANNEL_TESTIMONI || "").trim(),
+      default: () => (tenantEnvironment().TESTIMONIAL_CHANNEL || tenantEnvironment().TESTI_CHANNEL_ID || tenantEnvironment().CHANNEL_TESTIMONI || "").trim(),
       trim: true,
     },
     testimonialLink: {
       type: String,
       default: () => {
-        const envLink = process.env.TESTIMONIAL_LINK?.trim();
+        const envLink = tenantEnvironment().TESTIMONIAL_LINK?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.TESTIMONIAL_CHANNEL || process.env.TESTI_CHANNEL_ID || process.env.CHANNEL_TESTIMONI || "").trim();
+        const envChan = (tenantEnvironment().TESTIMONIAL_CHANNEL || tenantEnvironment().TESTI_CHANNEL_ID || tenantEnvironment().CHANNEL_TESTIMONI || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
@@ -213,22 +216,22 @@ const botConfigSchema = new Schema<IBotConfig>(
     logChannelEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.LOG_CHANNEL_ENABLED === "false") return false;
-        const envLog = process.env.LOG_CHANNEL || process.env.AUDIT_CHANNEL || process.env.CHANNEL_LOG;
+        if (tenantEnvironment().LOG_CHANNEL_ENABLED === "false") return false;
+        const envLog = tenantEnvironment().LOG_CHANNEL || tenantEnvironment().AUDIT_CHANNEL || tenantEnvironment().CHANNEL_LOG;
         return !!envLog && envLog.trim().length > 0;
       },
     },
     logChannel: {
       type: String,
-      default: () => (process.env.LOG_CHANNEL || process.env.AUDIT_CHANNEL || process.env.CHANNEL_LOG || "").trim(),
+      default: () => (tenantEnvironment().LOG_CHANNEL || tenantEnvironment().AUDIT_CHANNEL || tenantEnvironment().CHANNEL_LOG || "").trim(),
       trim: true,
     },
     logChannelLink: {
       type: String,
       default: () => {
-        const envLink = process.env.LOG_CHANNEL_LINK?.trim();
+        const envLink = tenantEnvironment().LOG_CHANNEL_LINK?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.LOG_CHANNEL || process.env.AUDIT_CHANNEL || process.env.CHANNEL_LOG || "").trim();
+        const envChan = (tenantEnvironment().LOG_CHANNEL || tenantEnvironment().AUDIT_CHANNEL || tenantEnvironment().CHANNEL_LOG || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
@@ -237,22 +240,22 @@ const botConfigSchema = new Schema<IBotConfig>(
     securityAlertChannelEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.SECURITY_ALERT_CHANNEL_ENABLED === "false") return false;
-        const envSec = process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL;
+        if (tenantEnvironment().SECURITY_ALERT_CHANNEL_ENABLED === "false") return false;
+        const envSec = tenantEnvironment().SECURITY_ALERT_CHANNEL || tenantEnvironment().SECURITY_CHANNEL;
         return !!envSec && envSec.trim().length > 0;
       },
     },
     securityAlertChannel: {
       type: String,
-      default: () => (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim(),
+      default: () => (tenantEnvironment().SECURITY_ALERT_CHANNEL || tenantEnvironment().SECURITY_CHANNEL || "").trim(),
       trim: true,
     },
     securityAlertChannelLink: {
       type: String,
       default: () => {
-        const envLink = process.env.SECURITY_ALERT_CHANNEL_LINK?.trim();
+        const envLink = tenantEnvironment().SECURITY_ALERT_CHANNEL_LINK?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim();
+        const envChan = (tenantEnvironment().SECURITY_ALERT_CHANNEL || tenantEnvironment().SECURITY_CHANNEL || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
@@ -312,22 +315,22 @@ const botConfigSchema = new Schema<IBotConfig>(
     otpChannelEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.OTP_CHANNEL_ENABLED === "false" || process.env.OTP_PAYPAL_CHANNEL_ENABLED === "false") return false;
-        const envOtpChan = process.env.OTP_PAYPAL_CHANNEL || process.env.OTP_CHANNEL || process.env.CHANNEL_OTP;
+        if (tenantEnvironment().OTP_CHANNEL_ENABLED === "false" || tenantEnvironment().OTP_PAYPAL_CHANNEL_ENABLED === "false") return false;
+        const envOtpChan = tenantEnvironment().OTP_PAYPAL_CHANNEL || tenantEnvironment().OTP_CHANNEL || tenantEnvironment().CHANNEL_OTP;
         return !!envOtpChan && envOtpChan.trim().length > 0;
       },
     },
     otpChannel: {
       type: String,
-      default: () => (process.env.OTP_PAYPAL_CHANNEL || process.env.OTP_CHANNEL || process.env.CHANNEL_OTP || "").trim(),
+      default: () => (tenantEnvironment().OTP_PAYPAL_CHANNEL || tenantEnvironment().OTP_CHANNEL || tenantEnvironment().CHANNEL_OTP || "").trim(),
       trim: true,
     },
     otpChannelLink: {
       type: String,
       default: () => {
-        const envLink = process.env.OTP_PAYPAL_CHANNEL_LINK?.trim() || process.env.OTP_CHANNEL_LINK?.trim();
+        const envLink = tenantEnvironment().OTP_PAYPAL_CHANNEL_LINK?.trim() || tenantEnvironment().OTP_CHANNEL_LINK?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.OTP_PAYPAL_CHANNEL || process.env.OTP_CHANNEL || process.env.CHANNEL_OTP || "").trim();
+        const envChan = (tenantEnvironment().OTP_PAYPAL_CHANNEL || tenantEnvironment().OTP_CHANNEL || tenantEnvironment().CHANNEL_OTP || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
@@ -335,22 +338,22 @@ const botConfigSchema = new Schema<IBotConfig>(
     otpNetflixChannelEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.OTP_NETFLIX_CHANNEL_ENABLED === "false" || process.env.NETFLIX_OTP_CHANNEL_ENABLED === "false") return false;
-        const envNfChan = process.env.OTP_NETFLIX_CHANNEL || process.env.NETFLIX_OTP_CHANNEL;
+        if (tenantEnvironment().OTP_NETFLIX_CHANNEL_ENABLED === "false" || tenantEnvironment().NETFLIX_OTP_CHANNEL_ENABLED === "false") return false;
+        const envNfChan = tenantEnvironment().OTP_NETFLIX_CHANNEL || tenantEnvironment().NETFLIX_OTP_CHANNEL;
         return !!envNfChan && envNfChan.trim().length > 0;
       },
     },
     otpNetflixChannel: {
       type: String,
-      default: () => (process.env.OTP_NETFLIX_CHANNEL || process.env.NETFLIX_OTP_CHANNEL || "").trim(),
+      default: () => (tenantEnvironment().OTP_NETFLIX_CHANNEL || tenantEnvironment().NETFLIX_OTP_CHANNEL || "").trim(),
       trim: true,
     },
     otpNetflixChannelLink: {
       type: String,
       default: () => {
-        const envLink = (process.env.OTP_NETFLIX_CHANNEL_LINK || process.env.NETFLIX_OTP_CHANNEL_LINK)?.trim();
+        const envLink = (tenantEnvironment().OTP_NETFLIX_CHANNEL_LINK || tenantEnvironment().NETFLIX_OTP_CHANNEL_LINK)?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.OTP_NETFLIX_CHANNEL || process.env.NETFLIX_OTP_CHANNEL || "").trim();
+        const envChan = (tenantEnvironment().OTP_NETFLIX_CHANNEL || tenantEnvironment().NETFLIX_OTP_CHANNEL || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
@@ -358,77 +361,77 @@ const botConfigSchema = new Schema<IBotConfig>(
     otpDiscordChannelEnabled: {
       type: Boolean,
       default: () => {
-        if (process.env.OTP_DISCORD_CHANNEL_ENABLED === "false" || process.env.DISCORD_OTP_CHANNEL_ENABLED === "false") return false;
-        const envDcChan = process.env.OTP_DISCORD_CHANNEL || process.env.DISCORD_OTP_CHANNEL;
+        if (tenantEnvironment().OTP_DISCORD_CHANNEL_ENABLED === "false" || tenantEnvironment().DISCORD_OTP_CHANNEL_ENABLED === "false") return false;
+        const envDcChan = tenantEnvironment().OTP_DISCORD_CHANNEL || tenantEnvironment().DISCORD_OTP_CHANNEL;
         return !!envDcChan && envDcChan.trim().length > 0;
       },
     },
     otpDiscordChannel: {
       type: String,
-      default: () => (process.env.OTP_DISCORD_CHANNEL || process.env.DISCORD_OTP_CHANNEL || "").trim(),
+      default: () => (tenantEnvironment().OTP_DISCORD_CHANNEL || tenantEnvironment().DISCORD_OTP_CHANNEL || "").trim(),
       trim: true,
     },
     otpDiscordChannelLink: {
       type: String,
       default: () => {
-        const envLink = (process.env.OTP_DISCORD_CHANNEL_LINK || process.env.DISCORD_OTP_CHANNEL_LINK)?.trim();
+        const envLink = (tenantEnvironment().OTP_DISCORD_CHANNEL_LINK || tenantEnvironment().DISCORD_OTP_CHANNEL_LINK)?.trim();
         if (envLink) return envLink;
-        const envChan = (process.env.OTP_DISCORD_CHANNEL || process.env.DISCORD_OTP_CHANNEL || "").trim();
+        const envChan = (tenantEnvironment().OTP_DISCORD_CHANNEL || tenantEnvironment().DISCORD_OTP_CHANNEL || "").trim();
         return envChan.startsWith("@") ? `https://t.me/${envChan.slice(1)}` : "";
       },
       trim: true,
     },
     imapEnabled: {
       type: Boolean,
-      default: () => process.env.IMAP_ENABLED !== "false",
+      default: () => getTenantId() === PLATFORM_TENANT_ID && tenantEnvironment().IMAP_ENABLED !== "false",
     },
     imapHost: {
       type: String,
-      default: () => (process.env.IMAP_HOST || "imap.gmail.com").trim(),
+      default: () => (tenantEnvironment().IMAP_HOST || "imap.gmail.com").trim(),
       trim: true,
     },
     imapPort: {
       type: Number,
-      default: () => Number(process.env.IMAP_PORT) || 993,
+      default: () => Number(tenantEnvironment().IMAP_PORT) || 993,
     },
     imapSecure: {
       type: Boolean,
-      default: () => process.env.IMAP_SECURE !== "false",
+      default: () => tenantEnvironment().IMAP_SECURE !== "false",
     },
     imapUser: {
       type: String,
-      default: () => (process.env.IMAP_USER || "").trim(),
+      default: () => (tenantEnvironment().IMAP_USER || "").trim(),
       trim: true,
     },
     imapPass: {
       type: String,
-      default: () => (process.env.IMAP_PASS || process.env.IMAP_PASSWORD || "").trim(),
+      default: () => (tenantEnvironment().IMAP_PASS || tenantEnvironment().IMAP_PASSWORD || "").trim(),
       trim: true,
     },
     imapMailbox: {
       type: String,
-      default: () => (process.env.IMAP_MAILBOX || "INBOX").trim(),
+      default: () => (tenantEnvironment().IMAP_MAILBOX || "INBOX").trim(),
       trim: true,
     },
     imapTargetSender: {
       type: String,
-      default: () => (process.env.IMAP_TARGET_SENDER || "service@intl.paypal.com").trim().toLowerCase(),
+      default: () => (tenantEnvironment().IMAP_TARGET_SENDER || "service@intl.paypal.com").trim().toLowerCase(),
       trim: true,
     },
     // ── Cloudflare Email Routing ────────────────────────────────────────────
     cfEmail: {
       type: String,
-      default: () => (process.env.CF_EMAIL || "").trim(),
+      default: () => (tenantEnvironment().CF_EMAIL || "").trim(),
       trim: true,
     },
     cfApiKey: {
       type: String,
-      default: () => (process.env.CF_GLOBAL_API_KEY || process.env.CF_API_KEY || "").trim(),
+      default: () => (tenantEnvironment().CF_GLOBAL_API_KEY || tenantEnvironment().CF_API_KEY || "").trim(),
       trim: true,
     },
     cfDestinationEmail: {
       type: String,
-      default: () => (process.env.CF_DEST_EMAIL || process.env.CF_DESTINATION_EMAIL || "").trim(),
+      default: () => (tenantEnvironment().CF_DEST_EMAIL || tenantEnvironment().CF_DESTINATION_EMAIL || "").trim(),
       trim: true,
     },
     cfZones: {
@@ -438,7 +441,7 @@ const botConfigSchema = new Schema<IBotConfig>(
           domain: { type: String, required: true, trim: true },
         },
       ],
-      default: () => [...DEFAULT_CF_ZONES],
+      default: () => (getTenantId() === PLATFORM_TENANT_ID ? [...DEFAULT_CF_ZONES] : []),
     },
   },
   {
@@ -457,49 +460,49 @@ export interface IBotConfigModel extends Model<IBotConfig> {
 
 botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
   let doc = await this.findOne();
-  const envTestiChannel = (process.env.TESTIMONIAL_CHANNEL || process.env.TESTI_CHANNEL_ID || process.env.CHANNEL_TESTIMONI || "").trim();
-  const envTestiLink = process.env.TESTIMONIAL_LINK?.trim() || (envTestiChannel.startsWith("@") ? `https://t.me/${envTestiChannel.slice(1)}` : "");
-  const envTestiEnabled = process.env.TESTIMONIAL_ENABLED !== "false" && envTestiChannel.length > 0;
+  const envTestiChannel = (tenantEnvironment().TESTIMONIAL_CHANNEL || tenantEnvironment().TESTI_CHANNEL_ID || tenantEnvironment().CHANNEL_TESTIMONI || "").trim();
+  const envTestiLink = tenantEnvironment().TESTIMONIAL_LINK?.trim() || (envTestiChannel.startsWith("@") ? `https://t.me/${envTestiChannel.slice(1)}` : "");
+  const envTestiEnabled = tenantEnvironment().TESTIMONIAL_ENABLED !== "false" && envTestiChannel.length > 0;
 
-  const envLogChannel = (process.env.LOG_CHANNEL || process.env.AUDIT_CHANNEL || process.env.CHANNEL_LOG || "").trim();
-  const envLogLink = process.env.LOG_CHANNEL_LINK?.trim() || (envLogChannel.startsWith("@") ? `https://t.me/${envLogChannel.slice(1)}` : "");
-  const envLogEnabled = process.env.LOG_CHANNEL_ENABLED !== "false" && envLogChannel.length > 0;
+  const envLogChannel = (tenantEnvironment().LOG_CHANNEL || tenantEnvironment().AUDIT_CHANNEL || tenantEnvironment().CHANNEL_LOG || "").trim();
+  const envLogLink = tenantEnvironment().LOG_CHANNEL_LINK?.trim() || (envLogChannel.startsWith("@") ? `https://t.me/${envLogChannel.slice(1)}` : "");
+  const envLogEnabled = tenantEnvironment().LOG_CHANNEL_ENABLED !== "false" && envLogChannel.length > 0;
 
-  const envOtpChan = (process.env.OTP_PAYPAL_CHANNEL || process.env.OTP_CHANNEL || process.env.CHANNEL_OTP || "").trim();
-  const envOtpLink = process.env.OTP_PAYPAL_CHANNEL_LINK?.trim() || process.env.OTP_CHANNEL_LINK?.trim() || (envOtpChan.startsWith("@") ? `https://t.me/${envOtpChan.slice(1)}` : "");
-  const envOtpEnabled = process.env.OTP_CHANNEL_ENABLED !== "false" && process.env.OTP_PAYPAL_CHANNEL_ENABLED !== "false" && envOtpChan.length > 0;
+  const envOtpChan = (tenantEnvironment().OTP_PAYPAL_CHANNEL || tenantEnvironment().OTP_CHANNEL || tenantEnvironment().CHANNEL_OTP || "").trim();
+  const envOtpLink = tenantEnvironment().OTP_PAYPAL_CHANNEL_LINK?.trim() || tenantEnvironment().OTP_CHANNEL_LINK?.trim() || (envOtpChan.startsWith("@") ? `https://t.me/${envOtpChan.slice(1)}` : "");
+  const envOtpEnabled = tenantEnvironment().OTP_CHANNEL_ENABLED !== "false" && tenantEnvironment().OTP_PAYPAL_CHANNEL_ENABLED !== "false" && envOtpChan.length > 0;
 
-  const envNfChan = (process.env.OTP_NETFLIX_CHANNEL || process.env.NETFLIX_OTP_CHANNEL || "").trim();
-  const envNfLink = (process.env.OTP_NETFLIX_CHANNEL_LINK || process.env.NETFLIX_OTP_CHANNEL_LINK)?.trim() || (envNfChan.startsWith("@") ? `https://t.me/${envNfChan.slice(1)}` : "");
-  const envNfEnabled = process.env.OTP_NETFLIX_CHANNEL_ENABLED !== "false" && process.env.NETFLIX_OTP_CHANNEL_ENABLED !== "false" && envNfChan.length > 0;
+  const envNfChan = (tenantEnvironment().OTP_NETFLIX_CHANNEL || tenantEnvironment().NETFLIX_OTP_CHANNEL || "").trim();
+  const envNfLink = (tenantEnvironment().OTP_NETFLIX_CHANNEL_LINK || tenantEnvironment().NETFLIX_OTP_CHANNEL_LINK)?.trim() || (envNfChan.startsWith("@") ? `https://t.me/${envNfChan.slice(1)}` : "");
+  const envNfEnabled = tenantEnvironment().OTP_NETFLIX_CHANNEL_ENABLED !== "false" && tenantEnvironment().NETFLIX_OTP_CHANNEL_ENABLED !== "false" && envNfChan.length > 0;
 
-  const envDcChan = (process.env.OTP_DISCORD_CHANNEL || process.env.DISCORD_OTP_CHANNEL || "").trim();
-  const envDcLink = (process.env.OTP_DISCORD_CHANNEL_LINK || process.env.DISCORD_OTP_CHANNEL_LINK)?.trim() || (envDcChan.startsWith("@") ? `https://t.me/${envDcChan.slice(1)}` : "");
-  const envDcEnabled = process.env.OTP_DISCORD_CHANNEL_ENABLED !== "false" && process.env.DISCORD_OTP_CHANNEL_ENABLED !== "false" && envDcChan.length > 0;
+  const envDcChan = (tenantEnvironment().OTP_DISCORD_CHANNEL || tenantEnvironment().DISCORD_OTP_CHANNEL || "").trim();
+  const envDcLink = (tenantEnvironment().OTP_DISCORD_CHANNEL_LINK || tenantEnvironment().DISCORD_OTP_CHANNEL_LINK)?.trim() || (envDcChan.startsWith("@") ? `https://t.me/${envDcChan.slice(1)}` : "");
+  const envDcEnabled = tenantEnvironment().OTP_DISCORD_CHANNEL_ENABLED !== "false" && tenantEnvironment().DISCORD_OTP_CHANNEL_ENABLED !== "false" && envDcChan.length > 0;
 
-  const envImapHost = (process.env.IMAP_HOST || "imap.gmail.com").trim();
-  const envImapPort = Number(process.env.IMAP_PORT) || 993;
-  const envImapSecure = process.env.IMAP_SECURE !== "false";
-  const envImapUser = (process.env.IMAP_USER || "").trim();
-  const envImapPass = (process.env.IMAP_PASS || process.env.IMAP_PASSWORD || "").trim();
-  const envImapMailbox = (process.env.IMAP_MAILBOX || "INBOX").trim();
-  const envImapSender = (process.env.IMAP_TARGET_SENDER || "service@intl.paypal.com").trim().toLowerCase();
-  const envImapEnabled = process.env.IMAP_ENABLED !== "false";
-  const envCfEmail = (process.env.CF_EMAIL || "").trim();
-  const envCfApiKey = (process.env.CF_GLOBAL_API_KEY || process.env.CF_API_KEY || "").trim();
-  const envCfDestEmail = (process.env.CF_DEST_EMAIL || process.env.CF_DESTINATION_EMAIL || "").trim();
+  const envImapHost = (tenantEnvironment().IMAP_HOST || "imap.gmail.com").trim();
+  const envImapPort = Number(tenantEnvironment().IMAP_PORT) || 993;
+  const envImapSecure = tenantEnvironment().IMAP_SECURE !== "false";
+  const envImapUser = (tenantEnvironment().IMAP_USER || "").trim();
+  const envImapPass = (tenantEnvironment().IMAP_PASS || tenantEnvironment().IMAP_PASSWORD || "").trim();
+  const envImapMailbox = (tenantEnvironment().IMAP_MAILBOX || "INBOX").trim();
+  const envImapSender = (tenantEnvironment().IMAP_TARGET_SENDER || "service@intl.paypal.com").trim().toLowerCase();
+  const envImapEnabled = getTenantId() === PLATFORM_TENANT_ID && tenantEnvironment().IMAP_ENABLED !== "false";
+  const envCfEmail = (tenantEnvironment().CF_EMAIL || "").trim();
+  const envCfApiKey = (tenantEnvironment().CF_GLOBAL_API_KEY || tenantEnvironment().CF_API_KEY || "").trim();
+  const envCfDestEmail = (tenantEnvironment().CF_DEST_EMAIL || tenantEnvironment().CF_DESTINATION_EMAIL || "").trim();
 
-  const envSecChannel = (process.env.SECURITY_ALERT_CHANNEL || process.env.SECURITY_CHANNEL || "").trim();
-  const envSecLink = process.env.SECURITY_ALERT_CHANNEL_LINK?.trim() || (envSecChannel.startsWith("@") ? `https://t.me/${envSecChannel.slice(1)}` : "");
-  const envSecEnabled = process.env.SECURITY_ALERT_CHANNEL_ENABLED !== "false" && envSecChannel.length > 0;
+  const envSecChannel = (tenantEnvironment().SECURITY_ALERT_CHANNEL || tenantEnvironment().SECURITY_CHANNEL || "").trim();
+  const envSecLink = tenantEnvironment().SECURITY_ALERT_CHANNEL_LINK?.trim() || (envSecChannel.startsWith("@") ? `https://t.me/${envSecChannel.slice(1)}` : "");
+  const envSecEnabled = tenantEnvironment().SECURITY_ALERT_CHANNEL_ENABLED !== "false" && envSecChannel.length > 0;
 
   if (!doc) {
-    const envChannel = process.env.FORCE_SUB_CHANNEL?.trim() || "";
-    const envLink = process.env.FORCE_SUB_LINK?.trim() || (envChannel.startsWith("@") ? `https://t.me/${envChannel.slice(1)}` : "");
-    const envName = process.env.FORCE_SUB_NAME?.trim() || "Channel Resmi";
-    const envEnabled = process.env.FORCE_SUB_ENABLED !== "false" && envChannel.length > 0;
+    const envChannel = tenantEnvironment().FORCE_SUB_CHANNEL?.trim() || "";
+    const envLink = tenantEnvironment().FORCE_SUB_LINK?.trim() || (envChannel.startsWith("@") ? `https://t.me/${envChannel.slice(1)}` : "");
+    const envName = tenantEnvironment().FORCE_SUB_NAME?.trim() || "Channel Resmi";
+    const envEnabled = tenantEnvironment().FORCE_SUB_ENABLED !== "false" && envChannel.length > 0;
 
-    doc = await this.create({
+    doc = await this.findOneAndUpdate({}, { $setOnInsert: {
       forceSubEnabled: envEnabled,
       forceSubChannel: envChannel,
       forceSubLink: envLink,
@@ -543,8 +546,8 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
       cfEmail: envCfEmail,
       cfApiKey: envCfApiKey,
       cfDestinationEmail: envCfDestEmail,
-      cfZones: [...DEFAULT_CF_ZONES],
-    });
+      cfZones: (getTenantId() === PLATFORM_TENANT_ID ? [...DEFAULT_CF_ZONES] : []),
+    } }, { upsert: true, returnDocument: "after" });
     console.log("   🆕  BotConfig document created with defaults.");
   } else {
     // Migration: populate missing fields from env or defaults
@@ -674,7 +677,7 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
       doc.cfDestinationEmail = envCfDestEmail; needSave = true;
     }
     if (!doc.cfZones || doc.cfZones.length === 0) {
-      doc.cfZones = [...DEFAULT_CF_ZONES]; needSave = true;
+      doc.cfZones = (getTenantId() === PLATFORM_TENANT_ID ? [...DEFAULT_CF_ZONES] : []); needSave = true;
     }
 
     if (needSave) {
@@ -683,6 +686,8 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
   }
   return doc;
 });
+
+botConfigSchema.plugin(tenantPlugin, { singleton: true });
 
 export const BotConfig = model<IBotConfig, IBotConfigModel>(
   "BotConfig",

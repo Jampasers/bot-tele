@@ -1,3 +1,4 @@
+import { TenantMap } from "../tenant/TenantMap.js";
 import { Context, NextFunction } from "grammy";
 import { User } from "../models/User.js";
 import { AntiFraudService } from "../services/antiFraudService.js";
@@ -13,7 +14,7 @@ interface BannedCacheEntry {
   cachedAt: number;
 }
 
-const bannedCache = new Map<string, BannedCacheEntry>();
+const bannedCache = new TenantMap<string, BannedCacheEntry>();
 const BAN_CACHE_TTL_MS = 60_000; // 1 minute
 
 export function clearUserBanCache(userId: string): void {

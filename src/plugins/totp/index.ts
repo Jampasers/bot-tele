@@ -33,6 +33,7 @@ async function safeEditOrReply(
 // ============================================================================
 
 const totpPlugin: Plugin = {
+  feature: "totp",
   name: "totp-generator",
   version: "1.0.0",
 

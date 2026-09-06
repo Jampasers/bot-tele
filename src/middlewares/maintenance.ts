@@ -1,28 +1,28 @@
 import { Context, MiddlewareFn } from "grammy";
 import { BotConfig } from "../models/BotConfig.js";
 import { isAdmin } from "../core/admin.js";
+import { TenantMap } from "../tenant/TenantMap.js";
 
 // ============================================================================
 //  Maintenance Mode Middleware
 // ============================================================================
 
 // 5-second TTL cache to avoid hitting the DB on every single message
-let cachedIsMaintenance: boolean | null = null;
-let cachedMessage: string = "";
-let cacheExpiresAt = 0;
+const maintenanceCache = new TenantMap<string, { isMaintenance: boolean; message: string; expiresAt: number }>();
 
 async function getMaintenanceStatus(): Promise<{ isMaintenance: boolean; message: string }> {
   const now = Date.now();
-  if (cachedIsMaintenance !== null && now < cacheExpiresAt) {
-    return { isMaintenance: cachedIsMaintenance, message: cachedMessage };
-  }
+  const cached = maintenanceCache.get("status");
+  if (cached && now < cached.expiresAt) return cached;
 
   const config = await BotConfig.getOrCreate();
-  cachedIsMaintenance = config.isMaintenance ?? false;
-  cachedMessage = config.maintenanceMessage || "🔧 <b>Bot Sedang Maintenance</b>\n\nSilakan coba beberapa saat lagi.";
-  cacheExpiresAt = now + 5_000; // 5-second TTL
-
-  return { isMaintenance: cachedIsMaintenance, message: cachedMessage };
+  const status = {
+    isMaintenance: config.isMaintenance ?? false,
+    message: config.maintenanceMessage || "🔧 <b>Bot Sedang Maintenance</b>\n\nSilakan coba beberapa saat lagi.",
+    expiresAt: now + 5_000,
+  };
+  maintenanceCache.set("status", status);
+  return status;
 }
 
 /**
@@ -30,8 +30,7 @@ async function getMaintenanceStatus(): Promise<{ isMaintenance: boolean; message
  * Call this whenever the maintenance flag is toggled via admin panel.
  */
 export function clearMaintenanceCache(): void {
-  cachedIsMaintenance = null;
-  cacheExpiresAt = 0;
+  maintenanceCache.clear();
 }
 
 /**
