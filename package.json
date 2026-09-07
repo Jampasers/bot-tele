@@ -8,7 +8,7 @@
     "dev": "tsx src/index.ts",
     "check:imap": "tsx src/scripts/inspectImap.ts",
     "build": "tsc",
-    "test": "node --test --test-concurrency=1 dist/services/*.test.js dist/tenant/*.test.js dist/payments/*.test.js dist/runtime/*.test.js dist/rental/*.test.js",
+    "test": "node --test --test-concurrency=1 dist/services/*.test.js dist/tenant/*.test.js dist/payments/*.test.js dist/runtime/*.test.js dist/rental/*.test.js dist/plugins/*.test.js",
     "migrate:tenants": "tsx src/scripts/migrateTenantData.ts",
     "rental:admin": "tsx src/scripts/rentalAdmin.ts",
     "start": "node dist/index.js"

@@ -12,6 +12,7 @@ import { ForceSubService } from "../../services/forceSub.js";
 import { ActivityLogService } from "../../services/activityLog.js";
 import { TestimonialService } from "../../services/testimonial.js";
 import { clearMaintenanceCache } from "../../middlewares/maintenance.js";
+import { buildRentalAdminHelpText } from "../adminHelp.js";
 
 type Handler = (ctx: Context) => Promise<void>;
 const price = (amount: number): string => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(amount);
@@ -20,7 +21,8 @@ function homeKeyboard(): InlineKeyboard {
   const keyboard = new InlineKeyboard().text("⚙️ Pengaturan Bot", "radmin_settings").text("💳 Payment", "radmin_payment").row();
   if (hasFeature("digital")) keyboard.text("📦 Produk & Stok", "dga_home").row();
   return keyboard.text("📊 Statistik", "radmin_stats").text("🧩 Fitur", "radmin_features").row()
-    .text("📅 Masa Aktif", "rental_renew").text("🔄 Restart", "radmin_restart");
+    .text("📅 Masa Aktif", "rental_renew").text("🔄 Restart", "radmin_restart").row()
+    .text("📚 Panduan Admin Lengkap", "radmin_help");
 }
 
 /** Every command and callback re-checks the numeric tenant owner/admin identity. */
@@ -149,6 +151,12 @@ const rentalAdminPlugin: Plugin = {
     bot.callbackQuery("radmin_features", authorized(async ctx => {
       const features = getTenantContext().enabledFeatures ?? [];
       await ctx.reply(`🧩 Fitur Paket\n\n${features.length ? features.join("\n") : "Belum ada fitur toko aktif."}\n\nUbah paket melalui /renew.`, { reply_markup: homeKeyboard() });
+    }));
+    bot.callbackQuery("radmin_help", authorized(async ctx => {
+      await ctx.reply(buildRentalAdminHelpText(), {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔙 Pengaturan Bot", "radmin_home"),
+      });
     }));
     const stats = authorized(async ctx => {
       const [digital, users] = await Promise.all([DigitalProductService.getPlatformStats(), User.countDocuments()]);

@@ -34,6 +34,13 @@ import { BotRental } from "../../models/BotRental.js";
 import { RentalPlan } from "../../models/RentalPlan.js";
 import { parseRentalPlanSetup, parseRentalProvisionSetup, provisionRental, saveRentalPlan } from "../../rental/rentalProvisioning.service.js";
 import { startProvisionedRental } from "../../rental/rental.service.js";
+import {
+  ADMIN_HELP_SECTION_IDS,
+  ADMIN_HELP_SECTION_LABELS,
+  AdminHelpSectionId,
+  buildAdminHelpText,
+  isAdminHelpSectionId,
+} from "../adminHelp.js";
 
 // ============================================================================
 //  ADMIN PLUGIN — Interactive Whitelist & Platform Manager
@@ -212,8 +219,20 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .row()
     .text("📢 Broadcast ke User", "adm_broadcast")
     .row()
+    .text("📚 Panduan Lengkap Admin", "adm_help_ringkasan")
+    .row()
     .text("🖴 Backup Database", "adm_backup")
     .text("♻️ Rollback Database", "adm_rollback");
+}
+
+function buildAdminHelpKeyboard(currentSection: AdminHelpSectionId): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const [index, sectionId] of ADMIN_HELP_SECTION_IDS.entries()) {
+    const label = ADMIN_HELP_SECTION_LABELS[sectionId];
+    keyboard.text(sectionId === currentSection ? `• ${label} •` : label, `adm_help_${sectionId}`);
+    if (index % 2 === 1) keyboard.row();
+  }
+  return keyboard.text("🔙 Kembali ke Menu Admin", "adm_home");
 }
 
 // ── Anti-Fraud & Security Guard UI Builders ──────────────────────────────────
@@ -3870,6 +3889,22 @@ const adminPlugin: Plugin = {
         parse_mode:   "HTML",
         reply_markup: await buildHomeKeyboard(),
       });
+    });
+
+    bot.callbackQuery(/^adm_help_([a-z]+)$/, async (ctx) => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx)) return;
+      const sectionId = ctx.match?.[1] ?? "";
+      if (!isAdminHelpSectionId(sectionId)) return;
+      fsubInputState.delete(String(ctx.from?.id));
+      try {
+        await ctx.editMessageText(buildAdminHelpText(sectionId), {
+          parse_mode: "HTML",
+          reply_markup: buildAdminHelpKeyboard(sectionId),
+        });
+      } catch {
+        /* safe ignore unchanged */
+      }
     });
 
     // ── adm_stats & adm_stats_overview — Overview Tab ────────────────────────
