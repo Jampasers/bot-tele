@@ -30,6 +30,10 @@ import { AntiFraudService } from "../../services/antiFraudService.js";
 import { FraudLog } from "../../models/FraudLog.js";
 import { clearUserBanCache } from "../../middlewares/antiFraud.js";
 import { isAdmin } from "../../core/admin.js";
+import { BotRental } from "../../models/BotRental.js";
+import { RentalPlan } from "../../models/RentalPlan.js";
+import { parseRentalPlanSetup, parseRentalProvisionSetup, provisionRental, saveRentalPlan } from "../../rental/rentalProvisioning.service.js";
+import { startProvisionedRental } from "../../rental/rental.service.js";
 
 // ============================================================================
 //  ADMIN PLUGIN — Interactive Whitelist & Platform Manager
@@ -69,6 +73,8 @@ interface FsubAdminState {
     | "SET_CF_DEST"
     | "SET_CF_CUSTOM"
     | "ADD_CF_ZONE"
+    | "RENTAL_CREATE"
+    | "RENTAL_PLAN"
     | "WAIT_ROLLBACK_FILE";
   broadcastFilter?: BroadcastFilter;
 }
@@ -188,6 +194,8 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .text("💰 Pricing & Markup", "adm_pricing")
     .row()
     .text("📦 Kelola Produk Digital & Stok", "dga_home")
+    .row()
+    .text("🤖 Kelola Bot Rental", "adm_rental")
     .row()
     .text("🛡️ Anti-Fraud & Security Monitor", "adm_antifraud")
     .row()
@@ -1428,6 +1436,7 @@ const adminPlugin: Plugin = {
     { command: "banned",            description: "[Admin] Lihat daftar user yang sedang dibanned" },
     { command: "ban",               description: "[Admin] Ban user: /ban <telegramId> [alasan]" },
     { command: "unban",             description: "[Admin] Unban user: /unban <telegramId>" },
+    { command: "rental",            description: "[Admin] Kelola paket dan bot rental" },
   ],
 
   register(bot: Bot<Context>): void {
@@ -1600,6 +1609,67 @@ const adminPlugin: Plugin = {
     bot.command("admin", openAdmin);
     bot.command("smsadmin", openOtpAdmin);
     bot.command("otpadmin", openOtpAdmin);
+
+    const rentalMenu = async (ctx: Context) => {
+      if (!isAdmin(ctx)) { await ctx.reply("⛔ Perintah ini hanya untuk admin."); return; }
+      if (ctx.chat?.type !== "private") { await ctx.reply("Kelola rental hanya melalui chat pribadi bot platform."); return; }
+      fsubInputState.delete(String(ctx.from!.id));
+      const [rentalCount, planCount] = await Promise.all([
+        BotRental.countDocuments({ status: { $ne: "terminated" } }),
+        RentalPlan.countDocuments({ enabled: true }),
+      ]);
+      const runtime = process.env["RENTAL_ENABLED"] === "true" ? "🟢 aktif" : "🔴 nonaktif";
+      await ctx.reply(
+        `🤖 <b>Manajemen Bot Rental</b>\n\nRental tersedia: <b>${rentalCount}</b>\nPaket aktif: <b>${planCount}</b>\nRuntime rental: ${runtime}\n\nToken renter akan dihapus dari chat sebelum divalidasi dan disimpan terenkripsi.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard()
+          .text("➕ Tambah Rental", "adm_rental_add").text("📋 Daftar Rental", "adm_rental_list").row()
+          .text("➕ Tambah Paket", "adm_rental_plan_add").text("🗂 Daftar Paket", "adm_rental_plans").row()
+          .text("🔙 Menu Admin", "adm_home") },
+      );
+    };
+
+    bot.command("rental", rentalMenu);
+    bot.callbackQuery("adm_rental", async ctx => { await ctx.answerCallbackQuery(); await rentalMenu(ctx); });
+
+    bot.callbackQuery("adm_rental_add", async ctx => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
+      if (process.env["RENTAL_ENABLED"] !== "true") {
+        await ctx.reply("Runtime rental belum aktif. Set RENTAL_ENABLED=true dan restart aplikasi sebelum menambah rental.");
+        return;
+      }
+      fsubInputState.set(String(ctx.from.id), { action: "RENTAL_CREATE" });
+      await ctx.reply(
+        "Kirim data rental dalam satu pesan:\n\n<code>OWNER_ID | KODE_PAKET | BOT_TOKEN | ADMIN_ID1,ADMIN_ID2 | pending</code>\n\nAdmin tambahan boleh diisi <code>-</code>. Status awal dapat <code>pending</code> atau <code>active</code>. Pesan yang berisi token akan dihapus sebelum diproses. Ketik /batal untuk membatalkan.",
+        { parse_mode: "HTML" },
+      );
+    });
+
+    bot.callbackQuery("adm_rental_plan_add", async ctx => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
+      fsubInputState.set(String(ctx.from.id), { action: "RENTAL_PLAN" });
+      await ctx.reply(
+        "Kirim paket dalam format:\n\n<code>kode | durasi_hari | harga | nama | digital,affiliate</code>\n\nFitur valid: digital, affiliate, totp. Ketik /batal untuk membatalkan.",
+        { parse_mode: "HTML" },
+      );
+    });
+
+    bot.callbackQuery("adm_rental_plans", async ctx => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
+      const plans = await RentalPlan.find().sort({ createdAt: -1 }).limit(30).lean();
+      const rows = plans.map(plan => `${plan.enabled ? "🟢" : "🔴"} <code>${escapeHtml(plan.code)}</code> — ${escapeHtml(plan.name)} | ${plan.durationDays} hari | ${formatIDR(plan.price)} | ${plan.enabledFeatures.map(escapeHtml).join(", ")}`);
+      await ctx.reply(`🗂 <b>Paket Rental</b>\n\n${rows.join("\n") || "Belum ada paket."}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Rental", "adm_rental") });
+    });
+
+    bot.callbackQuery("adm_rental_list", async ctx => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
+      const rentals = await BotRental.find().sort({ createdAt: -1 }).limit(30).lean();
+      const rows = rentals.map(rental => `• @${escapeHtml(rental.botUsername)} | <code>${rental._id}</code>\n  owner <code>${rental.ownerTelegramId}</code> | ${rental.status} | ${formatDateWIB(rental.expiresAt)}`);
+      await ctx.reply(`📋 <b>Bot Rental Terbaru</b>\n\n${rows.join("\n\n") || "Belum ada rental."}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Rental", "adm_rental") });
+    });
 
     // ── /stats & /statistik — Bot Analytics Dashboard ────────────────────────
     const openStats = async (ctx: Context) => {
@@ -3224,6 +3294,48 @@ const adminPlugin: Plugin = {
           "⚠️ Silakan kirimkan (upload) file arsip <code>.zip</code> backup database, atau ketik /batal untuk membatalkan.",
           { parse_mode: "HTML" }
         );
+        return;
+      }
+
+      if (state.action === "RENTAL_CREATE") {
+        fsubInputState.delete(adminId);
+        try { await ctx.deleteMessage(); }
+        catch {
+          await ctx.reply("Pesan token belum berhasil dihapus. Hapus pesan tersebut, pastikan bot punya akses, lalu ulangi dari /rental.");
+          return;
+        }
+        try {
+          const input = parseRentalProvisionSetup(text);
+          const created = await provisionRental(input);
+          let runtimeMessage = "Bot rental langsung dijalankan.";
+          try { await startProvisionedRental(created.rentalId); }
+          catch {
+            console.warn(`[Rental:${created.rentalId}] Provisioned from platform; runtime start will be retried by scheduler.`);
+            runtimeMessage = "Data tersimpan, tetapi start runtime belum berhasil. Scheduler akan mencoba lagi.";
+          }
+          await ctx.reply(
+            `✅ <b>Rental berhasil dibuat</b>\n\nBot: @${escapeHtml(created.botUsername)}\nRental ID: <code>${created.rentalId}</code>\nTenant ID: <code>${created.tenantId}</code>\nStatus: <b>${created.status}</b>\n\n${runtimeMessage}`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Manajemen Rental", "adm_rental") },
+          );
+        } catch {
+          console.warn("[Platform] Rental provisioning from admin bot failed.");
+          await ctx.reply("❌ Rental belum dibuat. Periksa owner ID, paket, token BotFather, admin ID, dan kunci enkripsi lalu coba lagi melalui /rental.");
+        }
+        return;
+      }
+
+      if (state.action === "RENTAL_PLAN") {
+        fsubInputState.delete(adminId);
+        try {
+          const plan = parseRentalPlanSetup(text);
+          await saveRentalPlan(plan);
+          await ctx.reply(
+            `✅ <b>Paket rental tersimpan</b>\n\nKode: <code>${escapeHtml(plan.code)}</code>\nNama: ${escapeHtml(plan.name)}\nDurasi: ${plan.durationDays} hari\nHarga: ${formatIDR(plan.price)}\nFitur: ${plan.enabledFeatures.map(escapeHtml).join(", ")}`,
+            { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Manajemen Rental", "adm_rental") },
+          );
+        } catch {
+          await ctx.reply("❌ Paket belum disimpan. Gunakan format: kode | hari | harga | nama | digital,affiliate");
+        }
         return;
       }
 

@@ -105,10 +105,18 @@ export async function applyRenewal(rentalId: string, paymentId: string, duration
   return state;
 }
 
-export interface RentalRuntimeControls { restartRentalBot(rentalId: string): Promise<unknown> }
+export interface RentalRuntimeControls {
+  restartRentalBot(rentalId: string): Promise<unknown>;
+  startRentalBot(rentalId: string): Promise<unknown>;
+}
 let runtimeControls: RentalRuntimeControls | undefined;
 export function setRentalRuntimeControls(controls: RentalRuntimeControls): void { runtimeControls = controls; }
 export async function restartCurrentRental(rentalId: string): Promise<void> {
   if (!runtimeControls) throw new Error("Runtime belum siap.");
   await runtimeControls.restartRentalBot(rentalId);
+}
+
+export async function startProvisionedRental(rentalId: string): Promise<void> {
+  if (!runtimeControls) throw new Error("Runtime rental belum aktif.");
+  await runtimeControls.startRentalBot(rentalId);
 }

@@ -4,6 +4,17 @@ Satu proses Node menjalankan bot platform dan banyak bot rental. Setiap rental m
 
 ## Menyiapkan paket dan rental
 
+Cara utama adalah melalui bot platform. Pastikan `RENTAL_ENABLED=true` dan `CREDENTIAL_ENCRYPTION_KEY` sudah diisi, restart aplikasi, lalu buka `/admin` → **Kelola Bot Rental** atau langsung `/rental` melalui chat pribadi admin platform.
+
+1. Pilih **Tambah Paket**, lalu kirim `kode | durasi_hari | harga | nama | fitur`.
+2. Pilih **Tambah Rental**, lalu kirim `OWNER_ID | KODE_PAKET | BOT_TOKEN | ADMIN_ID1,ADMIN_ID2 | pending`.
+3. Admin tambahan boleh diisi `-`. Gunakan status `pending` agar owner mengaktifkan lewat `/renew`, atau `active` untuk memberi masa aktif awal sesuai paket.
+4. Pesan token harus berhasil dihapus oleh bot sebelum diproses. Token diverifikasi ke Telegram, disimpan terenkripsi, lalu instance rental langsung dijalankan. Jika start pertama gagal, scheduler mencoba lagi.
+
+Menu yang sama menampilkan maksimal 30 paket dan rental terbaru. Provisioning hanya tersedia pada bot platform dan hanya melalui chat pribadi admin numerik dari `ADMIN_ID`.
+
+CLI berikut tetap tersedia sebagai jalur pemulihan operator jika main bot tidak dapat digunakan.
+
 Build terlebih dahulu dengan `npm.cmd run build`. CLI memuat environment server dari `.env`; token renter hanya dibaca dari `RENTAL_BOT_TOKEN`, bukan argumen command line. `BOT_TOKEN` platform diperlukan agar bot platform tidak dapat didaftarkan sebagai rental. Jangan memasukkan token ke source, log, tiket, atau riwayat command yang dibagikan.
 
 CLI bersifat dry-run sampai ditambah `--apply`. `--apply` membuat/memperbarui data dan memastikan index unik pada model yang bersangkutan. Jalankan migrasi tenant sesuai panduan deployment sebelum memakai database existing.

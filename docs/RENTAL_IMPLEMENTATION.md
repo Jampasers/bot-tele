@@ -51,7 +51,7 @@ ZIP backup/rollback existing tetap berfungsi untuk data tenant platform dan meno
 | --- | --- |
 | `RENTAL_ENABLED` | `true` menyalakan bot rental dan scheduler; default `false` hanya platform. Migrasi tetap diperlukan untuk versi source ini. |
 | `CREDENTIAL_ENCRYPTION_KEY` | 32 byte acak sebagai 64 karakter hex atau base64; wajib untuk token dan credential rental. |
-| `RENTAL_BOT_TOKEN` | Input privat sementara untuk CLI provisioning; tidak diterima sebagai argumen command line. |
+| `RENTAL_BOT_TOKEN` | Input privat sementara untuk CLI provisioning darurat; setup normal dilakukan melalui menu `/rental` pada main bot. |
 | `RENTAL_WEBHOOK_PORT` | Default `0`: tidak membuka HTTP listener. Nilai lain membuka listener loopback untuk relay opsional. |
 | `RENTAL_WEBHOOK_SECRET` | Secret relay HMAC minimal 32 karakter jika HTTP diaktifkan. |
 
@@ -68,7 +68,7 @@ npm.cmd run dev
 npm.cmd run rental:admin -- help
 ```
 
-Paket dan rental dibuat melalui [panduan operasi](RENTAL_OPERATIONS.md). Tidak ada harga yang di-hardcode pada handler `/renew`. Rental `pending`, `active`, `expired_grace`, dan `suspended` tetap dijalankan. Rental `terminated` dihentikan. Grace berakhir tepat 24 jam setelah expiry; scheduler menyinkronkan database dan reminder setiap sekitar 60 detik, sementara middleware memeriksa waktu expiry dari cache pada setiap update.
+Paket dan rental dibuat dari main bot melalui `/rental`; CLI tetap tersedia sebagai jalur pemulihan. Detail input ada di [panduan operasi](RENTAL_OPERATIONS.md). Tidak ada harga yang di-hardcode pada handler `/renew`. Rental `pending`, `active`, `expired_grace`, dan `suspended` tetap dijalankan. Rental `terminated` dihentikan. Grace berakhir tepat 24 jam setelah expiry; scheduler menyinkronkan database dan reminder setiap sekitar 60 detik, sementara middleware memeriksa waktu expiry dari cache pada setiap update.
 
 Shutdown menghentikan penerimaan pekerjaan baru, menunggu startup yang masih berjalan, menghentikan scheduler/relay/backup, semua runner, polling finansial, WhatsApp, IMAP, browser receipt, lalu koneksi MongoDB. Polling tenant dilacak dan didrain, termasuk follow-up yang dibuat saat poll sebelumnya menyelesaikan pekerjaan. Kegagalan satu bot ditangani per instance; scheduler mencoba menyalakannya kembali pada tick berikutnya. Log rental menambahkan identitas tenant dan tidak menyerialisasi object error HTTP/payload dari plugin lama.
 
@@ -84,7 +84,7 @@ Listener hanya bind `127.0.0.1`. Jika memakai relay eksternal, operator menyedia
 
 ## Validasi dan batas yang masih berlaku
 
-Hasil validasi lokal pada 7 September 2026: build TypeScript berhasil, seluruh **49 tests lulus dengan 0 gagal dan 0 skip**, serta `git diff --check` berhasil. Integration tests dijalankan dengan MongoDB 7.0.14 sementara pada loopback; tidak memakai database aplikasi. Tidak ada dependency produksi baru atau perubahan lockfile.
+Hasil validasi lokal pada 7 September 2026 setelah setup rental dipindahkan ke main bot: build TypeScript berhasil, seluruh **52 tests lulus dengan 0 gagal dan 0 skip**, serta `git diff --check` berhasil. Integration tests dijalankan dengan MongoDB 7.0.14 sementara pada loopback; tidak memakai database aplikasi. Tidak ada dependency produksi baru atau perubahan lockfile.
 
 `npm.cmd run build` memeriksa seluruh source TypeScript. `npm.cmd test` menjalankan tests dari hasil build. Integration tests hanya menerima URI MongoDB loopback melalui `TEST_MONGODB_URI` dan `PAYMENT_TEST_MONGODB_URI`, membuat database acak khusus test, kemudian menghapus database itu saja. Tanpa variable test tersebut, integration tests ditandai skip. Jangan isi variable test dengan database aplikasi.
 

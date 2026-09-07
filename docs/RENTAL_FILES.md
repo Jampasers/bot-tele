@@ -25,6 +25,8 @@ Daftar berdasarkan working tree implementasi, sebelum commit.
 - `src/rental/rental.service.ts`
 - `src/rental/rentalNotification.service.ts`
 - `src/rental/rentalPayment.service.ts`
+- `src/rental/rentalProvisioning.service.ts`
+- `src/rental/rentalProvisioning.test.ts`
 - `src/rental/rentalWebhook.test.ts`
 - `src/rental/rentalWebhook.ts`
 - `src/runtime/BotInstance.ts`

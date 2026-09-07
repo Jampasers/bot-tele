@@ -5,20 +5,12 @@ import mongoose, { Types } from "mongoose";
 import { Bot } from "grammy";
 import { BotRental } from "../models/BotRental.js";
 import { RentalPlan } from "../models/RentalPlan.js";
-import { encryptSecret, validateEncryptionKey } from "../services/crypto.js";
-import { DAY_MS } from "../rental/rental.service.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import { saveTenantPaymentConfig } from "../payments/tenantPayment.service.js";
+import { parseRentalFeatures, provisionRental, saveRentalPlan, validateProvisionIdentity } from "../rental/rentalProvisioning.service.js";
+import { validateEncryptionKey } from "../services/crypto.js";
 
-const PUBLIC_FEATURES = new Set(["digital", "affiliate", "totp"]);
-
-export function parseRentalFeatures(value: string): string[] {
-  const features = [...new Set(value.split(",").map(item => item.trim()).filter(Boolean))];
-  if (features.length === 0 || features.some(feature => !PUBLIC_FEATURES.has(feature))) {
-    throw new Error("Fitur valid: digital,affiliate,totp. Fitur internal tidak tersedia untuk rental.");
-  }
-  return features;
-}
+export { parseRentalFeatures, validateProvisionIdentity } from "../rental/rentalProvisioning.service.js";
 
 function argumentList(args: string[]): { positional: string[]; options: Map<string, string | boolean> } {
   const positional: string[] = [];
@@ -34,13 +26,6 @@ function argumentList(args: string[]): { positional: string[]; options: Map<stri
     else positional.push(item);
   }
   return { positional, options };
-}
-
-export function validateProvisionIdentity(ownerId: string, token: string, platformToken: string): void {
-  if (!/^[1-9]\d{0,18}$/.test(ownerId)) throw new Error("Owner harus berupa Telegram user ID numerik.");
-  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) throw new Error("Set RENTAL_BOT_TOKEN dari BotFather melalui environment.");
-  if (!/^\d+:/.test(platformToken)) throw new Error("BOT_TOKEN platform wajib tersedia untuk memeriksa konflik identitas bot.");
-  if (token.split(":")[0] === platformToken.split(":")[0]) throw new Error("Token bot platform tidak dapat digunakan sebagai rental.");
 }
 
 async function main(args = process.argv.slice(2)): Promise<void> {
@@ -65,10 +50,7 @@ async function main(args = process.argv.slice(2)): Promise<void> {
       const existing = await RentalPlan.findOne({ code }).lean();
       const featureOption = options.get("--features");
       const enabledFeatures = featureOption === undefined ? existing?.enabledFeatures ?? ["digital", "affiliate"] : parseRentalFeatures(String(featureOption));
-      if (apply) {
-        await RentalPlan.createIndexes();
-        await RentalPlan.findOneAndUpdate({ code }, { $set: { name, durationDays, price, enabledFeatures, enabled: !options.has("--disabled") } }, { upsert: true, returnDocument: "after", runValidators: true });
-      }
+      if (apply) await saveRentalPlan({ code, name, durationDays, price, enabledFeatures, enabled: !options.has("--disabled") });
       console.log(`${apply ? "SAVED" : "DRY RUN"}: plan ${code}, ${durationDays} hari, Rp${price}, fitur=${enabledFeatures.join(",")}, enabled=${!options.has("--disabled")}`);
       return;
     }
@@ -82,30 +64,24 @@ async function main(args = process.argv.slice(2)): Promise<void> {
       if (!ownerId || !planCode || values.length !== 2) throw new Error("Gunakan create <ownerTelegramId> <planCode>.");
       const token = process.env["RENTAL_BOT_TOKEN"]?.trim() ?? "";
       validateProvisionIdentity(ownerId, token, process.env["BOT_TOKEN"] ?? "");
-      validateEncryptionKey();
       const admins = String(options.get("--admins") ?? "").split(",").map(value => value.trim()).filter(Boolean);
-      if (admins.length > 20 || admins.some(id => !/^[1-9]\d{0,18}$/.test(id))) throw new Error("Admin IDs harus numerik, maksimal 20 admin.");
       const plan = await RentalPlan.findOne({ code: planCode, enabled: true }).lean();
       if (!plan) throw new Error("Paket aktif tidak ditemukan. Simpan paket dengan perintah plan terlebih dahulu.");
-      let me;
-      try { me = await new Bot(token).api.getMe(); }
-      catch { throw new Error("Token rental belum berhasil diverifikasi ke Telegram."); }
-      if (String(me.id) === process.env["BOT_TOKEN"]?.split(":")[0]) throw new Error("Bot platform tidak dapat dijadikan rental.");
-      if (await BotRental.exists({ botId: String(me.id) })) throw new Error("Bot sudah terdaftar sebagai rental.");
-      const id = new Types.ObjectId();
-      const tenantId = id.toString();
       const active = options.has("--active");
-      const now = new Date();
-      if (apply) {
-        await BotRental.createIndexes();
-        await BotRental.create({
-          _id: id, tenantId, ownerTelegramId: ownerId, adminTelegramIds: [...new Set(admins)],
-          botTokenEncrypted: encryptSecret(token, `${tenantId}:botToken`), botId: String(me.id), botUsername: me.username,
-          plan: String(plan._id), enabledFeatures: plan.enabledFeatures, status: active ? "active" : "pending",
-          startedAt: active ? now : null, expiresAt: active ? new Date(now.getTime() + plan.durationDays * DAY_MS) : now, graceEndsAt: null,
-        });
+      if (!apply) {
+        validateProvisionIdentity(ownerId, token, process.env["BOT_TOKEN"] ?? "");
+        validateEncryptionKey();
+        if (admins.length > 20 || admins.some(id => !/^[1-9]\d{0,18}$/.test(id))) throw new Error("Admin IDs harus numerik, maksimal 20 admin.");
+        let me;
+        try { me = await new Bot(token).api.getMe(); }
+        catch { throw new Error("Token rental belum berhasil diverifikasi ke Telegram."); }
+        if (String(me.id) === process.env["BOT_TOKEN"]?.split(":")[0]) throw new Error("Bot platform tidak dapat dijadikan rental.");
+        if (await BotRental.exists({ botId: String(me.id) })) throw new Error("Bot sudah terdaftar sebagai rental.");
+        console.log(`DRY RUN: @${me.username}, owner=${ownerId}, plan=${planCode}, status=${active ? "active" : "pending"}`);
+        return;
       }
-      console.log(`${apply ? "CREATED" : "DRY RUN"}: @${me.username}, status=${active ? "active" : "pending"}${apply ? `, rentalId=${id}, tenantId=${tenantId}` : ""}`);
+      const created = await provisionRental({ ownerTelegramId: ownerId, planCode, botToken: token, adminTelegramIds: admins, active });
+      console.log(`CREATED: @${created.botUsername}, status=${created.status}, rentalId=${created.rentalId}, tenantId=${created.tenantId}`);
       if (apply) console.log("Scheduler platform akan menyalakan bot. Owner membuka /start lalu /renew di bot rental untuk aktivasi/perpanjangan.");
       return;
     }
