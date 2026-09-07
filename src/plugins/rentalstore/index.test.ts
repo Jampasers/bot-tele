@@ -165,7 +165,7 @@ test("private /sewa lists plans while group /sewa is rejected before shop access
   });
   await privateHarness.bot.handleUpdate(messageUpdate(1, "/sewa"));
   assert.equal(shopReads, 1);
-  assert.match(replyText(privateHarness.apiCalls), /Sewa Bot Otomatis/);
+  assert.match(replyText(privateHarness.apiCalls), /Sewa Bot/);
   assert.match(replyText(privateHarness.apiCalls), /Pilih paket/);
 
   let groupShopReads = 0;
@@ -175,6 +175,27 @@ test("private /sewa lists plans while group /sewa is rejected before shop access
   await groupHarness.bot.handleUpdate(messageUpdate(2, "/sewa", "group"));
   assert.equal(groupShopReads, 0);
   assert.match(replyText(groupHarness.apiCalls), /chat pribadi/);
+});
+
+test("rental menu reports missing platform payment configuration without exposing error details", async () => {
+  const paymentHarness = await createHarness({
+    assertReady: () => {
+      throw new Error("Payment platform belum dikonfigurasi (merchant dan login GoBiz wajib tersedia). secret-value");
+    },
+  });
+  await paymentHarness.bot.handleUpdate(messageUpdate(3, "/sewa"));
+  const paymentReply = replyText(paymentHarness.apiCalls);
+  assert.match(paymentReply, /GOPAY_MERCHANT_ID/);
+  assert.match(paymentReply, /GOJEK_EMAIL\/GOJEK_PASSWORD/);
+  assert.doesNotMatch(paymentReply, /secret-value/);
+
+  const runtimeHarness = await createHarness({
+    assertReady: () => { throw new Error("database failure with secret-value"); },
+  });
+  await runtimeHarness.bot.handleUpdate(messageUpdate(4, "/sewa"));
+  const runtimeReply = replyText(runtimeHarness.apiCalls);
+  assert.match(runtimeReply, /layanan sedang bermasalah/);
+  assert.doesNotMatch(runtimeReply, /secret-value/);
 });
 
 test("token is never provisioned when Telegram cannot delete its message", async () => {

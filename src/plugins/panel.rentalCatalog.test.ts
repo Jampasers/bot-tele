@@ -27,14 +27,14 @@ test("rental entry is exposed once in the enabled platform catalog and hidden el
     const mainKeyboard = rendered(buildMainMenuReplyKeyboard());
 
     assert.equal((catalogKeyboard.match(/"callback_data":"rs_home"/g) ?? []).length, 1);
-    assert.match(catalogText, /sewa bot otomatis/i);
+    assert.match(catalogText, /<b>Sewa Bot<\/b>/i);
     assert.doesNotMatch(mainKeyboard, /Sewa Bot/i);
   });
 
   process.env["RENTAL_ENABLED"] = "false";
   await runWithTenant(platformContext(), async () => {
     assert.doesNotMatch(rendered(await buildCatalogKeyboard()), /"callback_data":"rs_home"/);
-    assert.doesNotMatch(await buildCatalogText(), /sewa bot otomatis/i);
+    assert.doesNotMatch(await buildCatalogText(), /<b>Sewa Bot<\/b>/i);
     assert.doesNotMatch(rendered(buildMainMenuReplyKeyboard()), /Sewa Bot/i);
   });
 
@@ -46,7 +46,7 @@ test("rental entry is exposed once in the enabled platform catalog and hidden el
     enabledFeatures: ["digital", "affiliate"],
   }, async () => {
     assert.doesNotMatch(rendered(await buildCatalogKeyboard()), /"callback_data":"rs_home"/);
-    assert.doesNotMatch(await buildCatalogText(), /sewa bot otomatis/i);
+    assert.doesNotMatch(await buildCatalogText(), /<b>Sewa Bot<\/b>/i);
     assert.doesNotMatch(rendered(buildMainMenuReplyKeyboard()), /Sewa Bot/i);
   });
 });

@@ -26,6 +26,10 @@ const TOKEN_INPUT_TTL_MS = 10 * 60_000;
 const TOKEN_ATTEMPT_WINDOW_MS = 60 * 60_000;
 const MAX_TOKEN_ATTEMPTS = 5;
 const PAYMENT_CHECK_COOLDOWN_MS = 10_000;
+const PAYMENT_SETUP_MESSAGE =
+  "⚠️ Pembayaran rental platform belum lengkap. Admin harus mengisi GOPAY_MERCHANT_ID dan GOJEK_EMAIL/GOJEK_PASSWORD (atau GOBIZ_EMAIL/GOBIZ_PASSWORD) pada .env main bot, lalu restart.";
+const ENCRYPTION_SETUP_MESSAGE =
+  "⚠️ Kunci enkripsi rental belum valid. Admin harus memperbaiki CREDENTIAL_ENCRYPTION_KEY pada .env main bot, lalu restart.";
 
 interface AttemptWindow {
   attempts: number;
@@ -105,6 +109,20 @@ function rentalLine(rental: OwnedRentalSummary): string {
 
 function planButton(plan: SelfServiceRentalPlan): string {
   return `${plan.name} · ${formatPrice(plan.price)}`.slice(0, 64);
+}
+
+function rentalSetupMessage(error: unknown): string | null {
+  const message = error instanceof Error ? error.message : "";
+  if (message === "Rental belum diaktifkan.") {
+    return "⚠️ Rental belum diaktifkan oleh admin platform.";
+  }
+  if (message.startsWith("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes")) {
+    return ENCRYPTION_SETUP_MESSAGE;
+  }
+  if (message.startsWith("Payment platform belum dikonfigurasi")) {
+    return PAYMENT_SETUP_MESSAGE;
+  }
+  return null;
 }
 
 export function createRentalStorePlugin(
@@ -202,10 +220,12 @@ export function createRentalStorePlugin(
           (plans.length ? "Pilih paket:" : "Belum ada paket rental aktif."),
         { reply_markup: keyboard },
       );
-    } catch {
-      console.warn("[Platform] Self-service rental menu unavailable.");
+    } catch (error) {
+      const setupMessage = rentalSetupMessage(error);
+      console.warn(`[Platform] Self-service rental menu unavailable (${setupMessage ? "configuration" : "runtime"}).`);
       await ctx.reply(
-        "⚠️ Sewa bot otomatis belum tersedia. Pastikan layanan rental dan pembayaran platform sudah dikonfigurasi.",
+        setupMessage
+          ?? "⚠️ Sewa bot otomatis belum tersedia karena layanan sedang bermasalah. Coba kembali atau hubungi admin platform.",
       );
     }
   }
