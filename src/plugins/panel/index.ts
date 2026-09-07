@@ -77,7 +77,7 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
 
   if (hasFeature("digital"))
     kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
-  if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot Otomatis", "rs_home");
+  if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot", "rs_home");
   if (hasFeature("affiliate")) kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
 }
