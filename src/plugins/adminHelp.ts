@@ -140,7 +140,7 @@ export function buildRentalAdminHelpText(): string {
     "<i>Gunakan melalui chat pribadi bot rental.</i>\n\n" +
     "<code>/admin</code> / <code>/settings</code> — panel pengaturan toko\n" +
     "<code>/payment</code> — lihat konfigurasi pembayaran\n" +
-    "<code>/setpayment &lt;JSON&gt;</code> — ganti konfigurasi payment\n" +
+    "<code>/setpayment</code> — panduan payment bertahap memakai foto QRIS\n" +
     "<code>/setshop &lt;field&gt; &lt;nilai&gt;</code> — ubah channel/pesan toko\n" +
     "<code>/setaffiliate &lt;fixed|percentage&gt; &lt;nilai&gt;</code> — komisi afiliasi\n" +
     "<code>/stats</code> — statistik toko\n" +

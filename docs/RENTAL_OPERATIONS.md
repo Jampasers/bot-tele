@@ -67,15 +67,16 @@ Owner/admin menggunakan chat pribadi dengan bot rental:
 - `/status`: status dan waktu berakhir layanan dalam WIB.
 - `/renew`: pilihan paket dan invoice QRIS platform.
 - `/restart`: restart instance bot tersebut. Respons dikirim sebelum runner dihentikan.
-- `/payment`: ringkasan konfigurasi payment toko dan contoh input.
+- `/payment`: ringkasan konfigurasi payment toko.
 
-Renter menyimpan konfigurasi payment melalui `/setpayment` di chat pribadi. Contoh berikut berisi placeholder:
+Renter menyimpan konfigurasi payment melalui `/setpayment` di chat pribadi. Bot memandu empat langkah berikut satu per satu:
 
-```text
-/setpayment {"qris":{"enabled":true,"payload":"PAYLOAD_QRIS_TOKO"},"gopayMerchant":{"enabled":true,"merchantId":"ID_MERCHANT_TOKO","email":"EMAIL_TOKO","password":"PASSWORD_TOKO"}}
-```
+1. Kirim foto atau file PNG/JPEG QRIS statis toko. Bot membaca payload QRIS dari gambar secara internal.
+2. Kirim Merchant ID GoPay/GoBiz.
+3. Kirim email akun GoBiz.
+4. Kirim password akun GoBiz.
 
-Input mengganti seluruh konfigurasi payment toko. Bot menghapus pesan credential sebelum menyimpannya; jika pesan tidak dapat dihapus, penyimpanan dibatalkan. Jangan mengirim credential melalui grup. Field opsional merchant: `clientId`, `clientSecret`, `storeId`, dan `accessToken`; konfigurasi tanpa email/password dapat memakai `accessToken`. Sistem menolak perubahan ketika invoice/reservasi toko masih aktif, agar invoice yang sudah dikirim tetap memakai merchant asal.
+Input mengganti seluruh konfigurasi payment toko. Bot menghapus gambar dan setiap pesan data payment sebelum memprosesnya; jika pesan tidak dapat dihapus, penyimpanan dibatalkan. Ketik `/batal` untuk membatalkan wizard. Jangan mengirim credential melalui grup. Sistem menolak perubahan ketika invoice/reservasi toko masih aktif, agar invoice yang sudah dikirim tetap memakai merchant asal.
 
 Untuk JSON besar, operator dapat menyimpan konfigurasi dari file lokal privat melalui CLI:
 
