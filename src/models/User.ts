@@ -29,6 +29,9 @@ export interface IUser {
   /** Lifetime count of completed orders placed by this user. */
   totalOrders: number;
 
+  /** Idempotency keys for initial rental purchases paid from platform balance. */
+  appliedRentalBalancePaymentIds: string[];
+
   /**
    * Telegram ID of the user who referred this user.
    * Null/undefined if user registered without a referral link.
@@ -111,6 +114,11 @@ const userSchema = new Schema<IUser>(
       type: Number,
       default: 0,
       min: [0, "totalOrders cannot be negative"],
+    },
+    appliedRentalBalancePaymentIds: {
+      type: [String],
+      default: [],
+      select: false,
     },
     referredBy: {
       type: String,

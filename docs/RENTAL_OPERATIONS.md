@@ -13,9 +13,9 @@ Pengguna biasa dapat menyewa tanpa bantuan admin melalui **Catalog → 🤖 Sewa
 1. Pengguna memilih salah satu paket yang masih aktif.
 2. Bot meminta token baru dari BotFather yang khusus dipakai untuk rental tersebut. Token bot platform atau token bot yang sudah terdaftar tidak dapat digunakan.
 3. Pengguna mengirim token di chat pribadi. Pesan token harus berhasil dihapus oleh bot sebelum token dibaca, diverifikasi ke Telegram, dan disimpan terenkripsi. Jika penghapusan gagal, proses dibatalkan dan token tidak diproses.
-4. Bot membuat rental berstatus `pending` dan menerbitkan invoice QRIS melalui payment platform. Bot rental tetap offline selama invoice belum lunas.
-5. Scheduler memeriksa settlement otomatis. Pengguna juga dapat menekan **Cek Pembayaran** pada invoice.
-6. Setelah settlement terkonfirmasi, masa aktif diterapkan satu kali, status menjadi `active`, lalu instance bot rental dimulai otomatis.
+4. Bot membuat rental berstatus `pending`, lalu memotong harga paket dari saldo user pada main bot.
+5. Jika saldo cukup, masa aktif diterapkan satu kali, status menjadi `active`, lalu instance bot rental dimulai otomatis.
+6. Jika saldo kurang, bot menawarkan invoice QRIS platform bila payment platform sudah dikonfigurasi. Jika belum, user cukup top up saldo main bot dan membuka `/sewa` kembali.
 
 Satu Telegram owner hanya dapat membuat satu rental yang belum `terminated` melalui alur otomatis. Jika memerlukan lebih dari satu bot, admin platform dapat membuatnya melalui panel `/rental`; `/sewa` akan memprioritaskan rental `pending` satu per satu, sedangkan bot yang sudah aktif dapat diperpanjang melalui `/renew` pada bot masing-masing. Token harus berasal dari bot BotFather baru yang tidak dipakai oleh proses lain; jangan kirim token melalui grup, tiket, atau log.
 
@@ -122,7 +122,7 @@ Telegram tidak menyediakan idempotency key untuk `sendMessage`. Marker diklaim s
 
 ## Renewal dan pemisahan pembayaran
 
-Transaksi customer memakai QRIS/GoPay tenant. Invoice `/renew` selalu dibuat lewat payment platform dan dicatat di `RentalPayment`, terpisah dari `TopupSession` toko. Nominal, durasi, rental, dan provider reference berasal dari invoice tersimpan.
+Transaksi customer memakai QRIS/GoPay tenant. Aktivasi awal melalui `/sewa` memakai saldo main bot lebih dulu. Invoice QRIS platform menjadi cadangan ketika saldo kurang, sedangkan invoice `/renew` pada bot rental tetap dibuat lewat payment platform dan dicatat di `RentalPayment`, terpisah dari `TopupSession` toko. Nominal, durasi, rental, dan provider reference berasal dari invoice tersimpan.
 
 Pembayaran diperiksa otomatis oleh scheduler dan dapat diperiksa lewat tombol Cek Pembayaran. Status `processing` berarti penyelesaian invoice sedang dipulihkan/diproses. Setelah berhasil, rental diaktifkan dan cache diperbarui. Untuk sewa awal dari bot platform, instance rental yang sebelumnya offline juga dimulai otomatis.
 
@@ -151,6 +151,6 @@ Smoke test live harus memakai database uji terisolasi, dua bot BotFather uji, me
 8. Putuskan/revoke token A pada lingkungan uji. B dan platform harus tetap melayani update. Pulihkan token dengan prosedur operator, lalu restart instance A.
 9. Hentikan Node secara normal. Scheduler selesai, seluruh runner berhenti, lalu koneksi database ditutup; tidak ada instance polling tersisa.
 
-Untuk alur sewa otomatis, lakukan smoke test tambahan memakai owner dan bot BotFather uji: buka `/sewa`, pilih paket, kirim token di chat pribadi, pastikan pesan token terhapus, dan pastikan bot rental belum merespons sebelum pembayaran. Selesaikan invoice uji, lalu pastikan scheduler atau tombol **Cek Pembayaran** mengaktifkan serta memulai bot tepat satu kali. Ulangi `/sewa` dengan owner yang sama dan pastikan rental kedua ditolak.
+Untuk alur sewa otomatis, lakukan smoke test tambahan memakai owner dengan saldo cukup dan bot BotFather uji: buka `/sewa`, pilih paket, kirim token di chat pribadi, pastikan pesan token terhapus, saldo berkurang satu kali, lalu bot aktif otomatis. Ulangi proses pemulihan `/sewa` dan pastikan saldo maupun masa aktif tidak diterapkan dua kali. Untuk cadangan QRIS, gunakan owner dengan saldo kurang, selesaikan invoice uji, lalu pastikan scheduler atau tombol **Cek Pembayaran** mengaktifkan bot tepat satu kali. Ulangi `/sewa` dengan owner yang sama dan pastikan rental kedua ditolak.
 
 Tes lokal tidak membuktikan token, izin channel, QRIS, credential merchant, konektivitas Telegram, atau settlement nyata bekerja. Validasi tersebut membutuhkan smoke test terkontrol di lingkungan operator.

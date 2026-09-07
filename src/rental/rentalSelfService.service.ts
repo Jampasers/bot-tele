@@ -2,7 +2,6 @@ import { Bot } from "grammy";
 import { Types } from "mongoose";
 import { BotRental, type RentalStatus } from "../models/BotRental.js";
 import { RentalPlan } from "../models/RentalPlan.js";
-import { getPlatformPaymentClients } from "../payments/platformPayment.service.js";
 import { validateEncryptionKey } from "../services/crypto.js";
 import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { provisionRental } from "./rentalProvisioning.service.js";
@@ -53,7 +52,6 @@ export function assertSelfServiceRentalReady(): void {
   assertPlatform();
   if (process.env["RENTAL_ENABLED"] !== "true") throw new Error("Rental belum diaktifkan.");
   validateEncryptionKey();
-  getPlatformPaymentClients();
 }
 
 export async function listSelfServiceRentalPlans(): Promise<SelfServiceRentalPlan[]> {

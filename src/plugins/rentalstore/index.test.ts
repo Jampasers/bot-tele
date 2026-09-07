@@ -57,6 +57,12 @@ function defaultDependencies(
       planId: input.planId,
       status: "pending",
     }),
+    payBalance: async rentalId => ({
+      status: "insufficient",
+      rentalId,
+      currentBalance: 0,
+      requiredAmount: PLAN.price,
+    }),
     createInvoice: async (_rentalId, _actorTelegramId, planId) => ({
       payment: {
         planId,
@@ -177,16 +183,19 @@ test("private /sewa lists plans while group /sewa is rejected before shop access
   assert.match(replyText(groupHarness.apiCalls), /chat pribadi/);
 });
 
-test("rental menu reports missing platform payment configuration without exposing error details", async () => {
+test("rental menu does not require QRIS payment configuration", async () => {
+  let paymentCalls = 0;
   const paymentHarness = await createHarness({
-    assertReady: () => {
-      throw new Error("Payment platform belum dikonfigurasi (merchant dan login GoBiz wajib tersedia). secret-value");
+    createInvoice: async () => {
+      paymentCalls++;
+      throw new Error("Payment platform belum dikonfigurasi. secret-value");
     },
   });
   await paymentHarness.bot.handleUpdate(messageUpdate(3, "/sewa"));
   const paymentReply = replyText(paymentHarness.apiCalls);
-  assert.match(paymentReply, /GOPAY_MERCHANT_ID/);
-  assert.match(paymentReply, /GOJEK_EMAIL\/GOJEK_PASSWORD/);
+  assert.equal(paymentCalls, 0);
+  assert.match(paymentReply, /Biaya dipotong otomatis dari saldo main bot/);
+  assert.match(paymentReply, /Pilih paket/);
   assert.doesNotMatch(paymentReply, /secret-value/);
 
   const runtimeHarness = await createHarness({
@@ -240,6 +249,15 @@ test("successful token flow uses ctx.from owner, creates one invoice, and never 
         status: "pending",
       };
     },
+    payBalance: async rentalId => {
+      events.push("balance");
+      return {
+        status: "insufficient",
+        rentalId,
+        currentBalance: 10_000,
+        requiredAmount: PLAN.price,
+      };
+    },
     createInvoice: async (rentalId, actorTelegramId, planId) => {
       events.push("invoice");
       invoiceInputs.push([rentalId, actorTelegramId, planId]);
@@ -265,10 +283,64 @@ test("successful token flow uses ctx.from owner, creates one invoice, and never 
 
   assert.deepEqual(provisionInputs, [{ ownerTelegramId: String(OWNER_ID), planId: PLAN_ID, botToken: TOKEN }]);
   assert.deepEqual(invoiceInputs, [[RENTAL_ID, String(OWNER_ID), PLAN_ID]]);
-  assert.deepEqual(events, ["delete", "provision", "invoice"]);
+  assert.deepEqual(events, ["delete", "provision", "balance", "invoice"]);
   assert.equal(harness.apiCalls.filter(call => call.method === "sendPhoto").length, 1);
+  assert.match(replyText(harness.apiCalls), /Saldo saat ini Rp\s?10\.000/);
   assert.doesNotMatch(replyText(harness.apiCalls), new RegExp(TOKEN));
   assert.doesNotMatch(warnings.join("\n"), new RegExp(TOKEN));
+});
+
+test("sufficient main-bot balance activates a new rental without QRIS", async () => {
+  let invoiceCalls = 0;
+  const starts: string[] = [];
+  const harness = await createHarness({
+    payBalance: async rentalId => ({
+      status: "paid",
+      rentalId,
+      remainingBalance: 75_000,
+      rental: {
+        ...OWNED_RENTAL,
+        rentalId,
+        tenantId: rentalId,
+        ownerTelegramId: String(OWNER_ID),
+        adminTelegramIds: [],
+        plan: PLAN_ID,
+        enabledFeatures: ["digital"],
+        graceEndsAt: null,
+      },
+    }),
+    createInvoice: async () => {
+      invoiceCalls++;
+      throw new Error("must not run");
+    },
+    startRental: async rentalId => { starts.push(rentalId); },
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(22, `rs_new_${PLAN_ID}`));
+  await harness.bot.handleUpdate(messageUpdate(23, TOKEN));
+
+  assert.equal(invoiceCalls, 0);
+  assert.deepEqual(starts, [RENTAL_ID]);
+  assert.equal(harness.apiCalls.filter(call => call.method === "sendPhoto").length, 0);
+  assert.match(replyText(harness.apiCalls), /dipotong dari saldo main bot/);
+  assert.match(replyText(harness.apiCalls), /Sisa saldo: Rp\s?75\.000/);
+  assert.doesNotMatch(replyText(harness.apiCalls), new RegExp(TOKEN));
+});
+
+test("insufficient balance gives a top-up instruction when QRIS fallback is unavailable", async () => {
+  const harness = await createHarness({
+    createInvoice: async () => {
+      throw new Error("Payment platform belum dikonfigurasi. secret-value");
+    },
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(24, `rs_new_${PLAN_ID}`));
+  await harness.bot.handleUpdate(messageUpdate(25, TOKEN));
+
+  const reply = replyText(harness.apiCalls);
+  assert.match(reply, /Saldo main bot belum cukup/);
+  assert.match(reply, /Top up saldo main bot/);
+  assert.doesNotMatch(reply, /secret-value/);
 });
 
 test("foreign existing-rental callback is denied before invoice creation", async () => {

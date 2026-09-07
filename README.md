@@ -5,7 +5,7 @@
 Repository ini mendukung bot platform dan banyak bot rental dalam satu proses Node.
 Panduan migrasi, environment, arsitektur, dan batas validasi: [Implementasi rental](docs/RENTAL_IMPLEMENTATION.md).
 Cara membuat paket/rental dan mengatur toko: [Operasi rental](docs/RENTAL_OPERATIONS.md).
-Admin menyiapkan paket melalui `/admin` → **Kelola Bot Rental** atau `/rental`. Pengguna kemudian dapat menyewa otomatis dari main bot melalui `/sewa` atau **Catalog → 🤖 Sewa Bot Otomatis**; invoice awal memakai QRIS platform dan bot rental mulai setelah pembayaran terkonfirmasi.
+Admin menyiapkan paket melalui `/admin` → **Kelola Bot Rental** atau `/rental`. Pengguna kemudian dapat menyewa otomatis dari main bot melalui `/sewa` atau **Catalog → 🤖 Sewa Bot**; aktivasi awal memotong saldo main bot, lalu bot rental dimulai otomatis. QRIS platform hanya dipakai sebagai cadangan ketika saldo tidak cukup dan payment platform tersedia.
 
 **Upgrade database existing memerlukan migrasi tenant sebelum aplikasi dijalankan.**
 Periksa `npm run migrate:tenants` terlebih dahulu; penulisan hanya dilakukan dengan `--apply`.

@@ -4,12 +4,13 @@ import { randomUUID, createHmac, randomBytes } from "node:crypto";
 import mongoose, { Types } from "mongoose";
 import { Bot } from "grammy";
 import { BotRental } from "../models/BotRental.js";
+import { BalanceLog } from "../models/BalanceLog.js";
 import { RentalPlan } from "../models/RentalPlan.js";
 import { RentalPayment } from "../models/RentalPayment.js";
 import { PaymentAmountReservation, PaymentSettlementClaim } from "../models/PaymentLedger.js";
 import { TopupSession } from "../models/TopupSession.js";
 import { User } from "../models/User.js";
-import { createRentalInvoice, checkRentalPayment, pollPendingRentalPayments } from "./rentalPayment.service.js";
+import { activatePendingRentalFromBalance, createRentalInvoice, checkRentalPayment, pollPendingRentalPayments } from "./rentalPayment.service.js";
 import { applyRenewal, DAY_MS, refreshRentalState, synchronizeRentalLifecycle } from "./rental.service.js";
 import { createRentalWebhookServer } from "./rentalWebhook.js";
 import { getPlatformPaymentClients } from "../payments/platformPayment.service.js";
@@ -35,7 +36,7 @@ test("renewal payment and bot gating with disposable MongoDB and mocked provider
   process.env.RENTAL_ENABLED = "true";
   await mongoose.connect(uri!, { dbName, autoCreate: false, autoIndex: false });
   try {
-    for (const model of [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, TopupSession, User]) {
+    for (const model of [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, TopupSession, User, BalanceLog]) {
       await model.createCollection();
       await model.createIndexes();
     }
@@ -116,6 +117,50 @@ test("renewal payment and bot gating with disposable MongoDB and mocked provider
         return { id: 3001, username: "second_self_service_bot" };
       })), /sudah terdaftar/);
       assert.equal(tokenVerifications, 1, "existing owner is rejected before another Telegram token check");
+    });
+    await t.test("self-service activation deducts platform balance exactly once without payment credentials", async () => {
+      const created = await runWithTenant(platformContext(), async () => {
+        await User.create({ telegramId: "302", firstName: "Balance Owner", balance: 60_000 });
+        return provisionSelfServiceRental({
+          ownerTelegramId: "302",
+          planId: String(plan._id),
+          botToken: "3002:abcdefghijklmnopqrstuvwxyz",
+        }, async () => ({ id: 3002, username: "balance_self_service_bot" }));
+      });
+
+      const savedPaymentEnv = {
+        merchantId: process.env.GOPAY_MERCHANT_ID,
+        email: process.env.GOBIZ_EMAIL,
+        password: process.env.GOBIZ_PASSWORD,
+      };
+      delete process.env.GOPAY_MERCHANT_ID;
+      delete process.env.GOBIZ_EMAIL;
+      delete process.env.GOBIZ_PASSWORD;
+      try {
+        const results = await Promise.all(Array.from({ length: 5 }, () =>
+          runWithTenant(platformContext(), () => activatePendingRentalFromBalance(
+            created.rentalId,
+            "302",
+            created.planId,
+          )),
+        ));
+        assert.ok(results.every(result => result.status === "paid"));
+      } finally {
+        process.env.GOPAY_MERCHANT_ID = savedPaymentEnv.merchantId;
+        process.env.GOBIZ_EMAIL = savedPaymentEnv.email;
+        process.env.GOBIZ_PASSWORD = savedPaymentEnv.password;
+      }
+
+      const user = await runWithTenant(platformContext(), () =>
+        User.findOne({ telegramId: "302" }).select("+appliedRentalBalancePaymentIds").lean(),
+      );
+      const rental = await BotRental.findById(created.rentalId).lean();
+      assert.equal(user!.balance, 35_000);
+      assert.equal(user!.totalOrders, 1);
+      assert.deepEqual(user!.appliedRentalBalancePaymentIds, [`balance-initial-${created.rentalId}`]);
+      assert.equal(rental!.status, "active");
+      assert.equal(rental!.appliedRentalPaymentIds.length, 1);
+      assert.equal(await runWithTenant(platformContext(), () => BalanceLog.countDocuments({ userId: "302" })), 1);
     });
     await t.test("wrong merchant cannot settle renewal; concurrent valid callbacks extend exactly once", async () => {
       transactions = [{ merchantId: "renter-merchant", amount: invoice.payment.amount, paidAt: Date.now(), paymentType: "QRIS", status: "SETTLEMENT", transactionId: "tx-a" }];

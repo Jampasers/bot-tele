@@ -9,8 +9,10 @@ import {
   type SelfServiceRentalPlan,
 } from "../../rental/rentalSelfService.service.js";
 import {
+  activatePendingRentalFromBalance,
   checkRentalPayment,
   createRentalInvoice,
+  type RentalBalancePaymentResult,
   type RentalPaymentResult,
 } from "../../rental/rentalPayment.service.js";
 import { startProvisionedRental } from "../../rental/rental.service.js";
@@ -27,7 +29,7 @@ const TOKEN_ATTEMPT_WINDOW_MS = 60 * 60_000;
 const MAX_TOKEN_ATTEMPTS = 5;
 const PAYMENT_CHECK_COOLDOWN_MS = 10_000;
 const PAYMENT_SETUP_MESSAGE =
-  "⚠️ Pembayaran rental platform belum lengkap. Admin harus mengisi GOPAY_MERCHANT_ID dan GOJEK_EMAIL/GOJEK_PASSWORD (atau GOBIZ_EMAIL/GOBIZ_PASSWORD) pada .env main bot, lalu restart.";
+  "⚠️ Saldo main bot belum cukup dan pembayaran QRIS rental sedang tidak tersedia. Top up saldo main bot, lalu buka /sewa lagi.";
 const ENCRYPTION_SETUP_MESSAGE =
   "⚠️ Kunci enkripsi rental belum valid. Admin harus memperbaiki CREDENTIAL_ENCRYPTION_KEY pada .env main bot, lalu restart.";
 
@@ -61,6 +63,11 @@ export interface RentalStoreDependencies {
     actorTelegramId: string,
     planId: string,
   ): Promise<RentalInvoice>;
+  payBalance(
+    rentalId: string,
+    actorTelegramId: string,
+    planId: string,
+  ): Promise<RentalBalancePaymentResult>;
   checkPayment(
     providerReference: string,
     actorTelegramId: string,
@@ -74,6 +81,7 @@ const defaults: RentalStoreDependencies = {
   listPlans: listSelfServiceRentalPlans,
   findRental: findOwnedRental,
   provision: provisionSelfServiceRental,
+  payBalance: activatePendingRentalFromBalance,
   createInvoice: createRentalInvoice,
   checkPayment: (reference, actor) => checkRentalPayment(reference, actor),
   startRental: startProvisionedRental,
@@ -214,7 +222,7 @@ export function createRentalStorePlugin(
         "🤖 Sewa Bot\n\n" +
           "1. Pilih paket.\n" +
           "2. Kirim token bot baru dari @BotFather melalui chat ini.\n" +
-          "3. Bayar invoice QRIS platform.\n" +
+          "3. Biaya dipotong otomatis dari saldo main bot.\n" +
           "4. Bot aktif otomatis setelah pembayaran terkonfirmasi.\n\n" +
           "Gunakan token khusus rental. Siapa pun yang memegang token dapat mengendalikan bot tersebut.\n\n" +
           (plans.length ? "Pilih paket:" : "Belum ada paket rental aktif."),
@@ -228,6 +236,31 @@ export function createRentalStorePlugin(
           ?? "⚠️ Sewa bot otomatis belum tersedia karena layanan sedang bermasalah. Coba kembali atau hubungi admin platform.",
       );
     }
+  }
+
+  async function finishBalanceActivation(
+    ctx: Context,
+    result: Extract<RentalBalancePaymentResult, { status: "paid" }>,
+    botUsername: string,
+  ): Promise<void> {
+    let runtimeReady = true;
+    try {
+      await dependencies.startRental(result.rentalId);
+    } catch {
+      runtimeReady = false;
+      console.warn(
+        `[Platform] Balance-paid rental ${result.rentalId} is waiting for runtime retry.`,
+      );
+    }
+    const keyboard = new InlineKeyboard().text("🤖 Rental Saya", "rs_home");
+    const url = botUrl(botUsername);
+    if (url) keyboard.row().url("🚀 Buka Bot", url);
+    await ctx.reply(
+      runtimeReady
+        ? `✅ Pembayaran dipotong dari saldo main bot. Bot rental sudah aktif.\nSisa saldo: ${formatPrice(result.remainingBalance)}\nBerlaku sampai: ${formatDate(result.rental.expiresAt)} WIB`
+        : `✅ Pembayaran dipotong dari saldo main bot dan masa sewa sudah aktif.\nSisa saldo: ${formatPrice(result.remainingBalance)}\nRuntime bot sedang dicoba ulang otomatis.`,
+      { reply_markup: keyboard },
+    );
   }
 
   async function sendInvoice(
@@ -305,12 +338,25 @@ export function createRentalStorePlugin(
     if ((await rejectNonPrivate(ctx)) || !ctx.from) return;
     await ctx.answerCallbackQuery().catch(() => {});
     const ownerTelegramId = String(ctx.from.id);
+    let pendingActivation = false;
     try {
       dependencies.assertReady();
       const rental = await dependencies.findRental(ownerTelegramId);
       if (!rental || rental.rentalId !== rentalId) {
         await ctx.reply("⛔ Rental tidak ditemukan atau bukan milik kamu.");
         return;
+      }
+      pendingActivation = rental.status === "pending";
+      if (rental.status === "pending") {
+        const balanceResult = await dependencies.payBalance(
+          rentalId,
+          ownerTelegramId,
+          planId,
+        );
+        if (balanceResult.status === "paid") {
+          await finishBalanceActivation(ctx, balanceResult, rental.botUsername);
+          return;
+        }
       }
       const invoice = await dependencies.createInvoice(
         rentalId,
@@ -323,12 +369,15 @@ export function createRentalStorePlugin(
         );
       }
       await sendInvoice(ctx, invoice, rental.botUsername);
-    } catch {
+    } catch (error) {
       console.warn(
         `[Platform] Rental invoice creation failed for rental ${rentalId}.`,
       );
+      const setupMessage = rentalSetupMessage(error);
       await ctx.reply(
-        "Invoice belum dapat dibuat. Periksa konfigurasi pembayaran atau coba kembali nanti.",
+        setupMessage === PAYMENT_SETUP_MESSAGE && !pendingActivation
+          ? "⚠️ Pembayaran QRIS untuk perpanjangan rental sedang tidak tersedia. Hubungi admin platform."
+          : setupMessage ?? "Invoice belum dapat dibuat. Coba kembali nanti.",
       );
     }
   }
@@ -453,20 +502,32 @@ export function createRentalStorePlugin(
         planId: state.planId,
         botToken,
       });
+      const balanceResult = await dependencies.payBalance(
+        created.rentalId,
+        ownerTelegramId,
+        created.planId,
+      );
+      if (balanceResult.status === "paid") {
+        await finishBalanceActivation(ctx, balanceResult, created.botUsername);
+        return;
+      }
       const invoice = await dependencies.createInvoice(
         created.rentalId,
         ownerTelegramId,
         created.planId,
       );
       await ctx.reply(
-        `✅ Bot @${created.botUsername} berhasil diverifikasi. Bot tetap offline sampai pembayaran terkonfirmasi.`,
+        balanceResult.status === "insufficient"
+          ? `✅ Bot @${created.botUsername} berhasil diverifikasi. Saldo saat ini ${formatPrice(balanceResult.currentBalance)}, sedangkan harga paket ${formatPrice(balanceResult.requiredAmount)}. Lanjutkan melalui invoice QRIS berikut.`
+          : `✅ Bot @${created.botUsername} berhasil diverifikasi. Invoice QRIS yang masih aktif ditampilkan kembali.`,
       );
       await sendInvoice(ctx, invoice, created.botUsername);
-    } catch {
+    } catch (error) {
       console.warn("[Platform] Self-service rental provisioning failed.");
       await ctx.reply(
         created
-          ? "Data bot sudah tersimpan, tetapi invoice belum dapat ditampilkan. Buka /sewa untuk melanjutkan pembayaran."
+          ? rentalSetupMessage(error) ??
+              "Data bot sudah tersimpan, tetapi pembayaran belum dapat diproses. Buka /sewa untuk mencoba kembali."
           : "Bot belum dapat didaftarkan. Pastikan token baru, bot tidak memakai webhook/proses lain, lalu mulai kembali melalui /sewa.",
       );
     }
