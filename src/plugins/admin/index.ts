@@ -186,6 +186,8 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .row()
     .text("📬 Channel Forwarder OTP (IMAP)", "adm_otpchan")
     .row()
+    .text("📡 Informasi IMAP Tersimpan", "adm_imap_info")
+    .row()
     .text("☁️ Cloudflare Email Routing", "adm_cf_menu")
     .row()
     .text(otpLabel, "adm_otp_menu")
@@ -1407,6 +1409,7 @@ const adminPlugin: Plugin = {
     { command: "toggleotpchannel",  description: "[Admin] Toggle on/off forwarder OTP ke channel" },
     { command: "testotpchannel",    description: "[Admin] Kirim pesan OTP uji coba ke channel" },
     { command: "imapstatus",        description: "[Admin] Cek status listener email IMAP" },
+    { command: "imapinfo",          description: "[Admin] Lihat konfigurasi IMAP yang tersimpan" },
     { command: "setimap",           description: "[Admin] Set kredensial IMAP: /setimap <host> <user> <pass> [port] [sender]" },
     { command: "find",              description: "[Admin] Cari layanan: /find <keyword>" },
     { command: "cekharga",          description: "[Admin] Cek harga asli SMSBower (USD & IDR): /cekharga [layanan] [negara]" },
@@ -2413,6 +2416,23 @@ const adminPlugin: Plugin = {
     });
 
     // ── adm_imap_config — Open IMAP credential manager ───────────────────────
+    bot.callbackQuery("adm_imap_info", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
+        return;
+      }
+      if (ctx.chat?.type !== "private") {
+        await ctx.answerCallbackQuery({ text: "Buka informasi IMAP melalui chat pribadi.", show_alert: true });
+        return;
+      }
+      await ctx.answerCallbackQuery();
+      fsubInputState.delete(String(ctx.from?.id));
+      const text = await buildImapConfigAdminText();
+      const keyboard = await buildImapConfigAdminKeyboard();
+      try { await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard }); }
+      catch { await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard }); }
+    });
+
     bot.callbackQuery("adm_imap_config", async (ctx) => {
       await ctx.answerCallbackQuery();
       if (!isAdmin(ctx)) return;
@@ -2724,9 +2744,29 @@ const adminPlugin: Plugin = {
     });
 
     // ── Command: /imapstatus ─────────────────────────────────────────────────
+    bot.command("imapinfo", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      if (ctx.chat?.type !== "private") {
+        await ctx.reply("Informasi konfigurasi IMAP hanya tersedia melalui chat pribadi bot.");
+        return;
+      }
+      fsubInputState.delete(String(ctx.from?.id));
+      await ctx.reply(await buildImapConfigAdminText(), {
+        parse_mode: "HTML",
+        reply_markup: await buildImapConfigAdminKeyboard(),
+      });
+    });
+
     bot.command("imapstatus", async (ctx) => {
       if (!isAdmin(ctx)) {
         await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+        return;
+      }
+      if (ctx.chat?.type !== "private") {
+        await ctx.reply("Status IMAP hanya tersedia melalui chat pribadi bot.");
         return;
       }
 
@@ -2752,7 +2792,13 @@ const adminPlugin: Plugin = {
         `• <b>OTP Terakhir:</b> <code>${escapeHtml(status.lastReceivedOtp || "-")}</code>\n` +
         `• <b>Waktu Terakhir:</b> ${lastDate}\n` +
         (status.lastError ? `\n⚠️ <b>Error:</b> <code>${escapeHtml(status.lastError)}</code>` : ""),
-        { parse_mode: "HTML" }
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("⚙️ Informasi IMAP Tersimpan", "adm_imap_info")
+            .row()
+            .text("📬 Pengaturan Channel OTP", "adm_otpchan"),
+        }
       );
     });
 
