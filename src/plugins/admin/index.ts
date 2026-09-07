@@ -41,6 +41,7 @@ import {
   buildAdminHelpText,
   isAdminHelpSectionId,
 } from "../adminHelp.js";
+import { formatAdminValue, formatSecretStatus, isPrivateAdminChat } from "../adminDisplay.js";
 
 // ============================================================================
 //  ADMIN PLUGIN — Interactive Whitelist & Platform Manager
@@ -112,6 +113,17 @@ function formatDateWIB(date: Date | string | number | null | undefined = new Dat
       second: "2-digit",
     }).format(parsedDate) + " WIB"
   );
+}
+
+async function requirePrivateAdminChat(ctx: Context): Promise<boolean> {
+  if (isPrivateAdminChat(ctx.chat?.type)) return true;
+  const message = "Buka data admin lengkap melalui chat pribadi bot.";
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery({ text: message, show_alert: true }).catch(() => {});
+  } else {
+    await ctx.reply(message);
+  }
+  return false;
 }
 
 // ── UI Builders ───────────────────────────────────────────────────────────────
@@ -289,18 +301,16 @@ function buildAntiFraudKeyboard(): InlineKeyboard {
 async function buildCloudflareAdminText(): Promise<string> {
   const config = await CloudflareService.getConfig();
   const domains = config.cfZones
-    .map((z) => `• <code>${z.domain}</code> (ID: <code>${z.id.slice(0, 8)}...</code>)`)
+    .map((z) => `• <code>${escapeHtml(z.domain)}</code> (ID: <code>${escapeHtml(formatAdminValue(z.id))}</code>)`)
     .join("\n") || "<i>Belum ada domain terdaftar.</i>";
 
-  const apiKeyMasked = config.cfApiKey
-    ? `${config.cfApiKey.slice(0, 6)}••••••••${config.cfApiKey.slice(-4)}`
-    : "(Belum diatur)";
+  const apiKeyStatus = formatSecretStatus(config.cfApiKey);
 
   return (
     `☁️ <b>Cloudflare Email Routing Manager</b>\n` +
     `${"─".repeat(34)}\n\n` +
     `📧 <b>Email Cloudflare:</b>  <code>${config.cfEmail || "(Belum diatur)"}</code>\n` +
-    `🔑 <b>API Key:</b>           <code>${apiKeyMasked}</code>\n` +
+    `🔑 <b>API Key:</b>           ${apiKeyStatus}\n` +
     `🎯 <b>Forward Target:</b>    <code>${config.cfDestinationEmail || "(Belum diatur)"}</code>\n\n` +
     `🌐 <b>Daftar Domain / Zone (${config.cfZones.length}):</b>\n${domains}\n\n` +
     `⚡ <b>Quick Commands:</b>\n` +
@@ -448,7 +458,7 @@ async function buildOtpChannelAdminText(): Promise<string> {
     `• Link: ${botConfig.otpDiscordChannelLink ? `<a href="${botConfig.otpDiscordChannelLink}">${botConfig.otpDiscordChannelLink}</a>` : "<code>(Belum diatur)</code>"}\n\n` +
     `📡 <b>Status Koneksi IMAP:</b> <b>${imapConnStatus}</b>\n` +
     `🌐 <b>Host IMAP:</b>          <code>${botConfig.imapHost || "-"}</code>:<code>${botConfig.imapPort || 993}</code>\n` +
-    `👤 <b>Akun IMAP:</b>          <code>${botConfig.imapUser ? `${botConfig.imapUser.slice(0, 3)}***` : "(Belum diatur)"}</code>\n` +
+    `👤 <b>Akun IMAP:</b>          <code>${escapeHtml(formatAdminValue(botConfig.imapUser))}</code>\n` +
     `🎯 <b>Target Pengirim:</b>    <code>${botConfig.imapTargetSender || "service@intl.paypal.com"}</code>\n` +
     `📥 <b>Folder Mailbox:</b>     <code>${botConfig.imapMailbox || "INBOX"}</code>\n\n` +
     `📊 <b>Statistik Realtime:</b>\n` +
@@ -493,7 +503,7 @@ async function buildOtpChannelAdminKeyboard(): Promise<InlineKeyboard> {
 
 async function buildImapConfigAdminText(): Promise<string> {
   const config = await BotConfig.getOrCreate();
-  const passMasked = config.imapPass ? "••••••••••••" : "(Belum diatur)";
+  const passStatus = formatSecretStatus(config.imapPass);
   const status = config.imapEnabled ? "🟢 <b>Aktif</b>" : "🔴 <b>Nonaktif</b>";
 
   return (
@@ -503,7 +513,7 @@ async function buildImapConfigAdminText(): Promise<string> {
     `🌐 <b>Host Server:</b>        <code>${config.imapHost || "(Belum diatur)"}</code>\n` +
     `🔌 <b>Port Server:</b>        <code>${config.imapPort || 993}</code> (SSL/TLS: <code>${config.imapSecure ? "Ya" : "Tidak"}</code>)\n` +
     `👤 <b>Email Akun:</b>         <code>${config.imapUser || "(Belum diatur)"}</code>\n` +
-    `🔑 <b>Password / App Pass:</b> <code>${passMasked}</code>\n` +
+    `🔑 <b>Password / App Pass:</b> ${passStatus}\n` +
     `🎯 <b>Target Pengirim:</b>    <code>${config.imapTargetSender || "service@intl.paypal.com"}</code>\n` +
     `📁 <b>Folder Mailbox:</b>     <code>${config.imapMailbox || "INBOX"}</code>\n\n` +
     `<i>💡 Untuk Gmail / Google Workspace, buat <b>App Password 16 digit</b> di Keamanan Akun Google (bukan password login biasa).</i>`
@@ -1143,41 +1153,6 @@ function escapeHtml(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function maskEmail(email?: string): string {
-  if (!email || !email.includes("@")) return email || "(Tidak terdeteksi)";
-  const parts = email.split("@");
-  const local = parts[0] || "";
-  const domain = parts.slice(1).join("@");
-  if (!local || !domain) return email;
-
-  let maskedLocal = local;
-  if (local.length <= 2) {
-    maskedLocal = "*".repeat(local.length);
-  } else if (local.length <= 3) {
-    maskedLocal = "**" + local.slice(-1);
-  } else {
-    const keepCount = 2;
-    const starCount = Math.min(local.length - keepCount, 3);
-    maskedLocal = "*".repeat(starCount) + local.slice(-keepCount);
-  }
-
-  const dotIndex = domain.indexOf(".");
-  if (dotIndex > 0) {
-    const mainDomain = domain.slice(0, dotIndex);
-    const ext = domain.slice(dotIndex);
-    let maskedMain = mainDomain;
-    if (mainDomain.length <= 2) {
-      maskedMain = "*".repeat(mainDomain.length);
-    } else {
-      const starCount = Math.min(2, mainDomain.length - 1);
-      maskedMain = "*".repeat(starCount) + mainDomain.slice(starCount);
-    }
-    return `${maskedLocal}@${maskedMain}${ext}`;
-  }
-
-  return `${maskedLocal}@${domain}`;
 }
 
 function buildStatsKeyboard(
@@ -2155,6 +2130,7 @@ const adminPlugin: Plugin = {
         await ctx.reply("⛔ Perintah ini hanya untuk admin.");
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       fsubInputState.delete(String(ctx.from?.id));
       await ctx.reply(await buildOtpChannelAdminText(), {
         parse_mode: "HTML",
@@ -2167,8 +2143,12 @@ const adminPlugin: Plugin = {
 
     // ── adm_otpchan callback ─────────────────────────────────────────────────
     bot.callbackQuery("adm_otpchan", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
+        return;
+      }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       await ctx.answerCallbackQuery();
-      if (!isAdmin(ctx)) return;
       fsubInputState.delete(String(ctx.from?.id));
       await ctx.editMessageText(await buildOtpChannelAdminText(), {
         parse_mode: "HTML",
@@ -2182,6 +2162,7 @@ const adminPlugin: Plugin = {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       const config = await BotConfig.getOrCreate();
       const nextState = !config.otpChannelEnabled;
       config.otpChannelEnabled = nextState;
@@ -2203,6 +2184,7 @@ const adminPlugin: Plugin = {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       const config = await BotConfig.getOrCreate();
       const nextState = !config.otpNetflixChannelEnabled;
       config.otpNetflixChannelEnabled = nextState;
@@ -2224,6 +2206,7 @@ const adminPlugin: Plugin = {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       const config = await BotConfig.getOrCreate();
       const nextState = !config.otpDiscordChannelEnabled;
       config.otpDiscordChannelEnabled = nextState;
@@ -2453,8 +2436,12 @@ const adminPlugin: Plugin = {
     });
 
     bot.callbackQuery("adm_imap_config", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
+        return;
+      }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       await ctx.answerCallbackQuery();
-      if (!isAdmin(ctx)) return;
       fsubInputState.delete(String(ctx.from?.id));
       await ctx.editMessageText(await buildImapConfigAdminText(), {
         parse_mode: "HTML",
@@ -2468,6 +2455,7 @@ const adminPlugin: Plugin = {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       const config = await BotConfig.getOrCreate();
       const nextState = !config.imapEnabled;
       config.imapEnabled = nextState;
@@ -2509,6 +2497,7 @@ const adminPlugin: Plugin = {
         await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       const filterLabel = filterSender === "netflix" ? "Netflix" : filterSender === "paypal" ? "PayPal" : "Semua";
       await ctx.answerCallbackQuery({ text: `⏳ Mengambil 5 email terbaru (${filterLabel}) dari server IMAP…` });
 
@@ -2539,12 +2528,10 @@ const adminPlugin: Plugin = {
           const dateStr = mail.date ? formatDateWIB(mail.date) : "-";
           const providerIcon =
             mail.provider === "NETFLIX" ? "🎬 [Netflix]" : mail.provider === "PAYPAL" ? "🅿️ [PayPal]" : "📧 [Email]";
-          const isNetflix = mail.provider === "NETFLIX";
-          const maskedEmailStr = mail.recipientEmail ? maskEmail(mail.recipientEmail) : undefined;
-          const emailLine = isNetflix && maskedEmailStr
-            ? `   📧 Akun: <code>${escapeHtml(maskedEmailStr)}</code>\n`
+          const emailLine = mail.recipientEmail
+            ? `   📧 Akun: <code>${escapeHtml(formatAdminValue(mail.recipientEmail))}</code>\n`
             : "";
-          const nameLine = !isNetflix && mail.recipientName
+          const nameLine = mail.recipientName
             ? `   👤 Nama: <b>${escapeHtml(mail.recipientName)}</b>\n`
             : "";
           const otpStr = mail.otpCode ? `<code>${escapeHtml(mail.otpCode)}</code>` : "<i>(Tidak terdeteksi)</i>";
@@ -2877,6 +2864,7 @@ const adminPlugin: Plugin = {
         await ctx.reply("⛔ Perintah ini hanya untuk admin.");
         return;
       }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       fsubInputState.delete(String(ctx.from?.id));
       await ctx.reply(await buildCloudflareAdminText(), {
         parse_mode: "HTML",
@@ -3001,8 +2989,12 @@ const adminPlugin: Plugin = {
 
     // ── adm_cf_menu callback ─────────────────────────────────────────────────
     bot.callbackQuery("adm_cf_menu", async (ctx) => {
+      if (!isAdmin(ctx)) {
+        await ctx.answerCallbackQuery({ text: "⛔ Admin only.", show_alert: true });
+        return;
+      }
+      if (!(await requirePrivateAdminChat(ctx))) return;
       await ctx.answerCallbackQuery();
-      if (!isAdmin(ctx)) return;
       fsubInputState.delete(String(ctx.from?.id));
       await ctx.editMessageText(await buildCloudflareAdminText(), {
         parse_mode: "HTML",
