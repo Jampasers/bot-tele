@@ -142,7 +142,7 @@ export async function buildCatalogText(): Promise<string> {
       ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
       : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
   const rentalDesc = hasRentalCatalog()
-    ? `🤖 <b>Sewa Bot Otomatis</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
+    ? `🤖 <b>Sewa Bot</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
     : "";
 
   return (
