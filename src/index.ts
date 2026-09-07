@@ -16,10 +16,14 @@ import { BotInstance } from "./runtime/BotInstance.js";
 import { RentalScheduler } from "./runtime/RentalScheduler.js";
 import { createRentalWebhookServer } from "./rental/rentalWebhook.js";
 import { installRentalLogContext } from "./runtime/logging.js";
+import { formatStartupFailure, type StartupStage } from "./runtime/startupDiagnostics.js";
 
 installRentalLogContext();
 
+let startupStage: StartupStage = "environment";
+
 async function main(): Promise<void> {
+  startupStage = "environment";
   const token = process.env.BOT_TOKEN?.trim();
   if (!token || !process.env.MONGODB_URI?.trim()) throw new Error("BOT_TOKEN and MONGODB_URI are required.");
   const rentalEnabled = process.env.RENTAL_ENABLED === "true";
@@ -71,40 +75,47 @@ async function main(): Promise<void> {
   process.once("SIGTERM", onSignal);
   try {
     startup = (async () => {
-    await connectDatabase();
-    await assertTenantMigrationReady();
-    if (stopRequested) return;
-    await Promise.all([
-      SMSBowerService.loadData(),
-      CurrencyService.getUsdRate().catch(() => {}),
-    ]);
-    const bot = await createBot(token, context);
-    if (stopRequested) return;
-    platform = new BotInstance(bot, context);
-    platform.start();
-    stopBackup = scheduleDailyBackup(bot.api);
-    backgroundStarts.push(ImapOtpService.start(bot.api).catch(() => console.warn("[Platform] IMAP startup failed.")));
-    if (process.env.WHATSAPP_ENABLED === "true" || Boolean(process.env.WHATSAPP_PAIRING_PHONE)) {
-      backgroundStarts.push(WhatsAppBotService.start().catch(() => console.warn("[Platform] WhatsApp startup failed.")));
-    }
-
-    if (rentalEnabled) {
-      manager = new BotManager(String(bot.botInfo.id));
-      await manager.startAllActiveRentals();
+      startupStage = "database";
+      await connectDatabase();
+      startupStage = "migration";
+      await assertTenantMigrationReady();
       if (stopRequested) return;
-      scheduler = new RentalScheduler(manager);
-      scheduler.start();
-      const port = Number(process.env.RENTAL_WEBHOOK_PORT || "0");
-      if (port !== 0) {
-        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid RENTAL_WEBHOOK_PORT.");
-        webhook = createRentalWebhookServer(process.env.RENTAL_WEBHOOK_SECRET || "");
-        await new Promise<void>((resolve, reject) => {
-          webhook!.once("error", reject);
-          webhook!.listen(port, "127.0.0.1", resolve);
-        });
+      startupStage = "provider-data";
+      await Promise.all([
+        SMSBowerService.loadData(),
+        CurrencyService.getUsdRate().catch(() => {}),
+      ]);
+      startupStage = "platform-bot";
+      const bot = await createBot(token, context);
+      if (stopRequested) return;
+      platform = new BotInstance(bot, context);
+      platform.start();
+      stopBackup = scheduleDailyBackup(bot.api);
+      backgroundStarts.push(ImapOtpService.start(bot.api).catch(() => console.warn("[Platform] IMAP startup failed.")));
+      if (process.env.WHATSAPP_ENABLED === "true" || Boolean(process.env.WHATSAPP_PAIRING_PHONE)) {
+        backgroundStarts.push(WhatsAppBotService.start().catch(() => console.warn("[Platform] WhatsApp startup failed.")));
       }
-    }
-    console.log(`[Platform] @${bot.botInfo.username} ready. Rental runtime ${rentalEnabled ? "enabled" : "disabled"}.`);
+
+      if (rentalEnabled) {
+        startupStage = "rental-runtime";
+        manager = new BotManager(String(bot.botInfo.id));
+        await manager.startAllActiveRentals();
+        if (stopRequested) return;
+        scheduler = new RentalScheduler(manager);
+        scheduler.start();
+        const port = Number(process.env.RENTAL_WEBHOOK_PORT || "0");
+        if (port !== 0) {
+          startupStage = "rental-webhook";
+          if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid RENTAL_WEBHOOK_PORT.");
+          webhook = createRentalWebhookServer(process.env.RENTAL_WEBHOOK_SECRET || "");
+          await new Promise<void>((resolve, reject) => {
+            webhook!.once("error", reject);
+            webhook!.listen(port, "127.0.0.1", resolve);
+          });
+        }
+      }
+      startupStage = "ready";
+      console.log(`[Platform] @${bot.botInfo.username} ready. Rental runtime ${rentalEnabled ? "enabled" : "disabled"}.`);
     })();
     await startup;
   } catch (error) {
@@ -114,8 +125,6 @@ async function main(): Promise<void> {
 }
 
 runWithTenant(platformContext(), main).catch((error: unknown) => {
-  // Mongo/Telegram errors can contain credential-bearing request objects.
-  const message = error instanceof Error ? error.message : "";
-  console.error(message.startsWith("Tenant migration required") ? message : "Startup failed. Check environment, tenant migration and provider connectivity privately.");
+  console.error(formatStartupFailure(startupStage, error));
   process.exitCode = 1;
 });
