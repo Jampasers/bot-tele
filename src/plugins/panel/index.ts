@@ -22,6 +22,10 @@ import { hasFeature } from "../../tenant/features.js";
  */
 export const CB_CATALOG = "menu_catalog" as const;
 
+function hasRentalCatalog(): boolean {
+  return !getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true";
+}
+
 // ============================================================================
 //  REPLY KEYBOARD — Main Menu (persistent bottom bar)
 // ============================================================================
@@ -36,14 +40,11 @@ export const CB_CATALOG = "menu_catalog" as const;
  * needed for the buttons — prevents it looking like a huge blank slab.
  */
 export function buildMainMenuReplyKeyboard(): Keyboard {
-  const keyboard = new Keyboard()
+  return new Keyboard()
     .text("👤 Info User").text("🛍️ Catalog").row()
     .text("💳 Topup").text("👥 Afiliasi").row()
-    .text("❓ Help");
-  if (!getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true") {
-    keyboard.row().text("🤖 Sewa Bot");
-  }
-  return keyboard.resized();
+    .text("❓ Help")
+    .resized();
 }
 
 // ============================================================================
@@ -69,6 +70,7 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
   }
 
   if (hasFeature("digital")) kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
+  if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot Otomatis", "rs_home");
   if (hasFeature("affiliate")) kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
 }
@@ -130,6 +132,9 @@ export async function buildCatalogText(): Promise<string> {
   const otpDesc = !config ? "" : config.enabled !== false
     ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
     : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
+  const rentalDesc = hasRentalCatalog()
+    ? `🤖 <b>Sewa Bot Otomatis</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
+    : "";
 
   return (
     `🛍️ <b>Catalog Layanan</b>\n` +
@@ -137,6 +142,7 @@ export async function buildCatalogText(): Promise<string> {
     `Pilih kategori produk yang ingin dibeli:\n\n` +
     otpDesc +
     `📦 <b>Produk Digital</b> — Akun premium, lisensi, voucher, & produk digital instan.\n\n` +
+    rentalDesc +
     `<i>Stok dan pesanan diproses otomatis 24/7.</i>`
   );
 }

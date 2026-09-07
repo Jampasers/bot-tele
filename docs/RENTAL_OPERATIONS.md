@@ -8,7 +8,7 @@ Pastikan `RENTAL_ENABLED=true` dan `CREDENTIAL_ENCRYPTION_KEY` sudah diisi, lalu
 
 ### Sewa otomatis dari bot platform
 
-Pengguna biasa dapat menyewa tanpa bantuan admin melalui tombol **🤖 Sewa Bot** pada menu utama atau command `/sewa` di chat pribadi bot platform.
+Pengguna biasa dapat menyewa tanpa bantuan admin melalui **Catalog → 🤖 Sewa Bot Otomatis** atau command `/sewa` di chat pribadi bot platform.
 
 1. Pengguna memilih salah satu paket yang masih aktif.
 2. Bot meminta token baru dari BotFather yang khusus dipakai untuk rental tersebut. Token bot platform atau token bot yang sudah terdaftar tidak dapat digunakan.

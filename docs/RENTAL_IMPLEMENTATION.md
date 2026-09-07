@@ -12,7 +12,7 @@ Plugin Mongoose pada semua 15 model existing dan `TenantPaymentConfig` menambahk
 
 Metadata plugin `internalOnly` mengunci admin internal, SMSBower dan info internal dari rental. Plugin rentaladmin memakai layanan produk/stok/garansi existing. Metadata `feature` diperiksa pada setiap update agar fitur paket berubah saat cache rental diperbarui. Handler renewal dipasang sebelum anti-fraud, maintenance, dan force-sub, sehingga owner tetap dapat memperpanjang rental yang sedang terkunci.
 
-Bot platform juga memuat alur self-service melalui `/sewa` dan tombol **🤖 Sewa Bot**. Pengguna memilih paket aktif dan mengirim token BotFather baru melalui chat pribadi. Handler wajib menghapus pesan sebelum memverifikasi atau menyimpan token. Rental dan invoice QRIS platform kemudian dibuat dalam status `pending`, sementara instance rental ditahan offline. Settlement dari scheduler atau tombol pemeriksaan mengaktifkan masa sewa secara idempotent dan baru kemudian memulai instance. Alur publik membatasi satu rental yang belum `terminated` per owner Telegram; provisioning admin tetap dapat membuat lebih dari satu rental.
+Bot platform juga memuat alur self-service melalui `/sewa` dan **Catalog → 🤖 Sewa Bot Otomatis**. Pengguna memilih paket aktif dan mengirim token BotFather baru melalui chat pribadi. Handler wajib menghapus pesan sebelum memverifikasi atau menyimpan token. Rental dan invoice QRIS platform kemudian dibuat dalam status `pending`, sementara instance rental ditahan offline. Settlement dari scheduler atau tombol pemeriksaan mengaktifkan masa sewa secara idempotent dan baru kemudian memulai instance. Alur publik membatasi satu rental yang belum `terminated` per owner Telegram; provisioning admin tetap dapat membuat lebih dari satu rental.
 
 Referensi mekanisme: [Mongoose middleware](https://mongoosejs.com/docs/middleware.html), [Node AsyncLocalStorage](https://nodejs.org/api/async_context.html), dan [grammY runner](https://grammy.dev/plugins/runner). Implementasi dan tests mengikuti versi dependency yang terpasang di repository.
 
@@ -51,7 +51,7 @@ ZIP backup/rollback existing tetap berfungsi untuk data tenant platform dan meno
 
 | Variable | Pemakaian |
 | --- | --- |
-| `RENTAL_ENABLED` | `true` menyalakan rental, scheduler, serta `/sewa` dan tombol self-service pada bot platform; default `false` hanya platform. Migrasi tetap diperlukan untuk versi source ini. |
+| `RENTAL_ENABLED` | `true` menyalakan rental, scheduler, serta `/sewa` dan entri self-service di Catalog bot platform; default `false` hanya platform. Migrasi tetap diperlukan untuk versi source ini. |
 | `CREDENTIAL_ENCRYPTION_KEY` | 32 byte acak sebagai 64 karakter hex atau base64; wajib untuk token dan credential rental. |
 | `RENTAL_BOT_TOKEN` | Input privat sementara untuk CLI provisioning darurat; setup normal dilakukan melalui menu `/rental` pada main bot. |
 | `RENTAL_WEBHOOK_PORT` | Default `0`: tidak membuka HTTP listener. Nilai lain membuka listener loopback untuk relay opsional. |
@@ -70,7 +70,7 @@ npm.cmd run dev
 npm.cmd run rental:admin -- help
 ```
 
-Admin membuat paket dan dapat memprovision rental melalui `/rental`. Pengguna menyewa otomatis dari bot platform melalui `/sewa` atau tombol **🤖 Sewa Bot**; CLI tetap tersedia sebagai jalur pemulihan. Detail input ada di [panduan operasi](RENTAL_OPERATIONS.md). Tidak ada harga yang di-hardcode pada handler `/renew` atau `/sewa`. Semua rental `pending` tetap offline sampai settlement atau aktivasi operator. Rental `active`, `expired_grace`, dan `suspended` dijalankan; rental `terminated` dihentikan. Grace berakhir tepat 24 jam setelah expiry; scheduler menyinkronkan database dan reminder setiap sekitar 60 detik, sementara middleware memeriksa waktu expiry dari cache pada setiap update.
+Admin membuat paket dan dapat memprovision rental melalui `/rental`. Pengguna menyewa otomatis dari bot platform melalui `/sewa` atau **Catalog → 🤖 Sewa Bot Otomatis**; CLI tetap tersedia sebagai jalur pemulihan. Detail input ada di [panduan operasi](RENTAL_OPERATIONS.md). Tidak ada harga yang di-hardcode pada handler `/renew` atau `/sewa`. Semua rental `pending` tetap offline sampai settlement atau aktivasi operator. Rental `active`, `expired_grace`, dan `suspended` dijalankan; rental `terminated` dihentikan. Grace berakhir tepat 24 jam setelah expiry; scheduler menyinkronkan database dan reminder setiap sekitar 60 detik, sementara middleware memeriksa waktu expiry dari cache pada setiap update.
 
 Shutdown menghentikan penerimaan pekerjaan baru, menunggu startup yang masih berjalan, menghentikan scheduler/relay/backup, semua runner, polling finansial, WhatsApp, IMAP, browser receipt, lalu koneksi MongoDB. Polling tenant dilacak dan didrain, termasuk follow-up yang dibuat saat poll sebelumnya menyelesaikan pekerjaan. Kegagalan satu bot ditangani per instance; scheduler mencoba menyalakannya kembali pada tick berikutnya. Log rental menambahkan identitas tenant dan tidak menyerialisasi object error HTTP/payload dari plugin lama.
 
