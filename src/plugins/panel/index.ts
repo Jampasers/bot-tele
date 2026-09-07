@@ -23,7 +23,9 @@ import { hasFeature } from "../../tenant/features.js";
 export const CB_CATALOG = "menu_catalog" as const;
 
 function hasRentalCatalog(): boolean {
-  return !getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true";
+  return (
+    !getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true"
+  );
 }
 
 // ============================================================================
@@ -41,8 +43,12 @@ function hasRentalCatalog(): boolean {
  */
 export function buildMainMenuReplyKeyboard(): Keyboard {
   return new Keyboard()
-    .text("👤 Info User").text("🛍️ Catalog").row()
-    .text("💳 Topup").text("👥 Afiliasi").row()
+    .text("👤 Info User")
+    .text("🛍️ Catalog")
+    .row()
+    .text("💳 Topup")
+    .text("👥 Afiliasi")
+    .row()
     .text("❓ Help")
     .resized();
 }
@@ -61,15 +67,16 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
   const kb = new InlineKeyboard();
 
   if (hasFeature("smsbower")) {
-  const config = await SmsConfig.getOrCreate();
-  if (config.enabled !== false) {
-    kb.text("💬 OTP SMS (Virtual Number)", "product_otp");
-  } else {
-    kb.text("💬 OTP SMS (🔴 Nonaktif)", "product_otp_disabled");
-  }
+    const config = await SmsConfig.getOrCreate();
+    if (config.enabled !== false) {
+      kb.text("💬 OTP SMS (Virtual Number)", "product_otp");
+    } else {
+      kb.text("💬 OTP SMS (🔴 Nonaktif)", "product_otp_disabled");
+    }
   }
 
-  if (hasFeature("digital")) kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
+  if (hasFeature("digital"))
+    kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
   if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot Otomatis", "rs_home");
   if (hasFeature("affiliate")) kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
@@ -81,17 +88,17 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
 
 function formatBalance(amount: number): string {
   return new Intl.NumberFormat("id-ID", {
-    style:                 "currency",
-    currency:              "IDR",
+    style: "currency",
+    currency: "IDR",
     maximumFractionDigits: 0,
   }).format(amount);
 }
 
 function formatDate(date: Date): string {
   return new Intl.DateTimeFormat("en-GB", {
-    day:   "2-digit",
+    day: "2-digit",
     month: "short",
-    year:  "numeric",
+    year: "numeric",
   }).format(date);
 }
 
@@ -106,8 +113,8 @@ export function buildWelcomeText(user: HydratedDocument<IUser>): string {
 }
 
 function buildInfoText(user: HydratedDocument<IUser>): string {
-  const handle   = user.username ? `@${user.username}` : "—";
-  const joined   = formatDate(user.createdAt);
+  const handle = user.username ? `@${user.username}` : "—";
+  const joined = formatDate(user.createdAt);
   const lastSeen = formatDate(user.updatedAt);
 
   return (
@@ -129,11 +136,13 @@ function buildInfoText(user: HydratedDocument<IUser>): string {
  */
 export async function buildCatalogText(): Promise<string> {
   const config = hasFeature("smsbower") ? await SmsConfig.getOrCreate() : null;
-  const otpDesc = !config ? "" : config.enabled !== false
-    ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
-    : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
+  const otpDesc = !config
+    ? ""
+    : config.enabled !== false
+      ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
+      : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
   const rentalDesc = hasRentalCatalog()
-    ? `🤖 <b>Sewa Bot Otomatis</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
+    ? `🤖 <b>Sewa Bot</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
     : "";
 
   return (
@@ -148,7 +157,8 @@ export async function buildCatalogText(): Promise<string> {
 }
 
 function buildTopupText(): string {
-  if (getTenantContext().rentalId) return "💳 Pilih produk di Catalog untuk membayar langsung melalui QRIS toko. Untuk pengisian saldo, hubungi administrator toko.";
+  if (getTenantContext().rentalId)
+    return "💳 Pilih produk di Catalog untuk membayar langsung melalui QRIS toko. Untuk pengisian saldo, hubungi administrator toko.";
   return (
     `💳 <b>Topup Balance</b>\n` +
     `${"─".repeat(28)}\n\n` +
@@ -160,10 +170,12 @@ function buildTopupText(): string {
 
 function buildHelpText(): string {
   const tenant = getTenantContext();
-  if (tenant.rentalId) return `❓ <b>Bantuan Toko</b>\n\nGunakan /start untuk membuka katalog dan melihat saldo.\nHubungi <a href="tg://user?id=${tenant.ownerTelegramId}">administrator toko</a> untuk bantuan pesanan.\n\nAdmin: /settings, /status, /renew.`;
-  const rentalHelp = process.env["RENTAL_ENABLED"] === "true"
-    ? `\n🤖 <b>Sewa bot otomatis:</b> /sewa\n`
-    : "";
+  if (tenant.rentalId)
+    return `❓ <b>Bantuan Toko</b>\n\nGunakan /start untuk membuka katalog dan melihat saldo.\nHubungi <a href="tg://user?id=${tenant.ownerTelegramId}">administrator toko</a> untuk bantuan pesanan.\n\nAdmin: /settings, /status, /renew.`;
+  const rentalHelp =
+    process.env["RENTAL_ENABLED"] === "true"
+      ? `\n🤖 <b>Sewa bot otomatis:</b> /sewa\n`
+      : "";
   return (
     `❓ <b>Help & Support</b>\n` +
     `${"─".repeat(28)}\n\n` +
@@ -171,7 +183,8 @@ function buildHelpText(): string {
     `📩 <b>Email:</b>    support@example.com\n` +
     `💬 <b>Telegram:</b> <a href="https://t.me/myoneandonlyaccount">@myoneandonlyaccount</a>\n` +
     `🕐 <b>Hours:</b>    Mon–Fri, 09:30–22:00 WIB\n` +
-    rentalHelp + `\n` +
+    rentalHelp +
+    `\n` +
     `<i>Average response time: under 2 hours.</i>`
   );
 }
@@ -182,10 +195,10 @@ function buildHelpText(): string {
 
 export async function findOrCreateUser(
   telegramId: string,
-  firstName:  string,
-  username?:  string,
-  api?:       Api,
-  referredBy?: string
+  firstName: string,
+  username?: string,
+  api?: Api,
+  referredBy?: string,
 ): Promise<HydratedDocument<IUser>> {
   const existing = await User.findOne({ telegramId });
   if (!existing) {
@@ -194,7 +207,7 @@ export async function findOrCreateUser(
       firstName,
       ...(username && { username }),
       ...(referredBy && { referredBy }),
-      balance:     0,
+      balance: 0,
       totalOrders: 0,
     });
 
@@ -202,7 +215,9 @@ export async function findOrCreateUser(
       ActivityLogService.logUserRegistration(api, {
         user: { telegramId, firstName, username },
         registeredVia: "/start (Main Menu)",
-      }).catch((err) => console.error("[ActivityLog] register log error:", err));
+      }).catch((err) =>
+        console.error("[ActivityLog] register log error:", err),
+      );
     }
 
     return newUser;
@@ -230,16 +245,15 @@ export async function findOrCreateUser(
 // ============================================================================
 
 const panelPlugin: Plugin = {
-  name:    "panel",
+  name: "panel",
   version: "2.1.0",
 
   commands: [
     { command: "start", description: "Open the main menu" },
-    { command: "menu",  description: "Open the main menu" },
+    { command: "menu", description: "Open the main menu" },
   ],
 
   register(bot: Bot<Context>): void {
-
     // ── /start ────────────────────────────────────────────────────────────────
     // Supports deep-link referral: /start ref_<referrerId>
     bot.command("start", async (ctx) => {
@@ -255,7 +269,9 @@ const panelPlugin: Plugin = {
           const candidateId = payload.slice(4).trim();
           // Validate: referrer must exist and cannot refer themselves
           if (candidateId && candidateId !== String(from.id)) {
-            const referrerExists = await User.exists({ telegramId: candidateId });
+            const referrerExists = await User.exists({
+              telegramId: candidateId,
+            });
             if (referrerExists) {
               referredBy = candidateId;
             }
@@ -263,11 +279,15 @@ const panelPlugin: Plugin = {
         }
 
         const user = await findOrCreateUser(
-          String(from.id), from.first_name, from.username, ctx.api, referredBy
+          String(from.id),
+          from.first_name,
+          from.username,
+          ctx.api,
+          referredBy,
         );
 
         await ctx.reply(buildWelcomeText(user), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: buildMainMenuReplyKeyboard(),
         });
       } catch (err) {
@@ -282,10 +302,13 @@ const panelPlugin: Plugin = {
       if (!from) return;
       try {
         const user = await findOrCreateUser(
-          String(from.id), from.first_name, from.username, ctx.api
+          String(from.id),
+          from.first_name,
+          from.username,
+          ctx.api,
         );
         await ctx.reply(buildWelcomeText(user), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: buildMainMenuReplyKeyboard(),
         });
       } catch (err) {
@@ -301,7 +324,10 @@ const panelPlugin: Plugin = {
 
       try {
         const user = await findOrCreateUser(
-          String(from.id), from.first_name, from.username, ctx.api
+          String(from.id),
+          from.first_name,
+          from.username,
+          ctx.api,
         );
         await ctx.reply(buildInfoText(user), { parse_mode: "HTML" });
       } catch (err) {
@@ -314,7 +340,7 @@ const panelPlugin: Plugin = {
     bot.hears("🛍️ Catalog", async (ctx) => {
       try {
         await ctx.reply(await buildCatalogText(), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: await buildCatalogKeyboard(),
         });
       } catch (err) {
@@ -343,7 +369,9 @@ const panelPlugin: Plugin = {
 
         const user = await User.findOne({ telegramId: String(from.id) }).lean();
         if (!user) {
-          await ctx.reply("⚠️ Kamu belum terdaftar. Silakan ketik /start terlebih dahulu.");
+          await ctx.reply(
+            "⚠️ Kamu belum terdaftar. Silakan ketik /start terlebih dahulu.",
+          );
           return;
         }
 
@@ -352,8 +380,11 @@ const panelPlugin: Plugin = {
           `👥 <b>Program Afiliasi</b>\n\nGunakan perintah /afiliasi untuk membuka dashboard afiliasi kamu.`,
           {
             parse_mode: "HTML",
-            reply_markup: new InlineKeyboard().text("👥 Buka Dashboard Afiliasi", "aff_home"),
-          }
+            reply_markup: new InlineKeyboard().text(
+              "👥 Buka Dashboard Afiliasi",
+              "aff_home",
+            ),
+          },
         );
       } catch (err) {
         console.error("[panel] hears:Afiliasi error:", err);
@@ -377,26 +408,38 @@ const panelPlugin: Plugin = {
       try {
         const isMedia = ctx.msg && (!("text" in ctx.msg) || !ctx.msg.text);
         if (isMedia) {
-          try { await ctx.deleteMessage(); } catch { /* ignore */ }
+          try {
+            await ctx.deleteMessage();
+          } catch {
+            /* ignore */
+          }
           await ctx.reply(await buildCatalogText(), {
-            parse_mode:   "HTML",
+            parse_mode: "HTML",
             reply_markup: await buildCatalogKeyboard(),
           });
           return;
         }
 
         await ctx.editMessageText(await buildCatalogText(), {
-          parse_mode:   "HTML",
+          parse_mode: "HTML",
           reply_markup: await buildCatalogKeyboard(),
         });
       } catch (err: any) {
         if (err?.description?.includes("message is not modified")) return;
-        if (err?.description?.includes("there is no text in the message to edit")) {
-          try { await ctx.deleteMessage(); } catch { /* ignore */ }
-          await ctx.reply(await buildCatalogText(), {
-            parse_mode:   "HTML",
-            reply_markup: await buildCatalogKeyboard(),
-          }).catch(() => {});
+        if (
+          err?.description?.includes("there is no text in the message to edit")
+        ) {
+          try {
+            await ctx.deleteMessage();
+          } catch {
+            /* ignore */
+          }
+          await ctx
+            .reply(await buildCatalogText(), {
+              parse_mode: "HTML",
+              reply_markup: await buildCatalogKeyboard(),
+            })
+            .catch(() => {});
           return;
         }
         console.error("[panel] menu_catalog callback error:", err);
@@ -412,7 +455,7 @@ const panelPlugin: Plugin = {
     });
 
     console.log(
-      "   → /start /menu (deep-link ref support) | hears: 👤 Info User, 🛍️ Catalog, 💳 Topup, 👥 Afiliasi, ❓ Help | callbackQuery: menu_catalog"
+      "   → /start /menu (deep-link ref support) | hears: 👤 Info User, 🛍️ Catalog, 💳 Topup, 👥 Afiliasi, ❓ Help | callbackQuery: menu_catalog",
     );
   },
 };
