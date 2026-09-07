@@ -10,9 +10,10 @@ function state(rentalId: string, status: RentalRuntimeState["status"] = "active"
     plan: "plan", enabledFeatures: ["digital"], status, expiresAt: new Date(Date.now() + 86400_000), graceEndsAt: null };
 }
 
-test("scheduler keeps grace/suspended bots online, stops terminated bot and isolates a failed rental", async () => {
+test("scheduler keeps grace/suspended bots online, stops pending/terminated bots and isolates a failed rental", async () => {
   const bots = new Map<string, Bot<Context>>();
   const placeholder = {} as Bot<Context>;
+  bots.set("pending", placeholder);
   bots.set("terminated", placeholder);
   const starts: string[] = [];
   const stops: string[] = [];
@@ -22,17 +23,21 @@ test("scheduler keeps grace/suspended bots online, stops terminated bot and isol
     startRentalBot: async id => { starts.push(id); bots.set(id, placeholder); },
     stopRentalBot: async id => { stops.push(id); bots.delete(id); },
   }, 60_000, {
-    async *rentalIds() { yield* ["bad", "grace", "suspended", "terminated", "active"]; },
+    async *rentalIds() { yield* ["bad", "grace", "suspended", "pending", "terminated", "active"]; },
     pollPayments: async () => { assert.equal(getTenantContext().tenantId, "platform"); throw new Error("provider unavailable"); },
-    synchronize: async id => { if (id === "bad") throw new Error("one rental unavailable"); return state(id, id === "grace" ? "expired_grace" : id === "suspended" ? "suspended" : id === "terminated" ? "terminated" : "active"); },
+    synchronize: async id => {
+      if (id === "bad") throw new Error("one rental unavailable");
+      return state(id, id === "grace" ? "expired_grace" : id === "suspended" ? "suspended" : id === "pending" ? "pending" : id === "terminated" ? "terminated" : "active");
+    },
     notify: async (_bot, rental) => { notices.push(rental.rentalId); },
   });
   await scheduler.tick();
   assert.deepEqual(starts, ["grace", "suspended", "active"]);
-  assert.deepEqual(stops, ["terminated"]);
+  assert.deepEqual(stops, ["pending", "terminated"]);
   assert.deepEqual(notices, ["grace", "suspended", "active"]);
   assert.equal(bots.has("grace"), true);
   assert.equal(bots.has("suspended"), true);
+  assert.equal(bots.has("pending"), false);
   await scheduler.stop();
 });
 

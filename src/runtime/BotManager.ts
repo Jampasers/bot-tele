@@ -7,6 +7,16 @@ import { onRentalStateChange, refreshRentalState, setRentalRuntimeControls, type
 import { BotInstance } from "./BotInstance.js";
 
 type RentalRecord = { botTokenEncrypted: string; botId: string };
+const RUNNABLE_RENTAL_STATUSES = new Set<RentalRuntimeState["status"]>([
+  "active",
+  "expired_grace",
+  "suspended",
+]);
+
+function canRunRentalBot(status: RentalRuntimeState["status"]): boolean {
+  return RUNNABLE_RENTAL_STATUSES.has(status);
+}
+
 export interface BotManagerDependencies {
   loadRental(id: string): Promise<RentalRecord | null>;
   refreshState(id: string): Promise<RentalRuntimeState | null>;
@@ -34,7 +44,7 @@ export class BotManager {
     this.unsubscribe = onRentalStateChange(state => {
       const instance = this.instances.get(state.rentalId);
       if (!instance) return;
-      if (state.status === "terminated") {
+      if (!canRunRentalBot(state.status)) {
         void this.stopRentalBot(state.rentalId).catch(() => this.logFailure(state.rentalId));
         return;
       }
@@ -73,10 +83,13 @@ export class BotManager {
   private async startInstance(rentalId: string): Promise<Bot<Context> | undefined> {
     if (this.shuttingDown) return undefined;
     const current = this.instances.get(rentalId);
+    const state = await this.dependencies.refreshState(rentalId);
+    if (!state || !canRunRentalBot(state.status)) {
+      if (current) { await current.stop(); this.instances.delete(rentalId); }
+      return undefined;
+    }
     if (current?.running) return current.bot;
     if (current) { await current.stop(); this.instances.delete(rentalId); }
-    const state = await this.dependencies.refreshState(rentalId);
-    if (!state || state.status === "terminated") return undefined;
     const record = await this.dependencies.loadRental(rentalId);
     if (!record || record.botId === this.platformBotId) throw new Error("Rental bot identity conflicts with the platform.");
     for (const instance of this.instances.values()) {
@@ -106,8 +119,7 @@ export class BotManager {
   }
 
   async startAllActiveRentals(): Promise<void> {
-    // Pending bots must also be reachable for their first /renew payment.
-    const cursor = BotRental.find({ status: { $ne: "terminated" } }).select("_id").lean().cursor();
+    const cursor = BotRental.find({ status: { $in: ["active", "expired_grace", "suspended"] } }).select("_id").lean().cursor();
     let batch: Promise<unknown>[] = [];
     for await (const rental of cursor) {
       const id = String(rental._id);

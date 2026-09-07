@@ -36,11 +36,14 @@ export const CB_CATALOG = "menu_catalog" as const;
  * needed for the buttons — prevents it looking like a huge blank slab.
  */
 export function buildMainMenuReplyKeyboard(): Keyboard {
-  return new Keyboard()
+  const keyboard = new Keyboard()
     .text("👤 Info User").text("🛍️ Catalog").row()
     .text("💳 Topup").text("👥 Afiliasi").row()
-    .text("❓ Help")
-    .resized();
+    .text("❓ Help");
+  if (!getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true") {
+    keyboard.row().text("🤖 Sewa Bot");
+  }
+  return keyboard.resized();
 }
 
 // ============================================================================
@@ -152,13 +155,17 @@ function buildTopupText(): string {
 function buildHelpText(): string {
   const tenant = getTenantContext();
   if (tenant.rentalId) return `❓ <b>Bantuan Toko</b>\n\nGunakan /start untuk membuka katalog dan melihat saldo.\nHubungi <a href="tg://user?id=${tenant.ownerTelegramId}">administrator toko</a> untuk bantuan pesanan.\n\nAdmin: /settings, /status, /renew.`;
+  const rentalHelp = process.env["RENTAL_ENABLED"] === "true"
+    ? `\n🤖 <b>Sewa bot otomatis:</b> /sewa\n`
+    : "";
   return (
     `❓ <b>Help & Support</b>\n` +
     `${"─".repeat(28)}\n\n` +
     `Having trouble? We're here to help!\n\n` +
     `📩 <b>Email:</b>    support@example.com\n` +
     `💬 <b>Telegram:</b> <a href="https://t.me/myoneandonlyaccount">@myoneandonlyaccount</a>\n` +
-    `🕐 <b>Hours:</b>    Mon–Fri, 09:30–22:00 WIB\n\n` +
+    `🕐 <b>Hours:</b>    Mon–Fri, 09:30–22:00 WIB\n` +
+    rentalHelp + `\n` +
     `<i>Average response time: under 2 hours.</i>`
   );
 }

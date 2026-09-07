@@ -18,6 +18,7 @@ import type { PaymentTransaction } from "../services/payment/types.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import digitalPlugin from "../plugins/digital/index.js";
 import { rentalMiddleware } from "./rental.middleware.js";
+import { provisionSelfServiceRental } from "./rentalSelfService.service.js";
 
 const uri = process.env.TEST_MONGODB_URI;
 
@@ -30,6 +31,8 @@ test("renewal payment and bot gating with disposable MongoDB and mocked provider
   process.env.GOBIZ_PASSWORD = "offline-test-password";
   process.env.QRIS_STATIC_PAYLOAD = "00020101021126190015ID.CO.GOPAY.WWW53033605802ID5908PLATFORM6007JAKARTA";
   process.env.CREDENTIAL_ENCRYPTION_KEY = randomBytes(32).toString("hex");
+  process.env.BOT_TOKEN = "9999:abcdefghijklmnopqrstuvwxyz";
+  process.env.RENTAL_ENABLED = "true";
   await mongoose.connect(uri!, { dbName, autoCreate: false, autoIndex: false });
   try {
     for (const model of [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, TopupSession, User]) {
@@ -56,18 +59,69 @@ test("renewal payment and bot gating with disposable MongoDB and mocked provider
     ]);
     const reference = invoice.payment.providerReference;
     await t.test("repeated invoice clicks reuse platform invoice; other tenant/customer is denied", async () => {
+      const platformInvoice = await runWithTenant(platformContext(), () => createRentalInvoice(a.rentalId, "101", String(plan._id)));
       assert.equal(reference, sameInvoice.payment.providerReference);
+      assert.equal(platformInvoice.payment.providerReference, reference);
       assert.equal(await RentalPayment.countDocuments({ rentalId: a.rentalId }), 1);
       assert.equal(invoice.payment.merchantId, "test-platform-merchant");
       assert.match(invoice.qris.payload, /PLATFORM/);
       assert.equal(getPlatformPaymentClients().merchantId, "test-platform-merchant");
       await assert.rejects(runWithTenant(a, () => createRentalInvoice(a.rentalId, "999", String(plan._id))), /access denied/);
+      await assert.rejects(runWithTenant(platformContext(), () => createRentalInvoice(a.rentalId, "999", String(plan._id))), /access denied/);
       await assert.rejects(runWithTenant(b, () => checkRentalPayment(reference, "201")), /access denied/);
       await assert.rejects(runWithTenant(a, () => checkRentalPayment(reference)), /platform context/);
     });
+    await t.test("self-service provisions one offline pending rental and platform settlement activates it", async () => {
+      let tokenVerifications = 0;
+      const token = "3000:abcdefghijklmnopqrstuvwxyz";
+      const created = await runWithTenant(platformContext(), () => provisionSelfServiceRental({
+        ownerTelegramId: "301",
+        planId: String(plan._id),
+        botToken: token,
+      }, async () => {
+        tokenVerifications++;
+        return { id: 3000, username: "self_service_test_bot" };
+      }));
+      assert.equal(created.status, "pending");
+      assert.equal(created.planId, String(plan._id));
+      assert.equal((await BotRental.findById(created.rentalId).lean())!.status, "pending");
+
+      const initialInvoice = await runWithTenant(platformContext(), () => createRentalInvoice(
+        created.rentalId,
+        "301",
+        created.planId,
+      ));
+      transactions = [{
+        merchantId: initialInvoice.payment.merchantId,
+        amount: initialInvoice.payment.amount,
+        paidAt: Date.now(),
+        paymentType: "QRIS",
+        status: "SETTLEMENT",
+        transactionId: "tx-self-service",
+      }];
+      const settled = await runWithTenant(platformContext(), () => checkRentalPayment(
+        initialInvoice.payment.providerReference,
+        "301",
+      ));
+      assert.equal(settled.status, "paid");
+      assert.equal(settled.rentalId, created.rentalId);
+      assert.equal((await BotRental.findById(created.rentalId).lean())!.status, "active");
+
+      await assert.rejects(runWithTenant(platformContext(), () => provisionSelfServiceRental({
+        ownerTelegramId: "301",
+        planId: String(plan._id),
+        botToken: "3001:abcdefghijklmnopqrstuvwxyz",
+      }, async () => {
+        tokenVerifications++;
+        return { id: 3001, username: "second_self_service_bot" };
+      })), /sudah terdaftar/);
+      assert.equal(tokenVerifications, 1, "existing owner is rejected before another Telegram token check");
+    });
     await t.test("wrong merchant cannot settle renewal; concurrent valid callbacks extend exactly once", async () => {
       transactions = [{ merchantId: "renter-merchant", amount: invoice.payment.amount, paidAt: Date.now(), paymentType: "QRIS", status: "SETTLEMENT", transactionId: "tx-a" }];
-      assert.equal((await runWithTenant(a, () => checkRentalPayment(reference, "101"))).status, "pending");
+      const platformPending = await runWithTenant(platformContext(), () => checkRentalPayment(reference, "101"));
+      assert.equal(platformPending.status, "pending");
+      assert.equal(platformPending.rentalId, a.rentalId);
       transactions[0]!.merchantId = "test-platform-merchant";
       const results = await Promise.all(Array.from({ length: 8 }, () => runWithTenant(a, () => checkRentalPayment(reference, "101"))));
       assert.ok(results.every(result => result.status === "paid"));
@@ -161,7 +215,7 @@ test("renewal payment and bot gating with disposable MongoDB and mocked provider
     assert.equal(mongoose.connection.db?.databaseName, dbName);
     await mongoose.connection.dropDatabase();
     await mongoose.disconnect();
-    for (const name of ["GOPAY_MERCHANT_ID", "GOBIZ_EMAIL", "GOBIZ_PASSWORD", "QRIS_STATIC_PAYLOAD", "CREDENTIAL_ENCRYPTION_KEY"]) {
+    for (const name of ["GOPAY_MERCHANT_ID", "GOBIZ_EMAIL", "GOBIZ_PASSWORD", "QRIS_STATIC_PAYLOAD", "CREDENTIAL_ENCRYPTION_KEY", "BOT_TOKEN", "RENTAL_ENABLED"]) {
       if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
     }
   }

@@ -32,7 +32,7 @@ async function main(args = process.argv.slice(2)): Promise<void> {
   const { positional, options } = argumentList(args);
   const [command, ...values] = positional;
   if (!command || command === "help") {
-    console.log("Rental admin (dry-run default, tambah --apply untuk menyimpan):\n  plan <code> <durationDays> <priceIDR> <name> [--features digital,affiliate] [--disabled]\n  create <ownerTelegramId> <planCode> [--admins id1,id2] [--active]\n  list\n  payment <rentalId> <config.json>\n\ncreate membaca RENTAL_BOT_TOKEN dari environment; token tidak diterima sebagai argumen CLI.\nDefault rental pending dan dapat /renew; --active memberikan masa aktif sesuai paket tanpa invoice.");
+    console.log("Rental admin (dry-run default, tambah --apply untuk menyimpan):\n  plan <code> <durationDays> <priceIDR> <name> [--features digital,affiliate] [--disabled]\n  create <ownerTelegramId> <planCode> [--admins id1,id2] [--active]\n  list\n  payment <rentalId> <config.json>\n\ncreate membaca RENTAL_BOT_TOKEN dari environment; token tidak diterima sebagai argumen CLI.\nDefault rental pending dan offline sampai owner membayar melalui /sewa di bot platform; --active memberikan masa aktif sesuai paket tanpa invoice.");
     return;
   }
   if (!["plan", "create", "list", "payment"].includes(command)) throw new Error("Perintah tidak dikenal; jalankan help.");
@@ -82,7 +82,9 @@ async function main(args = process.argv.slice(2)): Promise<void> {
       }
       const created = await provisionRental({ ownerTelegramId: ownerId, planCode, botToken: token, adminTelegramIds: admins, active });
       console.log(`CREATED: @${created.botUsername}, status=${created.status}, rentalId=${created.rentalId}, tenantId=${created.tenantId}`);
-      if (apply) console.log("Scheduler platform akan menyalakan bot. Owner membuka /start lalu /renew di bot rental untuk aktivasi/perpanjangan.");
+      if (apply) console.log(active
+        ? "Scheduler platform akan memastikan bot aktif tetap berjalan."
+        : "Owner membuka /sewa di bot platform untuk membuat invoice; bot baru menyala setelah pembayaran terkonfirmasi.");
       return;
     }
     const [rentalId, file] = values;

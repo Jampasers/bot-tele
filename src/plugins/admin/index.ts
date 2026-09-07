@@ -1640,7 +1640,7 @@ const adminPlugin: Plugin = {
       }
       fsubInputState.set(String(ctx.from.id), { action: "RENTAL_CREATE" });
       await ctx.reply(
-        "Kirim data rental dalam satu pesan:\n\n<code>OWNER_ID | KODE_PAKET | BOT_TOKEN | ADMIN_ID1,ADMIN_ID2 | pending</code>\n\nAdmin tambahan boleh diisi <code>-</code>. Status awal dapat <code>pending</code> atau <code>active</code>. Pesan yang berisi token akan dihapus sebelum diproses. Ketik /batal untuk membatalkan.",
+        "Kirim data rental dalam satu pesan:\n\n<code>OWNER_ID | KODE_PAKET | BOT_TOKEN | ADMIN_ID1,ADMIN_ID2 | pending</code>\n\nAdmin tambahan boleh diisi <code>-</code>. Status <code>pending</code> menahan bot offline sampai owner membayar lewat /sewa di bot platform; <code>active</code> memberi masa aktif langsung. Pesan yang berisi token akan dihapus sebelum diproses. Ketik /batal untuk membatalkan.",
         { parse_mode: "HTML" },
       );
     });
@@ -3367,11 +3367,14 @@ const adminPlugin: Plugin = {
         try {
           const input = parseRentalProvisionSetup(text);
           const created = await provisionRental(input);
-          let runtimeMessage = "Bot rental langsung dijalankan.";
-          try { await startProvisionedRental(created.rentalId); }
-          catch {
-            console.warn(`[Rental:${created.rentalId}] Provisioned from platform; runtime start will be retried by scheduler.`);
-            runtimeMessage = "Data tersimpan, tetapi start runtime belum berhasil. Scheduler akan mencoba lagi.";
+          let runtimeMessage = "Bot ditahan offline sampai owner menyelesaikan pembayaran melalui /sewa di bot platform.";
+          if (created.status === "active") {
+            runtimeMessage = "Bot rental langsung dijalankan.";
+            try { await startProvisionedRental(created.rentalId); }
+            catch {
+              console.warn(`[Rental:${created.rentalId}] Provisioned from platform; runtime start will be retried by scheduler.`);
+              runtimeMessage = "Data tersimpan, tetapi start runtime belum berhasil. Scheduler akan mencoba lagi.";
+            }
           }
           await ctx.reply(
             `✅ <b>Rental berhasil dibuat</b>\n\nBot: @${escapeHtml(created.botUsername)}\nRental ID: <code>${created.rentalId}</code>\nTenant ID: <code>${created.tenantId}</code>\nStatus: <b>${created.status}</b>\n\n${runtimeMessage}`,

@@ -41,4 +41,6 @@ const schema = new Schema<IBotRental>({
   lastExpiryAlertAt: { type: Date, default: null },
 }, { timestamps: true });
 
+schema.index({ ownerTelegramId: 1, status: 1, createdAt: -1 });
+
 export const BotRental = model<IBotRental>("BotRental", schema);

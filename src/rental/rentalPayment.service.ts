@@ -8,13 +8,23 @@ import { generatePlatformQris, getPlatformPaymentClients } from "../payments/pla
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
 import { applyRenewal, refreshRentalState, type RentalRuntimeState } from "./rental.service.js";
 
-export interface RentalPaymentResult { status: IRentalPayment["status"]; rental?: RentalRuntimeState }
+export interface RentalPaymentResult {
+  status: IRentalPayment["status"];
+  rentalId: string;
+  rental?: RentalRuntimeState;
+}
 const invoiceLocks = new Map<string, Promise<void>>();
 
 async function authorizeRental(rentalId: string, actorTelegramId: string): Promise<void> {
   const context = getTenantContext();
-  if (context.rentalId !== rentalId || !Types.ObjectId.isValid(rentalId)) throw new Error("Rental access denied.");
-  const rental = await BotRental.findOne({ _id: rentalId, tenantId: context.tenantId, status: { $ne: "terminated" } }).lean();
+  if (!Types.ObjectId.isValid(rentalId)) throw new Error("Rental access denied.");
+  const platformRequest = context.tenantId === PLATFORM_TENANT_ID && !context.rentalId;
+  if (!platformRequest && context.rentalId !== rentalId) throw new Error("Rental access denied.");
+  const rental = await BotRental.findOne({
+    _id: rentalId,
+    ...(platformRequest ? {} : { tenantId: context.tenantId }),
+    status: { $ne: "terminated" },
+  }).lean();
   if (!rental || (rental.ownerTelegramId !== actorTelegramId && !rental.adminTelegramIds.includes(actorTelegramId))) throw new Error("Rental access denied.");
 }
 
@@ -60,9 +70,9 @@ export async function checkRentalPayment(providerReference: string, actorTelegra
   else if (getTenantContext().tenantId !== PLATFORM_TENANT_ID) throw new Error("Payment reconciliation requires platform context.");
   if (payment.status === "paid") {
     const rental = await refreshRentalState(payment.rentalId);
-    return rental ? { status: "paid", rental } : { status: "paid" };
+    return rental ? { status: "paid", rentalId: payment.rentalId, rental } : { status: "paid", rentalId: payment.rentalId };
   }
-  if (payment.status === "expired") return { status: "expired" };
+  if (payment.status === "expired") return { status: "expired", rentalId: payment.rentalId };
   if (payment.status !== "processing") {
     const clients = getPlatformPaymentClients();
     if (clients.merchantId !== payment.merchantId) throw new Error("Platform merchant changed; invoice needs reconciliation.");
@@ -88,18 +98,18 @@ export async function checkRentalPayment(providerReference: string, actorTelegra
         await RentalPayment.updateOne({ _id: payment._id, status: "pending" }, { $set: { status: "expired" } });
       }
       const latest = await RentalPayment.findById(payment._id).lean();
-      return { status: latest?.status ?? "pending" };
+      return { status: latest?.status ?? "pending", rentalId: payment.rentalId };
     }
   }
   const durablePayment = await RentalPayment.findById(payment._id).lean();
   if (!durablePayment || !["processing", "paid"].includes(durablePayment.status)) {
-    return { status: durablePayment?.status ?? "pending" };
+    return { status: durablePayment?.status ?? "pending", rentalId: payment.rentalId };
   }
   // Retry after a crash is safe: the payment receipt and expiry change are one
   // atomic update inside BotRental, before this separate ledger is marked paid.
   const rental = await applyRenewal(payment.rentalId, payment.providerReference, payment.durationDays, payment.planId);
   await RentalPayment.updateOne({ _id: payment._id, status: "processing" }, { $set: { status: "paid" } });
-  return { status: "paid", rental };
+  return { status: "paid", rentalId: payment.rentalId, rental };
 }
 
 export async function pollPendingRentalPayments(): Promise<void> {

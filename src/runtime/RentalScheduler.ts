@@ -46,7 +46,7 @@ export class RentalScheduler {
       for await (const rentalId of this.dependencies.rentalIds()) {
         try {
           const state = await this.dependencies.synchronize(rentalId);
-          if (!state || state.status === "terminated") {
+          if (!state || state.status === "pending" || state.status === "terminated") {
             await this.manager.stopRentalBot?.(rentalId);
             continue;
           }

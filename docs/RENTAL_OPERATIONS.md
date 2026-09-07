@@ -4,12 +4,27 @@ Satu proses Node menjalankan bot platform dan banyak bot rental. Setiap rental m
 
 ## Menyiapkan paket dan rental
 
-Cara utama adalah melalui bot platform. Pastikan `RENTAL_ENABLED=true` dan `CREDENTIAL_ENCRYPTION_KEY` sudah diisi, restart aplikasi, lalu buka `/admin` → **Kelola Bot Rental** atau langsung `/rental` melalui chat pribadi admin platform.
+Pastikan `RENTAL_ENABLED=true` dan `CREDENTIAL_ENCRYPTION_KEY` sudah diisi, lalu restart aplikasi. Admin perlu membuat minimal satu paket aktif melalui `/admin` → **Kelola Bot Rental** atau `/rental` di chat pribadi bot platform.
+
+### Sewa otomatis dari bot platform
+
+Pengguna biasa dapat menyewa tanpa bantuan admin melalui tombol **🤖 Sewa Bot** pada menu utama atau command `/sewa` di chat pribadi bot platform.
+
+1. Pengguna memilih salah satu paket yang masih aktif.
+2. Bot meminta token baru dari BotFather yang khusus dipakai untuk rental tersebut. Token bot platform atau token bot yang sudah terdaftar tidak dapat digunakan.
+3. Pengguna mengirim token di chat pribadi. Pesan token harus berhasil dihapus oleh bot sebelum token dibaca, diverifikasi ke Telegram, dan disimpan terenkripsi. Jika penghapusan gagal, proses dibatalkan dan token tidak diproses.
+4. Bot membuat rental berstatus `pending` dan menerbitkan invoice QRIS melalui payment platform. Bot rental tetap offline selama invoice belum lunas.
+5. Scheduler memeriksa settlement otomatis. Pengguna juga dapat menekan **Cek Pembayaran** pada invoice.
+6. Setelah settlement terkonfirmasi, masa aktif diterapkan satu kali, status menjadi `active`, lalu instance bot rental dimulai otomatis.
+
+Satu Telegram owner hanya dapat membuat satu rental yang belum `terminated` melalui alur otomatis. Jika memerlukan lebih dari satu bot, admin platform dapat membuatnya melalui panel `/rental`; `/sewa` akan memprioritaskan rental `pending` satu per satu, sedangkan bot yang sudah aktif dapat diperpanjang melalui `/renew` pada bot masing-masing. Token harus berasal dari bot BotFather baru yang tidak dipakai oleh proses lain; jangan kirim token melalui grup, tiket, atau log.
+
+### Provisioning oleh admin platform
 
 1. Pilih **Tambah Paket**, lalu kirim `kode | durasi_hari | harga | nama | fitur`.
 2. Pilih **Tambah Rental**, lalu kirim `OWNER_ID | KODE_PAKET | BOT_TOKEN | ADMIN_ID1,ADMIN_ID2 | pending`.
-3. Admin tambahan boleh diisi `-`. Gunakan status `pending` agar owner mengaktifkan lewat `/renew`, atau `active` untuk memberi masa aktif awal sesuai paket.
-4. Pesan token harus berhasil dihapus oleh bot sebelum diproses. Token diverifikasi ke Telegram, disimpan terenkripsi, lalu instance rental langsung dijalankan. Jika start pertama gagal, scheduler mencoba lagi.
+3. Admin tambahan boleh diisi `-`. Gunakan status `pending` agar owner membuat invoice awal lewat `/sewa` pada bot platform, atau `active` untuk memberi masa aktif awal sesuai paket.
+4. Pesan token harus berhasil dihapus oleh bot sebelum diproses. Token diverifikasi ke Telegram dan disimpan terenkripsi. Rental `active` langsung dijalankan; rental `pending` tetap offline sampai pembayaran terkonfirmasi.
 
 Menu yang sama menampilkan maksimal 30 paket dan rental terbaru. Provisioning hanya tersedia pada bot platform dan hanya melalui chat pribadi admin numerik dari `ADMIN_ID`.
 
@@ -34,7 +49,7 @@ node dist/scripts/rentalAdmin.js create 123456789 monthly --apply
 node dist/scripts/rentalAdmin.js list
 ```
 
-Rental baru berstatus `pending`. Scheduler akan menjalankan bot tersebut agar owner dapat membuka `/start` dan membayar paket pertama melalui `/renew`. Jangan memulai proses Node tambahan untuk token yang sama.
+Rental yang dibuat melalui CLI berstatus `pending`. Jalur darurat ini mengikuti provisioning operator; alur otomatis pengguna menerbitkan invoice pada bot platform dan menahan bot rental tetap offline sampai pembayaran berhasil. Jangan memulai proses Node tambahan untuk token yang sama.
 
 `create ... --active --apply` secara eksplisit memberi masa aktif awal sesuai paket tanpa invoice. Gunakan hanya jika operator memang memberikan aktivasi awal. `--admins 111111111,222222222` menambahkan admin berdasarkan ID Telegram. Owner dan admin dapat mengelola rental; username tidak digunakan sebagai dasar otorisasi.
 
@@ -93,13 +108,13 @@ Middleware membaca cache runtime dan membandingkan waktu berakhir dengan waktu s
 
 | Status | Perilaku |
 | --- | --- |
-| `pending` | Bot online; owner/admin dapat membayar aktivasi melalui `/renew`. |
+| `pending` | Bot tetap offline sampai invoice platform lunas atau operator memberi aktivasi awal. Owner membuat invoice awal lewat `/sewa` pada bot platform. |
 | `active` | Fitur toko berjalan sesuai paket dan konfigurasi tenant. |
 | `expired_grace` | Bot online, bisnis dikunci, grace berakhir tepat `expiresAt + 24 jam`. |
 | `suspended` | Bot online, bisnis dikunci, `/renew` tetap dapat digunakan. |
 | `terminated` | Runtime dihentikan ketika scheduler melihat status ini. |
 
-Saat tidak aktif, owner/admin tetap dapat memakai `/start`, `/renew`, `/status`, `/help`, dan tombol renewal. Perintah bisnis dan callback lama menampilkan warning serta tombol perpanjangan. Customer mendapat pesan layanan tidak aktif. Renewal/payment settings/status hanya diperbolehkan pada chat pribadi owner/admin.
+Saat status `expired_grace` atau `suspended`, owner/admin tetap dapat memakai `/start`, `/renew`, `/status`, `/help`, dan tombol renewal. Rental `pending` diaktifkan dari bot platform melalui `/sewa` karena instance belum berjalan. Perintah bisnis dan callback lama menampilkan warning serta tombol perpanjangan. Customer mendapat pesan layanan tidak aktif. Renewal/payment settings/status hanya diperbolehkan pada chat pribadi owner/admin.
 
 Reminder dikirim kepada owner di bot rental pada H-3, H-1, expiry, +1, +3, +6, +12, +18, +23, dan +24 jam. Owner harus sudah memulai chat dengan bot agar Telegram mengizinkan pengiriman. State milestone disimpan dalam `BotRental`; restart server tidak mengulang milestone yang sudah diklaim. Setelah downtime, satu pesan terbaru mewakili milestone yang terlewat. Tidak ada spam setiap menit.
 
@@ -109,7 +124,7 @@ Telegram tidak menyediakan idempotency key untuk `sendMessage`. Marker diklaim s
 
 Transaksi customer memakai QRIS/GoPay tenant. Invoice `/renew` selalu dibuat lewat payment platform dan dicatat di `RentalPayment`, terpisah dari `TopupSession` toko. Nominal, durasi, rental, dan provider reference berasal dari invoice tersimpan.
 
-Pembayaran diperiksa otomatis oleh scheduler dan dapat diperiksa lewat tombol Cek Pembayaran. Status `processing` berarti penyelesaian invoice sedang dipulihkan/diproses. Setelah berhasil, rental diaktifkan dan cache diperbarui sehingga fitur tersedia kembali tanpa restart.
+Pembayaran diperiksa otomatis oleh scheduler dan dapat diperiksa lewat tombol Cek Pembayaran. Status `processing` berarti penyelesaian invoice sedang dipulihkan/diproses. Setelah berhasil, rental diaktifkan dan cache diperbarui. Untuk sewa awal dari bot platform, instance rental yang sebelumnya offline juga dimulai otomatis.
 
 Masa aktif baru dihitung dari `max(expiresAt lama, waktu pembayaran diproses) + durationDays`. Renewal sebelum expiry menambah sisa masa aktif. Penerapan expiry dan receipt ID pembayaran memakai satu update atomik rental; pemeriksaan ulang invoice atau pemulihan sesudah crash tidak menambah durasi dua kali.
 
@@ -135,5 +150,7 @@ Smoke test live harus memakai database uji terisolasi, dua bot BotFather uji, me
 7. Tempatkan expiry fixture pada batas H-3/H-1/+1 jam, lalu tunggu tick. Pastikan reminder hanya ke owner rental yang sesuai. Restart aplikasi: milestone yang sudah diklaim tidak dikirim ulang.
 8. Putuskan/revoke token A pada lingkungan uji. B dan platform harus tetap melayani update. Pulihkan token dengan prosedur operator, lalu restart instance A.
 9. Hentikan Node secara normal. Scheduler selesai, seluruh runner berhenti, lalu koneksi database ditutup; tidak ada instance polling tersisa.
+
+Untuk alur sewa otomatis, lakukan smoke test tambahan memakai owner dan bot BotFather uji: buka `/sewa`, pilih paket, kirim token di chat pribadi, pastikan pesan token terhapus, dan pastikan bot rental belum merespons sebelum pembayaran. Selesaikan invoice uji, lalu pastikan scheduler atau tombol **Cek Pembayaran** mengaktifkan serta memulai bot tepat satu kali. Ulangi `/sewa` dengan owner yang sama dan pastikan rental kedua ditolak.
 
 Tes lokal tidak membuktikan token, izin channel, QRIS, credential merchant, konektivitas Telegram, atau settlement nyata bekerja. Validasi tersebut membutuhkan smoke test terkontrol di lingkungan operator.

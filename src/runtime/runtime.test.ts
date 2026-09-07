@@ -38,10 +38,19 @@ test("two bot instances retain independent async tenant context; start/restart/s
   const created: string[] = [];
   const stopped: string[] = [];
   const contexts: string[] = [];
-  const states = new Map([["a", state("a")], ["b", state("b", "suspended")], ["bad", state("bad")]]);
+  const states = new Map([
+    ["a", state("a")],
+    ["b", state("b", "suspended")],
+    ["bad", state("bad")],
+    ["pending", state("pending", "pending")],
+  ]);
+  const loaded: string[] = [];
   const manager = new BotManager("999", {
     refreshState: async id => states.get(id) ?? null,
-    loadRental: async id => ({ botId: id === "a" ? "1" : "2", botTokenEncrypted: id }),
+    loadRental: async id => {
+      loaded.push(id);
+      return { botId: id === "a" ? "1" : "2", botTokenEncrypted: id };
+    },
     decryptToken: encrypted => encrypted,
     createBot: async (token, context) => {
       await delay(2);
@@ -62,12 +71,15 @@ test("two bot instances retain independent async tenant context; start/restart/s
     }),
   });
   try {
+    assert.equal(await manager.startRentalBot("pending"), undefined, "pending rental cannot start long polling");
+    assert.equal(loaded.includes("pending"), false, "pending rental token must not be loaded");
     const results = await Promise.allSettled([manager.startRentalBot("a"), manager.startRentalBot("a"), manager.startRentalBot("b"), manager.startRentalBot("bad")]);
     assert.equal(results.filter(result => result.status === "rejected").length, 1);
     assert.deepEqual(created.sort(), ["a", "b"]);
     assert.deepEqual(contexts.sort(), ["tenant_a", "tenant_b"]);
     assert.ok(manager.getRentalBot("a"));
     assert.ok(manager.getRentalBot("b"), "suspended bot keeps polling");
+    assert.equal(manager.getRentalBot("pending"), undefined);
     await manager.restartRentalBot("a");
     assert.equal(created.filter(id => id === "a").length, 2);
     await manager.stopRentalBot("b");

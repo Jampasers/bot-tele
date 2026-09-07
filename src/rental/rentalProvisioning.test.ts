@@ -49,11 +49,20 @@ test("platform provisioning verifies identity and stores an encrypted token", as
   ));
 
   assert.equal(result.botUsername, "rental_test_bot");
+  assert.equal(result.planId, String(planId));
   assert.equal(result.status, "active");
   assert.equal(stored?.["ownerTelegramId"], "42");
   assert.equal(stored?.["status"], "active");
   assert.notEqual(stored?.["botTokenEncrypted"], token);
   assert.match(String(stored?.["botTokenEncrypted"]), /^v1\./);
+
+  await assert.rejects(
+    runWithTenant(platformContext(), () => provisionRental(
+      { ownerTelegramId: "42", planCode: "monthly", botToken: token, active: false },
+      async () => ({ id: 1001, username: "wrong_identity_bot" }),
+    )),
+    /Identitas token/,
+  );
 });
 
 test("main bot parses pending and active rental provisioning input", () => {

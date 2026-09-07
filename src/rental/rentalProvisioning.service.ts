@@ -94,7 +94,7 @@ export async function saveRentalPlan(input: RentalPlanInput): Promise<Awaited<Re
 export async function provisionRental(
   input: RentalProvisionInput,
   verifyToken: (token: string) => Promise<VerifiedBotIdentity> = async token => new Bot(token).api.getMe(),
-): Promise<{ rentalId: string; tenantId: string; botUsername: string; status: "active" | "pending" }> {
+): Promise<{ rentalId: string; tenantId: string; botUsername: string; planId: string; status: "active" | "pending" }> {
   assertPlatform();
   const platformToken = process.env["BOT_TOKEN"] ?? "";
   validateProvisionIdentity(input.ownerTelegramId, input.botToken, platformToken);
@@ -108,9 +108,10 @@ export async function provisionRental(
   let identity: VerifiedBotIdentity;
   try { identity = await verifyToken(input.botToken); }
   catch { throw new Error("Token rental belum berhasil diverifikasi ke Telegram."); }
-  if (!identity.username || String(identity.id) === platformToken.split(":")[0]) {
-    throw new Error("Bot platform tidak dapat dijadikan rental.");
+  if (!identity.username || String(identity.id) !== input.botToken.split(":")[0]) {
+    throw new Error("Identitas token bot rental tidak valid.");
   }
+  if (String(identity.id) === platformToken.split(":")[0]) throw new Error("Bot platform tidak dapat dijadikan rental.");
   if (await BotRental.exists({ botId: String(identity.id) })) throw new Error("Bot sudah terdaftar sebagai rental.");
 
   const id = new Types.ObjectId();
@@ -118,20 +119,33 @@ export async function provisionRental(
   const active = input.active === true;
   const now = new Date();
   await BotRental.createIndexes();
-  await BotRental.create({
-    _id: id,
+  try {
+    await BotRental.create({
+      _id: id,
+      tenantId,
+      ownerTelegramId: input.ownerTelegramId,
+      adminTelegramIds: admins,
+      botTokenEncrypted: encryptSecret(input.botToken, `${tenantId}:botToken`),
+      botId: String(identity.id),
+      botUsername: identity.username,
+      plan: String(plan._id),
+      enabledFeatures: plan.enabledFeatures,
+      status: active ? "active" : "pending",
+      startedAt: active ? now : null,
+      expiresAt: active ? new Date(now.getTime() + plan.durationDays * DAY_MS) : now,
+      graceEndsAt: null,
+    });
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) {
+      throw new Error("Bot tidak tersedia untuk rental.");
+    }
+    throw error;
+  }
+  return {
+    rentalId: id.toString(),
     tenantId,
-    ownerTelegramId: input.ownerTelegramId,
-    adminTelegramIds: admins,
-    botTokenEncrypted: encryptSecret(input.botToken, `${tenantId}:botToken`),
-    botId: String(identity.id),
     botUsername: identity.username,
-    plan: String(plan._id),
-    enabledFeatures: plan.enabledFeatures,
+    planId: String(plan._id),
     status: active ? "active" : "pending",
-    startedAt: active ? now : null,
-    expiresAt: active ? new Date(now.getTime() + plan.durationDays * DAY_MS) : now,
-    graceEndsAt: null,
-  });
-  return { rentalId: id.toString(), tenantId, botUsername: identity.username, status: active ? "active" : "pending" };
+  };
 }
