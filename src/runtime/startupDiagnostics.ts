@@ -28,7 +28,11 @@ export function formatStartupFailure(stage: StartupStage, error: unknown): strin
     return "Startup failed during environment validation: BOT_TOKEN and MONGODB_URI are required in .env.";
   }
   if (stage === "environment" && message.startsWith("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes")) {
-    return "Startup failed during environment validation: CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters or base64. Keep this key unchanged after rental credentials are stored.";
+    const detectedLength = message.match(/Detected (\d+) characters\./)?.[1];
+    const detected = detectedLength === "0"
+      ? " The variable is empty or the .env file was not loaded."
+      : detectedLength ? ` Detected ${detectedLength} characters; expected 64 hex characters or 43-44 base64/base64url characters.` : "";
+    return `Startup failed during environment validation: CREDENTIAL_ENCRYPTION_KEY is missing or invalid.${detected} Keep this key unchanged after rental credentials are stored.`;
   }
   if (stage === "rental-webhook" && message === "Invalid RENTAL_WEBHOOK_PORT.") {
     return "Startup failed during rental webhook setup: RENTAL_WEBHOOK_PORT must be 0 or an integer from 1 to 65535.";

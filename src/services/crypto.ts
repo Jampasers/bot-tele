@@ -5,8 +5,12 @@ function encryptionKey(): Buffer {
   const encoded = process.env["CREDENTIAL_ENCRYPTION_KEY"]?.trim() ?? "";
   const key = /^[a-f\d]{64}$/i.test(encoded)
     ? Buffer.from(encoded, "hex")
-    : /^[A-Za-z\d+/]{43}=$/.test(encoded) ? Buffer.from(encoded, "base64") : Buffer.alloc(0);
-  if (key.length !== 32) throw new Error("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters or base64.");
+    : /^[A-Za-z\d+/_-]{43}=?$/.test(encoded) ? Buffer.from(encoded, "base64url") : Buffer.alloc(0);
+  if (key.length !== 32) {
+    throw new Error(
+      `CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters, base64, or base64url. Detected ${encoded.length} characters.`,
+    );
+  }
   return key;
 }
 

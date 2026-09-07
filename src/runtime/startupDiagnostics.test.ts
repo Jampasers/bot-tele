@@ -8,8 +8,12 @@ test("startup diagnostics expose safe configuration guidance", () => {
     /BOT_TOKEN and MONGODB_URI are required in \.env/,
   );
   assert.match(
-    formatStartupFailure("environment", new Error("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters or base64.")),
-    /CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes/,
+    formatStartupFailure("environment", new Error("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters, base64, or base64url. Detected 61 characters.")),
+    /Detected 61 characters; expected 64 hex characters or 43-44 base64\/base64url characters/,
+  );
+  assert.match(
+    formatStartupFailure("environment", new Error("CREDENTIAL_ENCRYPTION_KEY must contain 32 random bytes encoded as 64 hex characters, base64, or base64url. Detected 0 characters.")),
+    /variable is empty or the \.env file was not loaded/,
   );
   assert.match(
     formatStartupFailure("rental-webhook", new Error("Invalid RENTAL_WEBHOOK_PORT.")),

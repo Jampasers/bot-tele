@@ -37,10 +37,12 @@ test("AES-GCM encrypts with fresh IVs and rejects tampering, wrong key, wrong te
   process.env["CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
   validateEncryptionKey();
   assert.throws(() => decryptSecret(first, "a:payment:password"), /decryption failed/);
+  process.env["CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64url");
+  validateEncryptionKey();
   delete process.env["CREDENTIAL_ENCRYPTION_KEY"];
-  assert.throws(validateEncryptionKey, /32 random bytes/);
+  assert.throws(validateEncryptionKey, /Detected 0 characters/);
   process.env["CREDENTIAL_ENCRYPTION_KEY"] = "x".repeat(32);
-  assert.throws(validateEncryptionKey, /32 random bytes/);
+  assert.throws(validateEncryptionKey, /Detected 32 characters/);
 });
 
 test("payment matching rejects another merchant, amount, method, status and outside invoice time", async () => {
