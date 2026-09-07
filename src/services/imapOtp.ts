@@ -51,6 +51,20 @@ export interface ImapStatusSummary {
   pid?: number | undefined;
 }
 
+export function normalizeImapStatusDates(status: ImapStatusSummary): ImapStatusSummary {
+  return {
+    ...status,
+    lastConnectedAt: normalizeOptionalDate(status.lastConnectedAt),
+    lastReceivedAt: normalizeOptionalDate(status.lastReceivedAt),
+  };
+}
+
+function normalizeOptionalDate(value: unknown): Date | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const date = value instanceof Date ? value : new Date(value as string | number);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 // ============================================================================
 //  IMAP Process Supervisor (Main Thread)
 // ============================================================================
@@ -157,14 +171,14 @@ export class ImapOtpService {
         if (!msg || typeof msg !== "object") return;
 
         if (msg.type === "STATUS_UPDATE" && msg.payload) {
-          this.cachedStatus = msg.payload;
+          this.cachedStatus = normalizeImapStatusDates(msg.payload);
         } else if (msg.reqId && this.pendingRequests.has(msg.reqId)) {
           const req = this.pendingRequests.get(msg.reqId)!;
           clearTimeout(req.timeout);
           this.pendingRequests.delete(msg.reqId);
 
           if (msg.type === "STATUS_RESP") {
-            req.resolve(msg.payload);
+            req.resolve(normalizeImapStatusDates(msg.payload));
           } else if (msg.type === "TEST_RESP") {
             req.resolve(msg.result);
           } else if (msg.type === "FETCH_RESP") {
@@ -239,8 +253,8 @@ export class ImapOtpService {
     if (this.child && this.child.connected) {
       try {
         const status = await this.sendIpcRequest<ImapStatusSummary>("GET_STATUS", {}, 3000);
-        this.cachedStatus = status;
-        return status;
+        this.cachedStatus = normalizeImapStatusDates(status);
+        return this.cachedStatus;
       } catch {
         if (this.cachedStatus) return this.cachedStatus;
       }

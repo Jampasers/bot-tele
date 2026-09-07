@@ -90,7 +90,10 @@ interface PendingRollbackSession {
 
 const pendingRollbackSessions = new Map<string, PendingRollbackSession>();
 
-function formatDateWIB(date: Date = new Date()): string {
+function formatDateWIB(date: Date | string | number | null | undefined = new Date()): string {
+  const parsedDate = date instanceof Date ? date : new Date(date ?? Date.now());
+  if (Number.isNaN(parsedDate.getTime())) return "-";
+
   return (
     new Intl.DateTimeFormat("id-ID", {
       timeZone: "Asia/Jakarta",
@@ -100,7 +103,7 @@ function formatDateWIB(date: Date = new Date()): string {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-    }).format(date) + " WIB"
+    }).format(parsedDate) + " WIB"
   );
 }
 
