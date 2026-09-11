@@ -108,6 +108,7 @@ export async function applyRenewal(rentalId: string, paymentId: string, duration
 export interface RentalRuntimeControls {
   restartRentalBot(rentalId: string): Promise<unknown>;
   startRentalBot(rentalId: string): Promise<unknown>;
+  stopRentalBot?(rentalId: string): Promise<unknown>;
 }
 let runtimeControls: RentalRuntimeControls | undefined;
 export function setRentalRuntimeControls(controls: RentalRuntimeControls): void { runtimeControls = controls; }
@@ -120,3 +121,162 @@ export async function startProvisionedRental(rentalId: string): Promise<void> {
   if (!runtimeControls) throw new Error("Runtime rental belum aktif.");
   await runtimeControls.startRentalBot(rentalId);
 }
+
+export async function stopProvisionedRental(rentalId: string): Promise<void> {
+  if (runtimeControls?.stopRentalBot) {
+    await runtimeControls.stopRentalBot(rentalId);
+  }
+}
+
+export interface RentalRefundCalculation {
+  planName: string;
+  planPrice: number;
+  durationDays: number;
+  dailyRate: number;
+  daysUsed: number;
+  daysRemaining: number;
+  usedCost: number;
+  refundAmount: number;
+}
+
+export interface RentalRefundResult extends RentalRefundCalculation {
+  credited: boolean;
+  newBalance?: number | undefined;
+  ownerTelegramId: string;
+}
+
+export interface TerminateRentalOptions {
+  actorTelegramId?: string | undefined;
+  refundIfOwner?: boolean | undefined;
+}
+
+export type TerminateRentalResult = RentalRuntimeState & {
+  refund?: RentalRefundResult | undefined;
+};
+
+export function calculateRentalRefund(
+  rental: { status: string; startedAt?: Date | null; expiresAt: Date; plan?: string },
+  plan: { price: number; durationDays: number; name?: string },
+  now = new Date(),
+): RentalRefundCalculation {
+  const durationDays = Math.max(1, plan.durationDays);
+  const dailyRateExact = plan.price / durationDays;
+
+  const result: RentalRefundCalculation = {
+    planName: plan.name ?? "Rental",
+    planPrice: plan.price,
+    durationDays,
+    dailyRate: Math.round(dailyRateExact),
+    daysUsed: durationDays,
+    daysRemaining: 0,
+    usedCost: plan.price,
+    refundAmount: 0,
+  };
+
+  if (rental.status !== "active" || !rental.expiresAt) {
+    return result;
+  }
+
+  const remainingMs = rental.expiresAt.getTime() - now.getTime();
+  if (remainingMs <= 0) {
+    return result;
+  }
+
+  const rawRemainingDays = Math.floor(remainingMs / DAY_MS);
+  const potentialRemaining = Math.max(0, Math.min(durationDays, rawRemainingDays));
+  const daysUsed = Math.max(1, Math.min(durationDays, durationDays - potentialRemaining));
+  const daysRemaining = Math.max(0, durationDays - daysUsed);
+
+  const usedCost = Math.min(plan.price, Math.round(daysUsed * dailyRateExact));
+  const refundAmount = Math.max(0, plan.price - usedCost);
+
+  result.dailyRate = Math.round(dailyRateExact);
+  result.daysUsed = daysUsed;
+  result.daysRemaining = daysRemaining;
+  result.usedCost = usedCost;
+  result.refundAmount = refundAmount;
+
+  return result;
+}
+
+export async function terminateRental(
+  rentalId: string,
+  options?: TerminateRentalOptions,
+): Promise<TerminateRentalResult | null> {
+  if (!Types.ObjectId.isValid(rentalId)) return null;
+  const existing = await BotRental.findById(rentalId).lean();
+  if (!existing) return null;
+
+  let refundResult: RentalRefundResult | undefined;
+
+  if (existing.status === "active") {
+    let plan = null;
+    if (Types.ObjectId.isValid(existing.plan)) {
+      plan = await RentalPlan.findById(existing.plan).lean();
+    }
+    if (!plan) {
+      plan = await RentalPlan.findOne({ code: existing.plan }).lean();
+    }
+    if (plan) {
+      const calc = calculateRentalRefund(existing, plan);
+      refundResult = {
+        ...calc,
+        credited: false,
+        ownerTelegramId: existing.ownerTelegramId,
+      };
+
+      const shouldRefund =
+        Boolean(options?.refundIfOwner) &&
+        Boolean(options?.actorTelegramId) &&
+        options?.actorTelegramId === existing.ownerTelegramId &&
+        calc.refundAmount > 0;
+
+      if (shouldRefund) {
+        try {
+          const { adjustBalance } = await import("../services/balance.js");
+          const adjustRes = await adjustBalance(
+            existing.ownerTelegramId,
+            calc.refundAmount,
+            "REFUND",
+            `Refund pembatalan sewa bot @${existing.botUsername} (${calc.daysRemaining} hari sisa)`,
+          );
+          if (adjustRes.success) {
+            refundResult.credited = true;
+            if (adjustRes.newBalance !== undefined) {
+              refundResult.newBalance = adjustRes.newBalance;
+            }
+          }
+        } catch (err) {
+          console.warn(`[Rental:${rentalId}] Failed to credit refund to user ${existing.ownerTelegramId}:`, err);
+        }
+      }
+    }
+  }
+
+  const updated = await BotRental.findByIdAndUpdate(
+    rentalId,
+    { $set: { status: "terminated", updatedAt: new Date() } },
+    { returnDocument: "after" },
+  ).lean();
+  if (!updated) return null;
+  const state = cacheRental(updated);
+  try {
+    await stopProvisionedRental(rentalId);
+  } catch (error) {
+    console.warn(`[Rental:${rentalId}] Stop runtime failed during termination:`, error);
+  }
+  try {
+    const { RentalPayment } = await import("../models/RentalPayment.js");
+    await RentalPayment.updateMany(
+      { rentalId, status: { $in: ["pending", "processing"] } },
+      { $set: { status: "expired" } },
+    );
+  } catch {
+    // Payment ledger update is best-effort
+  }
+  return {
+    ...state,
+    ...(refundResult ? { refund: refundResult } : {}),
+  };
+}
+

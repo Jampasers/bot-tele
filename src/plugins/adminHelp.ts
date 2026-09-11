@@ -115,6 +115,7 @@ const ADMIN_HELP_SECTIONS: Readonly<Record<AdminHelpSectionId, AdminHelpSection>
       "<code>/ban &lt;telegramId&gt; [alasan]</code>",
       "<code>/unban &lt;telegramId&gt;</code>",
       "<code>/rental</code> — kelola paket dan bot rental",
+      "<code>/cancelrental</code> — batalkan/hentikan bot rental",
     ],
   },
 };

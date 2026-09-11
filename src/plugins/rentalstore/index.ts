@@ -3,6 +3,7 @@ import type { Plugin } from "../../types/Plugin.js";
 import {
   assertSelfServiceRentalReady,
   findOwnedRental,
+  listOwnedRentals,
   listSelfServiceRentalPlans,
   provisionSelfServiceRental,
   type OwnedRentalSummary,
@@ -15,7 +16,12 @@ import {
   type RentalBalancePaymentResult,
   type RentalPaymentResult,
 } from "../../rental/rentalPayment.service.js";
-import { startProvisionedRental } from "../../rental/rental.service.js";
+import {
+  startProvisionedRental,
+  terminateRental,
+  calculateRentalRefund,
+  type RentalRefundResult,
+} from "../../rental/rental.service.js";
 import {
   cleanupRentalTokenInputs,
   clearRentalTokenInput,
@@ -53,6 +59,7 @@ export interface RentalStoreDependencies {
   assertReady(): void;
   listPlans(): Promise<SelfServiceRentalPlan[]>;
   findRental(ownerTelegramId: string): Promise<OwnedRentalSummary | null>;
+  listRentals?(ownerTelegramId: string): Promise<OwnedRentalSummary[]>;
   provision(input: {
     ownerTelegramId: string;
     planId: string;
@@ -73,6 +80,7 @@ export interface RentalStoreDependencies {
     actorTelegramId: string,
   ): Promise<RentalPaymentResult>;
   startRental(rentalId: string): Promise<void>;
+  cancelRental?(rentalId: string, actorTelegramId?: string | undefined): Promise<unknown>;
 }
 
 const defaults: RentalStoreDependencies = {
@@ -80,11 +88,14 @@ const defaults: RentalStoreDependencies = {
   assertReady: assertSelfServiceRentalReady,
   listPlans: listSelfServiceRentalPlans,
   findRental: findOwnedRental,
+  listRentals: listOwnedRentals,
   provision: provisionSelfServiceRental,
   payBalance: activatePendingRentalFromBalance,
   createInvoice: createRentalInvoice,
   checkPayment: (reference, actor) => checkRentalPayment(reference, actor),
   startRental: startProvisionedRental,
+  cancelRental: (rentalId: string, actorTelegramId?: string | undefined) =>
+    terminateRental(rentalId, { actorTelegramId, refundIfOwner: true }),
 };
 
 const formatPrice = (amount: number): string =>
@@ -178,16 +189,31 @@ export function createRentalStorePlugin(
     return true;
   }
 
+  async function getRentals(ownerTelegramId: string): Promise<OwnedRentalSummary[]> {
+    if (overrides.listRentals) {
+      return overrides.listRentals(ownerTelegramId);
+    }
+    if (overrides.findRental) {
+      const single = await overrides.findRental(ownerTelegramId);
+      return single ? [single] : [];
+    }
+    if (dependencies.listRentals) {
+      return dependencies.listRentals(ownerTelegramId);
+    }
+    const single = await dependencies.findRental(ownerTelegramId);
+    return single ? [single] : [];
+  }
+
   async function loadShop(ownerTelegramId: string): Promise<{
-    rental: OwnedRentalSummary | null;
+    rentals: OwnedRentalSummary[];
     plans: SelfServiceRentalPlan[];
   }> {
     dependencies.assertReady();
-    const [rental, plans] = await Promise.all([
-      dependencies.findRental(ownerTelegramId),
+    const [rentals, plans] = await Promise.all([
+      getRentals(ownerTelegramId),
       dependencies.listPlans(),
     ]);
-    return { rental, plans };
+    return { rentals, plans };
   }
 
   async function showShop(ctx: Context): Promise<void> {
@@ -196,9 +222,27 @@ export function createRentalStorePlugin(
     const ownerTelegramId = String(ctx.from.id);
     clearRentalTokenInput(ownerTelegramId);
     try {
-      const { rental, plans } = await loadShop(ownerTelegramId);
+      const { rentals, plans } = await loadShop(ownerTelegramId);
       const keyboard = new InlineKeyboard();
-      if (rental) {
+
+      if (rentals.length === 0) {
+        for (const plan of plans)
+          keyboard.text(planButton(plan), `rs_new_${plan.id}`).row();
+        await ctx.reply(
+          "🤖 <b>Sewa Bot</b>\n\n" +
+            "1. Pilih paket.\n" +
+            "2. Kirim token bot baru dari @BotFather melalui chat ini.\n" +
+            "3. Biaya dipotong otomatis dari saldo main bot.\n" +
+            "4. Bot aktif otomatis setelah pembayaran terkonfirmasi.\n\n" +
+            "Gunakan token khusus rental. Siapa pun yang memegang token dapat mengendalikan bot tersebut.\n\n" +
+            (plans.length ? "Pilih paket:" : "Belum ada paket rental aktif."),
+          { reply_markup: keyboard, parse_mode: "HTML" },
+        );
+        return;
+      }
+
+      if (rentals.length === 1) {
+        const rental = rentals[0]!;
         const url = botUrl(rental.botUsername);
         if (url && rental.status !== "pending")
           keyboard.url("🤖 Buka Bot Saya", url).row();
@@ -207,26 +251,33 @@ export function createRentalStorePlugin(
             .text(planButton(plan), `rs_pay_${rental.rentalId}_${plan.id}`)
             .row();
         }
+        keyboard.text("➕ Sewa Bot Baru", "rs_new_menu").row();
+        keyboard.text("🛑 Batalkan Rental Ini", `rs_cancel_${rental.rentalId}`).row();
         await ctx.reply(
-          `🤖 Rental Saya\n\n${rentalLine(rental)}\n\n` +
+          `🤖 <b>Rental Saya</b>\n\n${rentalLine(rental)}\n\n` +
             (plans.length
-              ? "Pilih paket untuk aktivasi atau memperpanjang masa sewa."
+              ? "Pilih paket untuk aktivasi atau memperpanjang masa sewa, atau klik tombol di bawah untuk menambah bot baru."
               : "Belum ada paket rental aktif."),
-          { reply_markup: keyboard },
+          { reply_markup: keyboard, parse_mode: "HTML" },
         );
         return;
       }
-      for (const plan of plans)
-        keyboard.text(planButton(plan), `rs_new_${plan.id}`).row();
+
+      const lines = rentals.map((r, i) => {
+        const tag = r.status === "active" ? "🟢" : r.status === "pending" ? "⏳" : "⚠️";
+        const exp = r.status === "pending" ? "menunggu pembayaran" : `${formatDate(r.expiresAt)} WIB`;
+        return `${i + 1}. ${tag} <b>@${r.botUsername}</b> (${r.status})\n   Masa aktif: ${exp}`;
+      });
+      for (const r of rentals) {
+        const tag = r.status === "active" ? "🟢" : r.status === "pending" ? "⏳" : "⚠️";
+        keyboard.text(`${tag} @${r.botUsername}`, `rs_bot_${r.rentalId}`).row();
+      }
+      keyboard.text("➕ Sewa Bot Baru", "rs_new_menu").row();
       await ctx.reply(
-        "🤖 Sewa Bot\n\n" +
-          "1. Pilih paket.\n" +
-          "2. Kirim token bot baru dari @BotFather melalui chat ini.\n" +
-          "3. Biaya dipotong otomatis dari saldo main bot.\n" +
-          "4. Bot aktif otomatis setelah pembayaran terkonfirmasi.\n\n" +
-          "Gunakan token khusus rental. Siapa pun yang memegang token dapat mengendalikan bot tersebut.\n\n" +
-          (plans.length ? "Pilih paket:" : "Belum ada paket rental aktif."),
-        { reply_markup: keyboard },
+        `🤖 <b>Rental Saya</b> (${rentals.length} Bot Terdaftar)\n\n` +
+          lines.join("\n\n") +
+          "\n\nPilih bot di bawah untuk kelola atau perpanjang masa sewa:",
+        { reply_markup: keyboard, parse_mode: "HTML" },
       );
     } catch (error) {
       const setupMessage = rentalSetupMessage(error);
@@ -235,6 +286,73 @@ export function createRentalStorePlugin(
         setupMessage
           ?? "⚠️ Sewa bot otomatis belum tersedia karena layanan sedang bermasalah. Coba kembali atau hubungi admin platform.",
       );
+    }
+  }
+
+  async function showBotDetail(ctx: Context, rentalId: string): Promise<void> {
+    if ((await rejectNonPrivate(ctx)) || !ctx.from) return;
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    const ownerTelegramId = String(ctx.from.id);
+    try {
+      const { rentals, plans } = await loadShop(ownerTelegramId);
+      const rental = rentals.find((r) => r.rentalId === rentalId);
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan atau bukan milik kamu.");
+        return;
+      }
+      const keyboard = new InlineKeyboard();
+      const url = botUrl(rental.botUsername);
+      if (url && rental.status !== "pending")
+        keyboard.url("🤖 Buka Bot", url).row();
+      for (const plan of plans) {
+        keyboard
+          .text(planButton(plan), `rs_pay_${rental.rentalId}_${plan.id}`)
+          .row();
+      }
+      keyboard.text("🛑 Batalkan Rental Ini", `rs_cancel_${rental.rentalId}`).row();
+      keyboard.text("🔙 Daftar Bot", "rs_home").row();
+      await ctx.reply(
+        `🤖 <b>Detail Rental @${rental.botUsername}</b>\n\n${rentalLine(rental)}\n\n` +
+          "Pilih paket untuk aktivasi atau memperpanjang masa sewa:",
+        { reply_markup: keyboard, parse_mode: "HTML" },
+      );
+    } catch {
+      await ctx.reply("Gagal memuat detail bot. Buka /sewa dan coba kembali.");
+    }
+  }
+
+  async function showNewRentalMenu(ctx: Context): Promise<void> {
+    if ((await rejectNonPrivate(ctx)) || !ctx.from) return;
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    const ownerTelegramId = String(ctx.from.id);
+    try {
+      const { rentals, plans } = await loadShop(ownerTelegramId);
+      const pending = rentals.find((r) => r.status === "pending");
+      if (pending) {
+        await ctx.reply(
+          `⚠️ Kamu masih memiliki bot rental <b>@${pending.botUsername}</b> yang menunggu pembayaran.\nSelesaikan pembayaran bot tersebut terlebih dahulu sebelum menyewa bot baru.`,
+          {
+            parse_mode: "HTML",
+            reply_markup: new InlineKeyboard().text("🔙 Rental Saya", "rs_home"),
+          },
+        );
+        return;
+      }
+      const keyboard = new InlineKeyboard();
+      for (const plan of plans)
+        keyboard.text(planButton(plan), `rs_new_${plan.id}`).row();
+      keyboard.text("🔙 Kembali", "rs_home").row();
+      await ctx.reply(
+        "🤖 <b>Sewa Bot Baru</b>\n\n" +
+          "1. Pilih paket untuk bot baru.\n" +
+          "2. Kirim token bot baru dari @BotFather melalui chat ini.\n" +
+          "3. Biaya dipotong otomatis dari saldo main bot / via QRIS.\n" +
+          "4. Bot aktif otomatis setelah pembayaran terkonfirmasi.\n\n" +
+          (plans.length ? "Pilih paket:" : "Belum ada paket rental aktif."),
+        { reply_markup: keyboard, parse_mode: "HTML" },
+      );
+    } catch {
+      await ctx.reply("Gagal memuat daftar paket sewa. Buka /sewa dan coba kembali.");
     }
   }
 
@@ -294,13 +412,14 @@ export function createRentalStorePlugin(
     const ownerTelegramId = String(ctx.from.id);
     try {
       dependencies.assertReady();
-      const [rental, plans] = await Promise.all([
-        dependencies.findRental(ownerTelegramId),
+      const [rentals, plans] = await Promise.all([
+        getRentals(ownerTelegramId),
         dependencies.listPlans(),
       ]);
-      if (rental) {
+      const pending = rentals.find((r) => r.status === "pending");
+      if (pending) {
         await ctx.reply(
-          "Kamu sudah memiliki rental. Buka /sewa untuk aktivasi, status, atau perpanjangan.",
+          `Kamu masih memiliki bot rental @${pending.botUsername} yang belum diselesaikan pembayarannya. Selesaikan pembayaran bot tersebut terlebih dahulu sebelum menyewa bot baru.`,
         );
         return;
       }
@@ -341,8 +460,9 @@ export function createRentalStorePlugin(
     let pendingActivation = false;
     try {
       dependencies.assertReady();
-      const rental = await dependencies.findRental(ownerTelegramId);
-      if (!rental || rental.rentalId !== rentalId) {
+      const rentals = await getRentals(ownerTelegramId);
+      const rental = rentals.find((r) => r.rentalId === rentalId);
+      if (!rental) {
         await ctx.reply("⛔ Rental tidak ditemukan atau bukan milik kamu.");
         return;
       }
@@ -533,6 +653,106 @@ export function createRentalStorePlugin(
     }
   }
 
+  async function cancelRentalConfirm(
+    ctx: Context,
+    rentalId: string,
+  ): Promise<void> {
+    if ((await rejectNonPrivate(ctx)) || !ctx.from) return;
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    const ownerTelegramId = String(ctx.from.id);
+    try {
+      const rentals = await getRentals(ownerTelegramId);
+      const rental = rentals.find((r) => r.rentalId === rentalId);
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan atau bukan milik kamu.");
+        return;
+      }
+      const keyboard = new InlineKeyboard()
+        .text("✅ Ya, Batalkan Bot", `rs_cancelyes_${rental.rentalId}`)
+        .text("❌ Tidak", rentals.length === 1 ? "rs_home" : `rs_bot_${rental.rentalId}`)
+        .row()
+        .text("🔙 Rental Saya", "rs_home");
+
+      let refundNotice = "";
+      if (rental.status === "active" && rental.planId) {
+        const plans = await dependencies.listPlans();
+        const plan = plans.find((p) => p.id === rental.planId || p.code === rental.planId);
+        if (plan) {
+          const preview = calculateRentalRefund(rental, plan);
+          if (preview.refundAmount > 0) {
+            refundNotice =
+              `• Sisa masa aktif: <b>${preview.daysRemaining} hari</b>\n` +
+              `• Estimasi pengembalian saldo: <b>${formatPrice(preview.refundAmount)}</b> (otomatis masuk ke saldo kamu)\n\n` +
+              `<i>Kalkulasi Prorata:</i>\n` +
+              `• Paket: ${plan.name} (${formatPrice(plan.price)} / ${plan.durationDays} hari)\n` +
+              `• Tarif harian: ${formatPrice(preview.dailyRate)}/hari\n` +
+              `• Terpakai: ${preview.daysUsed} hari (${formatPrice(preview.usedCost)})\n` +
+              `• Sisa: ${preview.daysRemaining} hari (${formatPrice(preview.refundAmount)})\n\n`;
+          } else {
+            refundNotice = "• Sisa masa aktif hari ini habis (tidak ada pengembalian saldo).\n\n";
+          }
+        }
+      } else {
+        refundNotice = "• Invoice pembayaran yang pending akan dibatalkan.\n\n";
+      }
+
+      await ctx.reply(
+        `⚠️ <b>Konfirmasi Batalkan Rental @${rental.botUsername}</b>\n\n` +
+          "Apakah kamu yakin ingin membatalkan sewa bot ini?\n\n" +
+          "• Bot akan langsung dinonaktifkan (status: terminated).\n" +
+          refundNotice +
+          "Tindakan ini tidak dapat diurungkan.",
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    } catch {
+      await ctx.reply("Gagal memproses pembatalan rental.");
+    }
+  }
+
+  async function cancelRentalExecute(
+    ctx: Context,
+    rentalId: string,
+  ): Promise<void> {
+    if ((await rejectNonPrivate(ctx)) || !ctx.from) return;
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
+    const ownerTelegramId = String(ctx.from.id);
+    try {
+      const rentals = await getRentals(ownerTelegramId);
+      const rental = rentals.find((r) => r.rentalId === rentalId);
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan atau bukan milik kamu.");
+        return;
+      }
+      let cancelResult: unknown;
+      if (dependencies.cancelRental) {
+        cancelResult = await dependencies.cancelRental(rentalId, ownerTelegramId);
+      }
+      const refund = (cancelResult as { refund?: RentalRefundResult })?.refund;
+      let refundMessage = "";
+      if (refund?.credited && refund.refundAmount > 0) {
+        refundMessage =
+          `\n\n💰 <b>Saldo Berhasil Dikembalikan:</b> ${formatPrice(refund.refundAmount)}\n` +
+          (refund.newBalance !== undefined ? `💳 <b>Saldo Akun Kamu:</b> ${formatPrice(refund.newBalance)}\n\n` : "\n") +
+          `<i>Rincian Kalkulasi:</i>\n` +
+          `• Paket: ${refund.planName} (${formatPrice(refund.planPrice)} / ${refund.durationDays} hari)\n` +
+          `• Tarif harian: ${formatPrice(refund.dailyRate)}/hari\n` +
+          `• Terpakai: ${refund.daysUsed} hari (${formatPrice(refund.usedCost)})\n` +
+          `• Sisa hari: ${refund.daysRemaining} hari (${formatPrice(refund.refundAmount)})`;
+      }
+      await ctx.reply(
+        `🛑 <b>Rental Dibatalkan</b>\n\n` +
+          `Bot <b>@${rental.botUsername}</b> telah berhasil dibatalkan dan dinonaktifkan.` +
+          refundMessage,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🤖 Rental Saya", "rs_home"),
+        },
+      );
+    } catch {
+      await ctx.reply("Gagal membatalkan bot rental. Coba lagi nanti.");
+    }
+  }
+
   return {
     name: "rentalstore",
     version: "1.0.0",
@@ -543,6 +763,10 @@ export function createRentalStorePlugin(
       bot.command("sewabot", showShop);
       bot.hears("🤖 Sewa Bot", showShop);
       bot.callbackQuery("rs_home", showShop);
+      bot.callbackQuery("rs_new_menu", showNewRentalMenu);
+      bot.callbackQuery(/^rs_bot_([a-f0-9]{24})$/, (ctx) =>
+        showBotDetail(ctx, ctx.match[1]!),
+      );
       bot.callbackQuery(/^rs_new_([a-f0-9]{24})$/, (ctx) =>
         selectNewPlan(ctx, ctx.match[1]!),
       );
@@ -551,6 +775,12 @@ export function createRentalStorePlugin(
       );
       bot.callbackQuery(/^rs_chk_([A-Za-z0-9_-]{1,96})$/, (ctx) =>
         checkInvoice(ctx, ctx.match[1]!),
+      );
+      bot.callbackQuery(/^rs_cancel_([a-f0-9]{24})$/, (ctx) =>
+        cancelRentalConfirm(ctx, ctx.match[1]!),
+      );
+      bot.callbackQuery(/^rs_cancelyes_([a-f0-9]{24})$/, (ctx) =>
+        cancelRentalExecute(ctx, ctx.match[1]!),
       );
       bot.on("message:text", receiveToken);
     },

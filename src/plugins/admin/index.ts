@@ -1,4 +1,5 @@
 import { Bot, Context, InlineKeyboard } from "grammy";
+import { Types } from "mongoose";
 import { Plugin } from "../../types/Plugin.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
 import { BotConfig } from "../../models/BotConfig.js";
@@ -33,7 +34,7 @@ import { isAdmin } from "../../core/admin.js";
 import { BotRental } from "../../models/BotRental.js";
 import { RentalPlan } from "../../models/RentalPlan.js";
 import { parseRentalPlanSetup, parseRentalProvisionSetup, provisionRental, saveRentalPlan } from "../../rental/rentalProvisioning.service.js";
-import { startProvisionedRental } from "../../rental/rental.service.js";
+import { calculateRentalRefund, startProvisionedRental, terminateRental } from "../../rental/rental.service.js";
 import {
   ADMIN_HELP_SECTION_IDS,
   ADMIN_HELP_SECTION_LABELS,
@@ -1437,6 +1438,7 @@ const adminPlugin: Plugin = {
     { command: "ban",               description: "[Admin] Ban user: /ban <telegramId> [alasan]" },
     { command: "unban",             description: "[Admin] Unban user: /unban <telegramId>" },
     { command: "rental",            description: "[Admin] Kelola paket dan bot rental" },
+    { command: "cancelrental",      description: "[Admin] Batalkan/hentikan bot rental" },
   ],
 
   register(bot: Bot<Context>): void {
@@ -1666,9 +1668,233 @@ const adminPlugin: Plugin = {
     bot.callbackQuery("adm_rental_list", async ctx => {
       await ctx.answerCallbackQuery();
       if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
-      const rentals = await BotRental.find().sort({ createdAt: -1 }).limit(30).lean();
-      const rows = rentals.map(rental => `• @${escapeHtml(rental.botUsername)} | <code>${rental._id}</code>\n  owner <code>${rental.ownerTelegramId}</code> | ${rental.status} | ${formatDateWIB(rental.expiresAt)}`);
-      await ctx.reply(`📋 <b>Bot Rental Terbaru</b>\n\n${rows.join("\n\n") || "Belum ada rental."}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Rental", "adm_rental") });
+      const rentals = await BotRental.find().sort({ createdAt: -1 }).limit(20).lean();
+      if (rentals.length === 0) {
+        await ctx.reply("📋 <b>Daftar Rental</b>\n\nBelum ada bot rental terdaftar.", {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔙 Rental", "adm_rental"),
+        });
+        return;
+      }
+      const keyboard = new InlineKeyboard();
+      const rows = rentals.map((rental, i) => {
+        const icon = rental.status === "active" ? "🟢" : rental.status === "pending" ? "⏳" : rental.status === "terminated" ? "🛑" : "⚠️";
+        return `${i + 1}. ${icon} <b>@${escapeHtml(rental.botUsername)}</b>\n   ID: <code>${rental._id}</code>\n   Owner: <code>${rental.ownerTelegramId}</code> | Status: <b>${rental.status}</b>\n   Berlaku s/d: ${formatDateWIB(rental.expiresAt)}`;
+      });
+      for (const rental of rentals.slice(0, 10)) {
+        const icon = rental.status === "active" ? "🟢" : rental.status === "pending" ? "⏳" : rental.status === "terminated" ? "🛑" : "⚠️";
+        keyboard.text(`${icon} @${rental.botUsername}`, `adm_rview_${rental._id}`).row();
+      }
+      keyboard.text("🔙 Rental", "adm_rental");
+      await ctx.reply(
+        `📋 <b>Daftar Bot Rental</b> (Klik bot untuk kelola / batalkan):\n\n${rows.join("\n\n")}`,
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    });
+
+    bot.callbackQuery(/^adm_rview_([a-f0-9]{24})$/, async ctx => {
+      await ctx.answerCallbackQuery();
+      if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
+      const rentalId = ctx.match[1]!;
+      const rental = await BotRental.findById(rentalId).lean();
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan.", {
+          reply_markup: new InlineKeyboard().text("🔙 Daftar Rental", "adm_rental_list"),
+        });
+        return;
+      }
+      const plan = await RentalPlan.findById(rental.plan).lean();
+      const icon = rental.status === "active" ? "🟢" : rental.status === "pending" ? "⏳" : rental.status === "terminated" ? "🛑" : "⚠️";
+      const keyboard = new InlineKeyboard();
+      if (rental.status !== "terminated") {
+        keyboard.text("🛑 Batalkan Rental Ini", `adm_rcancel_${rental._id}`).row();
+      }
+      keyboard.text("🔙 Daftar Rental", "adm_rental_list");
+      await ctx.reply(
+        `🤖 <b>Detail Bot Rental</b>\n\n` +
+          `Bot: <b>@${escapeHtml(rental.botUsername)}</b>\n` +
+          `Rental ID: <code>${rental._id}</code>\n` +
+          `Tenant ID: <code>${rental.tenantId}</code>\n` +
+          `Owner ID: <code>${rental.ownerTelegramId}</code>\n` +
+          `Status: ${icon} <b>${rental.status}</b>\n` +
+          `Paket: ${plan ? escapeHtml(plan.name) : "-"} (<code>${escapeHtml(rental.plan)}</code>)\n` +
+          `Fitur: ${rental.enabledFeatures.map(escapeHtml).join(", ")}\n` +
+          `Berlaku s/d: ${formatDateWIB(rental.expiresAt)}\n` +
+          (rental.startedAt ? `Dimulai: ${formatDateWIB(rental.startedAt)}\n` : ""),
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    });
+
+    bot.callbackQuery(/^adm_rcancel_([a-f0-9]{24})$/, async ctx => {
+      await ctx.answerCallbackQuery();
+      if (ctx.chat?.type !== "private" || !ctx.from) return;
+      const rentalId = ctx.match[1]!;
+      const actorId = String(ctx.from.id);
+      const isPlatformAdmin = isAdmin(ctx);
+
+      const rental = await BotRental.findById(rentalId).lean();
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan.");
+        return;
+      }
+      const isOwner = rental.ownerTelegramId === actorId;
+      if (!isPlatformAdmin && !isOwner) {
+        await ctx.reply("⛔ Akses ditolak. Hanya owner bot rental atau admin bot utama yang dapat membatalkan rental ini.");
+        return;
+      }
+      if (rental.status === "terminated") {
+        await ctx.reply("⚠️ Rental ini sudah dibatalkan sebelumnya (status: terminated).");
+        return;
+      }
+      const keyboard = new InlineKeyboard()
+        .text("✅ Ya, Batalkan Rental", `adm_rcancelyes_${rental._id}`)
+        .text("❌ Tidak", isPlatformAdmin ? `adm_rview_${rental._id}` : "rs_home")
+        .row()
+        .text("🔙 Kembali", isPlatformAdmin ? "adm_rental_list" : "rs_home");
+      await ctx.reply(
+        `⚠️ <b>Konfirmasi Pembatalan Rental</b>\n\n` +
+          `Apakah Anda yakin ingin membatalkan rental bot <b>@${escapeHtml(rental.botUsername)}</b>?\n\n` +
+          `• Status akan diubah menjadi <b>terminated</b>\n` +
+          `• Runtime bot akan langsung dihentikan dari memori\n` +
+          `• Invoice pending (jika ada) akan dikadaluwarsa-kan\n\n` +
+          `Tindakan ini tidak dapat diurungkan.`,
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    });
+
+    bot.callbackQuery(/^adm_rcancelyes_([a-f0-9]{24})$/, async ctx => {
+      await ctx.answerCallbackQuery();
+      if (ctx.chat?.type !== "private" || !ctx.from) return;
+      const rentalId = ctx.match[1]!;
+      const actorId = String(ctx.from.id);
+      const isPlatformAdmin = isAdmin(ctx);
+
+      const rental = await BotRental.findById(rentalId).lean();
+      if (!rental) {
+        await ctx.reply("⛔ Rental tidak ditemukan.");
+        return;
+      }
+      const isOwner = rental.ownerTelegramId === actorId;
+      if (!isPlatformAdmin && !isOwner) {
+        await ctx.reply("⛔ Akses ditolak. Hanya owner bot rental atau admin bot utama yang dapat membatalkan rental ini.");
+        return;
+      }
+      if (rental.status === "terminated") {
+        await ctx.reply("⚠️ Rental ini sudah dibatalkan sebelumnya.");
+        return;
+      }
+      try {
+        const terminated = await terminateRental(rentalId, {
+          actorTelegramId: actorId,
+          refundIfOwner: true,
+        });
+        if (!terminated) {
+          await ctx.reply("❌ Gagal membatalkan rental. Dokumen tidak ditemukan.");
+          return;
+        }
+        const backKeyboard = new InlineKeyboard();
+        if (isPlatformAdmin) {
+          backKeyboard.text("📋 Daftar Rental", "adm_rental_list").text("🤖 Manajemen Rental", "adm_rental");
+        } else {
+          backKeyboard.text("🤖 Rental Saya", "rs_home");
+        }
+
+        let refundInfo = "";
+        if (terminated.refund?.credited && terminated.refund.refundAmount > 0) {
+          refundInfo =
+            `\n\n💰 <b>Saldo Berhasil Dikembalikan:</b> Rp ${terminated.refund.refundAmount.toLocaleString("id-ID")}\n` +
+            `💳 <b>Saldo Akun Sekarang:</b> Rp ${(terminated.refund.newBalance ?? 0).toLocaleString("id-ID")}\n\n` +
+            `<i>Rincian Kalkulasi:</i>\n` +
+            `• Paket: ${escapeHtml(terminated.refund.planName)} (Rp ${terminated.refund.planPrice.toLocaleString("id-ID")} / ${terminated.refund.durationDays} hari)\n` +
+            `• Tarif harian: Rp ${terminated.refund.dailyRate.toLocaleString("id-ID")}/hari\n` +
+            `• Terpakai: ${terminated.refund.daysUsed} hari (Rp ${terminated.refund.usedCost.toLocaleString("id-ID")})\n` +
+            `• Sisa: ${terminated.refund.daysRemaining} hari (Rp ${terminated.refund.refundAmount.toLocaleString("id-ID")})`;
+        }
+
+        await ctx.reply(
+          `🛑 <b>Rental Berhasil Dibatalkan</b>\n\n` +
+            `Bot <b>@${escapeHtml(rental.botUsername)}</b> telah dihentikan dan status rental diubah menjadi <b>terminated</b>.` +
+            refundInfo,
+          {
+            parse_mode: "HTML",
+            reply_markup: backKeyboard,
+          },
+        );
+      } catch (error) {
+        console.warn(`[Admin] Cancel rental ${rentalId} failed:`, error);
+        await ctx.reply("❌ Terjadi kesalahan saat menghentikan bot rental.");
+      }
+    });
+
+    bot.command("cancelrental", async ctx => {
+      if (ctx.chat?.type !== "private") { await ctx.reply("Gunakan chat pribadi."); return; }
+      if (!ctx.from) return;
+      const actorId = String(ctx.from.id);
+      const isPlatformAdmin = isAdmin(ctx);
+
+      const arg = String(ctx.match ?? "").trim();
+      if (!arg) {
+        await ctx.reply(
+          "ℹ️ Gunakan: <code>/cancelrental &lt;rentalId_atau_@botUsername&gt;</code>\n\nContoh: <code>/cancelrental 6a9eed02cb62102cc809691a</code> atau <code>/cancelrental @dankaajatest_bot</code>",
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+      const cleanUsername = arg.replace(/^@/, "");
+      const filter = Types.ObjectId.isValid(arg)
+        ? { _id: arg }
+        : { botUsername: new RegExp(`^${cleanUsername}$`, "i") };
+      const rental = await BotRental.findOne(filter).lean();
+      if (!rental) {
+        await ctx.reply("⛔ Bot rental tidak ditemukan.");
+        return;
+      }
+      const isOwner = rental.ownerTelegramId === actorId;
+      if (!isPlatformAdmin && !isOwner) {
+        await ctx.reply("⛔ Akses ditolak. Hanya owner bot rental atau admin bot utama yang dapat membatalkan rental ini.");
+        return;
+      }
+      if (rental.status === "terminated") {
+        await ctx.reply(`⚠️ Rental @${escapeHtml(rental.botUsername)} sudah berstatus terminated.`);
+        return;
+      }
+
+      let refundNotice = "";
+      if (isOwner && rental.status === "active") {
+        let plan = null;
+        if (Types.ObjectId.isValid(rental.plan)) {
+          plan = await RentalPlan.findById(rental.plan).lean();
+        }
+        if (!plan) {
+          plan = await RentalPlan.findOne({ code: rental.plan }).lean();
+        }
+        if (plan) {
+          const preview = calculateRentalRefund(rental, plan);
+          if (preview.refundAmount > 0) {
+            refundNotice =
+              `\n💰 <b>Estimasi Refund Saldo:</b> Rp ${preview.refundAmount.toLocaleString("id-ID")} (otomatis masuk ke akun kamu)\n` +
+              `<i>Kalkulasi:</i> Terpakai ${preview.daysUsed} hari (Rp ${preview.usedCost.toLocaleString("id-ID")}), sisa ${preview.daysRemaining} hari dari paket ${escapeHtml(plan.name)}.\n`;
+          } else {
+            refundNotice = "\nℹ️ <i>Sisa masa aktif hari ini habis (tidak ada pengembalian saldo).</i>\n";
+          }
+        }
+      } else if (!isOwner && isPlatformAdmin) {
+        refundNotice = "\n⚠️ <i>Catatan: Pembatalan oleh Admin Utama tidak melakukan pengembalian saldo otomatis ke akun user.</i>\n";
+      }
+
+      const keyboard = new InlineKeyboard()
+        .text("✅ Ya, Batalkan Rental", `adm_rcancelyes_${rental._id}`)
+        .text("❌ Batal", isPlatformAdmin ? "adm_rental_list" : "rs_home");
+      await ctx.reply(
+        `⚠️ <b>Konfirmasi Batalkan Rental:</b>\n\n` +
+          `Bot: <b>@${escapeHtml(rental.botUsername)}</b>\n` +
+          `ID: <code>${rental._id}</code>\n` +
+          `Owner: <code>${rental.ownerTelegramId}</code>\n` +
+          `Status saat ini: <b>${rental.status}</b>\n` +
+          refundNotice + "\n" +
+          `Yakin ingin menghentikan dan membatalkan rental ini?`,
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
     });
 
     // ── /stats & /statistik — Bot Analytics Dashboard ────────────────────────

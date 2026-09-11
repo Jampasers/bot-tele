@@ -25,6 +25,8 @@ export interface OwnedRentalSummary {
   botUsername: string;
   status: RentalStatus;
   expiresAt: Date;
+  planId?: string;
+  startedAt?: Date | null;
 }
 
 export interface VerifiedSelfServiceBot {
@@ -77,18 +79,40 @@ export async function findOwnedRental(ownerTelegramId: string): Promise<OwnedRen
   // surface an unpaid bot first so each pending rental remains activatable.
   const rental = await BotRental.findOne({ ownerTelegramId, status: "pending" })
     .sort({ createdAt: 1 })
-    .select("botUsername status expiresAt")
+    .select("botUsername status expiresAt plan startedAt")
     .lean()
     ?? await BotRental.findOne({ ownerTelegramId, status: { $nin: ["pending", "terminated"] } })
       .sort({ createdAt: -1 })
-      .select("botUsername status expiresAt")
+      .select("botUsername status expiresAt plan startedAt")
       .lean();
   return rental ? {
     rentalId: String(rental._id),
     botUsername: rental.botUsername,
     status: rental.status,
     expiresAt: rental.expiresAt,
+    planId: rental.plan,
+    startedAt: rental.startedAt,
   } : null;
+}
+
+export async function listOwnedRentals(ownerTelegramId: string): Promise<OwnedRentalSummary[]> {
+  assertPlatform();
+  validateOwnerId(ownerTelegramId);
+  const rentals = await BotRental.find({
+    ownerTelegramId,
+    status: { $ne: "terminated" },
+  })
+    .sort({ createdAt: -1 })
+    .select("botUsername status expiresAt plan startedAt")
+    .lean();
+  return rentals.map(rental => ({
+    rentalId: String(rental._id),
+    botUsername: rental.botUsername,
+    status: rental.status,
+    expiresAt: rental.expiresAt,
+    planId: rental.plan,
+    startedAt: rental.startedAt,
+  }));
 }
 
 /** Read-only validation. This never changes or removes a bot's webhook. */
@@ -127,11 +151,15 @@ export async function provisionSelfServiceRental(
   if (ownersBeingProvisioned.has(input.ownerTelegramId)) throw new Error("Pendaftaran rental sedang diproses.");
   ownersBeingProvisioned.add(input.ownerTelegramId);
   try {
-    const [existing, plan] = await Promise.all([
-      findOwnedRental(input.ownerTelegramId),
+    const [pendingRental, plan] = await Promise.all([
+      BotRental.findOne({ ownerTelegramId: input.ownerTelegramId, status: "pending" })
+        .select("botUsername")
+        .lean(),
       RentalPlan.findOne({ _id: input.planId, enabled: true }).lean(),
     ]);
-    if (existing) throw new Error("Satu rental aktif sudah terdaftar untuk pengguna ini.");
+    if (pendingRental) {
+      throw new Error(`Selesaikan pembayaran untuk @${pendingRental.botUsername} terlebih dahulu sebelum menyewa bot baru.`);
+    }
     if (!plan) throw new Error("Paket rental tidak tersedia.");
     return await provisionRental({
       ownerTelegramId: input.ownerTelegramId,

@@ -9,6 +9,7 @@ import type {
   OwnedRentalSummary,
   SelfServiceRentalPlan,
 } from "../../rental/rentalSelfService.service.js";
+import { calculateRentalRefund } from "../../rental/rental.service.js";
 
 const OWNER_ID = 4242;
 const PLAN_ID = "64b000000000000000000001";
@@ -50,6 +51,10 @@ function defaultDependencies(
     assertReady: () => {},
     listPlans: async () => [PLAN],
     findRental: async () => null,
+    listRentals: overrides.listRentals ?? (async (owner: string) => {
+      const single = overrides.findRental ? await overrides.findRental(owner) : null;
+      return single ? [single] : [];
+    }),
     provision: async input => ({
       rentalId: RENTAL_ID,
       tenantId: RENTAL_ID,
@@ -395,3 +400,173 @@ test("payment check passes ctx.from actor and starts runtime only for paid statu
   assert.match(replyText(harness.apiCalls), /belum terkonfirmasi/);
   assert.match(replyText(harness.apiCalls), /Bot rental sudah aktif/);
 });
+
+test("owner with existing active rental can open new rental menu and select plan for second bot", async () => {
+  const harness = await createHarness({
+    findRental: async () => OWNED_RENTAL,
+  });
+
+  await harness.bot.handleUpdate(messageUpdate(50, "/sewa"));
+  assert.match(replyText(harness.apiCalls), /Rental Saya/);
+
+  await harness.bot.handleUpdate(callbackUpdate(51, "rs_new_menu"));
+  assert.match(replyText(harness.apiCalls), /Sewa Bot Baru/);
+
+  await harness.bot.handleUpdate(callbackUpdate(52, `rs_new_${PLAN_ID}`));
+  assert.match(replyText(harness.apiCalls), /Paket dipilih: Bulanan/);
+  assert.match(replyText(harness.apiCalls), /Kirim token bot baru/);
+});
+
+test("owner with pending rental cannot start another new rental until completed", async () => {
+  const harness = await createHarness({
+    findRental: async () => ({ ...OWNED_RENTAL, status: "pending" }),
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(53, "rs_new_menu"));
+  assert.match(replyText(harness.apiCalls), /menunggu pembayaran/);
+});
+
+test("owner with multiple rentals can view bot detail and see bot list", async () => {
+  const SECOND_RENTAL_ID = "64b000000000000000000009";
+  const harness = await createHarness({
+    listRentals: async () => [
+      OWNED_RENTAL,
+      { ...OWNED_RENTAL, rentalId: SECOND_RENTAL_ID, botUsername: "second_bot" },
+    ],
+  });
+
+  await harness.bot.handleUpdate(messageUpdate(60, "/sewa"));
+  assert.match(replyText(harness.apiCalls), /2 Bot Terdaftar/);
+
+  await harness.bot.handleUpdate(callbackUpdate(61, `rs_bot_${SECOND_RENTAL_ID}`));
+  assert.match(replyText(harness.apiCalls), /Detail Rental @second_bot/);
+});
+
+test("owner can confirm and execute rental cancellation for their own bot", async () => {
+  const cancelledIds: string[] = [];
+  const harness = await createHarness({
+    findRental: async () => OWNED_RENTAL,
+    cancelRental: async (id: string) => { cancelledIds.push(id); },
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(70, `rs_cancel_${RENTAL_ID}`));
+  assert.match(replyText(harness.apiCalls), /Konfirmasi Batalkan Rental/);
+
+  await harness.bot.handleUpdate(callbackUpdate(71, `rs_cancelyes_${RENTAL_ID}`));
+  assert.match(replyText(harness.apiCalls), /Rental Dibatalkan/);
+  assert.deepEqual(cancelledIds, [RENTAL_ID]);
+});
+
+test("non-owner cannot cancel someone else's rental", async () => {
+  let cancelCalls = 0;
+  const harness = await createHarness({
+    findRental: async () => OWNED_RENTAL,
+    cancelRental: async () => { cancelCalls++; },
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(72, `rs_cancel_${FOREIGN_RENTAL_ID}`));
+  assert.match(replyText(harness.apiCalls), /bukan milik kamu/);
+  assert.equal(cancelCalls, 0);
+});
+
+test("calculateRentalRefund calculates prorated refund matching user formula (Plan A: 14k/7d, Day 3 -> 8k refund)", () => {
+  const plan = { name: "Paket A", price: 14_000, durationDays: 7 };
+  const baseTime = new Date("2026-09-01T00:00:00.000Z");
+  const expiresAt = new Date("2026-09-08T00:00:00.000Z"); // 7 days later
+
+  // Day 3: 2 days and 5 hours elapsed (entering day 3)
+  const nowDay3 = new Date("2026-09-03T05:00:00.000Z");
+  const resDay3 = calculateRentalRefund(
+    { status: "active", startedAt: baseTime, expiresAt, plan: "plan_a" },
+    plan,
+    nowDay3,
+  );
+
+  assert.equal(resDay3.dailyRate, 2_000);
+  assert.equal(resDay3.daysUsed, 3);
+  assert.equal(resDay3.usedCost, 6_000);
+  assert.equal(resDay3.daysRemaining, 4);
+  assert.equal(resDay3.refundAmount, 8_000);
+
+  // Day 1: 2 hours elapsed (entering day 1)
+  const nowDay1 = new Date("2026-09-01T02:00:00.000Z");
+  const resDay1 = calculateRentalRefund(
+    { status: "active", startedAt: baseTime, expiresAt, plan: "plan_a" },
+    plan,
+    nowDay1,
+  );
+  assert.equal(resDay1.daysUsed, 1);
+  assert.equal(resDay1.usedCost, 2_000);
+  assert.equal(resDay1.daysRemaining, 6);
+  assert.equal(resDay1.refundAmount, 12_000);
+
+  // Day 7: 6 days and 20 hours elapsed (last day)
+  const nowDay7 = new Date("2026-09-07T20:00:00.000Z");
+  const resDay7 = calculateRentalRefund(
+    { status: "active", startedAt: baseTime, expiresAt, plan: "plan_a" },
+    plan,
+    nowDay7,
+  );
+  assert.equal(resDay7.daysUsed, 7);
+  assert.equal(resDay7.usedCost, 14_000);
+  assert.equal(resDay7.daysRemaining, 0);
+  assert.equal(resDay7.refundAmount, 0);
+
+  // Expired
+  const nowExpired = new Date("2026-09-08T01:00:00.000Z");
+  const resExpired = calculateRentalRefund(
+    { status: "active", startedAt: baseTime, expiresAt, plan: "plan_a" },
+    plan,
+    nowExpired,
+  );
+  assert.equal(resExpired.refundAmount, 0);
+
+  // Non-active (pending)
+  const resPending = calculateRentalRefund(
+    { status: "pending", startedAt: null, expiresAt, plan: "plan_a" },
+    plan,
+    nowDay3,
+  );
+  assert.equal(resPending.refundAmount, 0);
+});
+
+test("owner cancellation displays refund calculation breakdown when refund is credited", async () => {
+  const harness = await createHarness({
+    findRental: async () => ({
+      ...OWNED_RENTAL,
+      planId: PLAN_ID,
+    }),
+    listPlans: async () => [PLAN],
+    cancelRental: async () => ({
+      status: "terminated",
+      refund: {
+        planName: PLAN.name,
+        planPrice: PLAN.price,
+        durationDays: PLAN.durationDays,
+        dailyRate: 833,
+        daysUsed: 3,
+        daysRemaining: 27,
+        usedCost: 2499,
+        refundAmount: 22501,
+        credited: true,
+        newBalance: 32501,
+        ownerTelegramId: String(OWNER_ID),
+      },
+    }),
+  });
+
+  // Confirmation preview
+  await harness.bot.handleUpdate(callbackUpdate(80, `rs_cancel_${RENTAL_ID}`));
+  assert.match(replyText(harness.apiCalls), /Estimasi pengembalian saldo/);
+  assert.match(replyText(harness.apiCalls), /Kalkulasi Prorata/);
+
+  // Execution breakdown
+  await harness.bot.handleUpdate(callbackUpdate(81, `rs_cancelyes_${RENTAL_ID}`));
+  const text = replyText(harness.apiCalls);
+  assert.match(text, /Saldo Berhasil Dikembalikan/);
+  assert.match(text, /22\.501/);
+  assert.match(text, /Saldo Akun Kamu/);
+  assert.match(text, /32\.501/);
+});
+
+
