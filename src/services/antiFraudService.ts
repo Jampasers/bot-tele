@@ -8,6 +8,7 @@ import { WarrantyClaim } from "../models/WarrantyClaim.js";
 import { DigitalOrder } from "../models/DigitalOrder.js";
 import { BalanceLog } from "../models/BalanceLog.js";
 import { getAdminIds } from "../core/admin.js";
+import { ActivityLogService, LogUserInfo } from "./activityLog.js";
 
 // ============================================================================
 //  In-Memory TTL & Idempotency Cache Engine
@@ -512,6 +513,21 @@ export class AntiFraudService {
       return { success: false, message: "User tidak ditemukan dalam database." };
     }
 
+    (async () => {
+      let adminInfo: LogUserInfo | undefined;
+      if (adminId) {
+        const adm = await User.findOne({ telegramId: adminId }).lean();
+        adminInfo = adm
+          ? { telegramId: adm.telegramId, firstName: adm.firstName, username: adm.username }
+          : { telegramId: adminId };
+      }
+      await ActivityLogService.logUserBanned(undefined, {
+        user: { telegramId: user.telegramId, firstName: user.firstName, username: user.username },
+        admin: adminInfo,
+        reason,
+      });
+    })().catch((err) => console.error("[AntiFraud] ActivityLog ban error:", err));
+
     return {
       success: true,
       message: `User <code>${userId}</code> (${user.firstName}) berhasil dibanned. Alasan: ${reason}`,
@@ -541,6 +557,20 @@ export class AntiFraudService {
       return { success: false, message: "User tidak ditemukan." };
     }
 
+    (async () => {
+      let adminInfo: LogUserInfo | undefined;
+      if (adminId) {
+        const adm = await User.findOne({ telegramId: adminId }).lean();
+        adminInfo = adm
+          ? { telegramId: adm.telegramId, firstName: adm.firstName, username: adm.username }
+          : { telegramId: adminId };
+      }
+      await ActivityLogService.logUserUnbanned(undefined, {
+        user: { telegramId: user.telegramId, firstName: user.firstName, username: user.username },
+        admin: adminInfo,
+      });
+    })().catch((err) => console.error("[AntiFraud] ActivityLog unban error:", err));
+
     return {
       success: true,
       message: `User <code>${userId}</code> (${user.firstName}) berhasil di-unban. Status: ACTIVE.`,
@@ -568,6 +598,20 @@ export class AntiFraudService {
     if (!user) {
       return { success: false, message: "User tidak ditemukan." };
     }
+
+    (async () => {
+      let adminInfo: LogUserInfo | undefined;
+      if (adminId) {
+        const adm = await User.findOne({ telegramId: adminId }).lean();
+        adminInfo = adm
+          ? { telegramId: adm.telegramId, firstName: adm.firstName, username: adm.username }
+          : { telegramId: adminId };
+      }
+      await ActivityLogService.logUserUnflagged(undefined, {
+        user: { telegramId: user.telegramId, firstName: user.firstName, username: user.username },
+        admin: adminInfo,
+      });
+    })().catch((err) => console.error("[AntiFraud] ActivityLog unflag error:", err));
 
     return {
       success: true,

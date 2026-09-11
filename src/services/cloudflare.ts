@@ -1,4 +1,5 @@
 import { BotConfig, CloudflareZoneConfig, DEFAULT_CF_ZONES } from "../models/BotConfig.js";
+import { ActivityLogService } from "./activityLog.js";
 
 // ============================================================================
 //  Cloudflare Email Routing Service
@@ -232,6 +233,13 @@ export class CloudflareService {
 
       const ruleId = data.result?.id || "unknown";
 
+      ActivityLogService.logCloudflareRuleCreated(undefined, {
+        email: targetEmail,
+        destinationEmail: destEmail,
+        domain: selectedZone.domain,
+        ruleId,
+      }).catch((logErr) => console.error("[cloudflare] ActivityLog create rule error:", logErr));
+
       return {
         success: true,
         email: targetEmail,
@@ -325,6 +333,11 @@ export class CloudflareService {
         const errorMsg = data.errors?.map((e: any) => e.message).join(", ") || `HTTP ${response.status}`;
         return { success: false, error: errorMsg };
       }
+
+      ActivityLogService.logCloudflareRuleDeleted(undefined, {
+        ruleId,
+        zoneId,
+      }).catch((logErr) => console.error("[cloudflare] ActivityLog delete rule error:", logErr));
 
       return { success: true };
     } catch (error: any) {

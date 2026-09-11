@@ -2,7 +2,7 @@ import { Api, Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { User, IUser } from "../../models/User.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
-import { ActivityLogService } from "../../services/activityLog.js";
+import { ActivityLogService, LogUserInfo } from "../../services/activityLog.js";
 import { HydratedDocument } from "mongoose";
 import { getTenantContext } from "../../tenant/context.js";
 import { hasFeature } from "../../tenant/features.js";
@@ -212,10 +212,25 @@ export async function findOrCreateUser(
     });
 
     if (api) {
-      ActivityLogService.logUserRegistration(api, {
-        user: { telegramId, firstName, username },
-        registeredVia: "/start (Main Menu)",
-      }).catch((err) =>
+      (async () => {
+        let referrerUser: LogUserInfo | undefined;
+        if (referredBy) {
+          const refDoc = await User.findOne({ telegramId: referredBy }).lean();
+          if (refDoc) {
+            referrerUser = {
+              telegramId: refDoc.telegramId,
+              firstName: refDoc.firstName,
+              username: refDoc.username,
+            };
+          }
+        }
+        await ActivityLogService.logUserRegistration(api, {
+          user: { telegramId, firstName, username },
+          registeredVia: "/start (Main Menu)",
+          referredBy,
+          referrerUser,
+        });
+      })().catch((err) =>
         console.error("[ActivityLog] register log error:", err),
       );
     }

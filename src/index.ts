@@ -8,6 +8,7 @@ import { ImapOtpService } from "./services/imapOtp.js";
 import { CurrencyService } from "./services/currency.js";
 import { WhatsAppBotService } from "./whatsapp/index.js";
 import { ReceiptService } from "./services/receipt.js";
+import { ActivityLogService } from "./services/activityLog.js";
 import { validateEncryptionKey } from "./services/crypto.js";
 import { platformContext, runWithTenant } from "./tenant/context.js";
 import { assertTenantMigrationReady } from "./tenant/migration.js";
@@ -88,6 +89,7 @@ async function main(): Promise<void> {
       startupStage = "platform-bot";
       const bot = await createBot(token, context);
       if (stopRequested) return;
+      ActivityLogService.setDefaultApi(bot.api);
       platform = new BotInstance(bot, context);
       platform.start();
       stopBackup = scheduleDailyBackup(bot.api);

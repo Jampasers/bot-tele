@@ -5,6 +5,7 @@ import { simpleParser, type ParsedMail } from "mailparser";
 import { Api } from "grammy";
 import { connectDatabase, disconnectDatabase } from "../core/db.js";
 import { BotConfig, IBotConfig } from "../models/BotConfig.js";
+import { ActivityLogService } from "../services/activityLog.js";
 
 // ============================================================================
 //  Types & Interfaces
@@ -918,6 +919,17 @@ class ImapChildWorker {
       this.lastReceivedAt = new Date();
       if (tx.otpCode) this.lastReceivedOtp = tx.otpCode;
       if (tx.recipientName) this.lastRecipientName = tx.recipientName;
+
+      ActivityLogService.logEmailOtpForwarded(this.api, {
+        provider: tx.provider,
+        subject: tx.subject,
+        senderEmail: tx.senderEmail,
+        recipientEmail: tx.recipientEmail,
+        recipientName: tx.recipientName,
+        otpCode: tx.otpCode,
+        targetChannel,
+        date: tx.date || new Date(),
+      }).catch((logErr) => console.error("[IMAP Worker] ActivityLog error:", logErr));
 
       this.broadcastStatus(config);
       console.log(`[IMAP Worker] 🚀 Berhasil meneruskan OTP (${tx.provider}) ke channel ${targetChannel} (Penerima: ${tx.recipientEmail ? maskEmail(tx.recipientEmail) : (tx.recipientName || "N/A")}, OTP: ${tx.otpCode || "N/A"})`);

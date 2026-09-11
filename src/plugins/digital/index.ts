@@ -1365,6 +1365,17 @@ const digitalPlugin: Plugin = {
             // Apply promo (mark as used) if applicable
             if (promoApplied) {
               await applyPromo(promoApplied.code, telegramId);
+              ActivityLogService.logPromoUsed(ctx.api, {
+                user: {
+                  telegramId,
+                  firstName: ctx.from?.first_name,
+                  username: ctx.from?.username,
+                },
+                code: promoApplied.code,
+                discountAmount: promoApplied.discountAmount,
+                totalAfterDiscount: result.price,
+                orderId: result.order.orderId,
+              }).catch((err) => console.error("[digital] ActivityLog logPromoUsed error:", err));
               userActivePromo.delete(telegramId);
             }
 

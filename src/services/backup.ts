@@ -21,7 +21,7 @@ import { RestockAlert } from "../models/RestockAlert.js";
 import { WarrantyClaim } from "../models/WarrantyClaim.js";
 import { FraudLog } from "../models/FraudLog.js";
 import { Cart } from "../models/Cart.js";
-import { ActivityLogService } from "./activityLog.js";
+import { ActivityLogService, LogUserInfo } from "./activityLog.js";
 import { SMSBowerService } from "./smsbower.js";
 import { clearMaintenanceCache } from "../middlewares/maintenance.js";
 import { getAdminIds } from "../core/admin.js";
@@ -120,7 +120,11 @@ export async function createBackupZip(): Promise<string> {
 /**
  * Creates a backup and sends it to all configured ADMIN_IDs via Telegram.
  */
-export async function createAndSendBackup(api: Api): Promise<{ success: boolean; message: string }> {
+export async function createAndSendBackup(
+  api: Api,
+  adminUser?: LogUserInfo,
+  triggeredBy: "ADMIN" | "CRON_AUTO" = "ADMIN"
+): Promise<{ success: boolean; message: string }> {
   const adminIds = getAdminIds();
   if (adminIds.length === 0) {
     return { success: false, message: "ADMIN_ID tidak dikonfigurasi di environment." };
@@ -142,11 +146,12 @@ export async function createAndSendBackup(api: Api): Promise<{ success: boolean;
     });
 
     const collectionNames = BACKUP_COLLECTIONS.map((c) => c.name).join(", ");
+    const zipFileName = `backup-${now.toISOString().slice(0, 10)}.zip`;
 
     const sendPromises = adminIds.map((adminId) =>
       api.sendDocument(
         adminId,
-        new InputFile(zipPath!, `backup-${now.toISOString().slice(0, 10)}.zip`),
+        new InputFile(zipPath!, zipFileName),
         {
           caption:
             `🗄 <b>Backup Database Otomatis</b>\n` +
@@ -162,6 +167,15 @@ export async function createAndSendBackup(api: Api): Promise<{ success: boolean;
     );
 
     await Promise.all(sendPromises);
+
+    ActivityLogService.logDatabaseBackup(api, {
+      triggeredBy,
+      admin: adminUser,
+      fileName: zipFileName,
+      totalCollections: BACKUP_COLLECTIONS.length,
+      recipientsCount: adminIds.length,
+      date: now,
+    }).catch((logErr) => console.error("[backup] ActivityLog backup error:", logErr));
 
     console.log(`[backup] Backup sent to ${adminIds.length} admin(s) successfully.`);
     return { success: true, message: `Backup berhasil dibuat dan dikirim ke ${adminIds.length} admin.` };
@@ -396,7 +410,7 @@ export function scheduleDailyBackup(api: Api): () => Promise<void> {
     timer = setTimeout(() => {
       pending = (async () => {
       try {
-        await createAndSendBackup(api);
+        await createAndSendBackup(api, undefined, "CRON_AUTO");
       } catch (err) {
         console.error("[backup] Scheduled backup error:", err);
       }

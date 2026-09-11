@@ -16,6 +16,173 @@ export interface LogUserInfo {
 export interface UserRegisterLogData {
   user: LogUserInfo;
   registeredVia?: string | undefined;
+  referredBy?: string | undefined;
+  referrerUser?: LogUserInfo | undefined;
+  date?: Date | undefined;
+}
+
+export interface BalanceAdjustLogData {
+  user: LogUserInfo;
+  admin?: LogUserInfo | undefined;
+  type: "CREDIT" | "DEBIT" | "PURCHASE" | "REFUND" | "TOPUP" | "COMMISSION" | string;
+  amount: number;
+  balanceBefore?: number | undefined;
+  balanceAfter: number;
+  reason?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface UserBanLogData {
+  user: LogUserInfo;
+  admin?: LogUserInfo | undefined;
+  reason?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface UserUnbanLogData {
+  user: LogUserInfo;
+  admin?: LogUserInfo | undefined;
+  date?: Date | undefined;
+}
+
+export interface UserUnflagLogData {
+  user: LogUserInfo;
+  admin?: LogUserInfo | undefined;
+  date?: Date | undefined;
+}
+
+export interface ProductCreatedLogData {
+  admin?: LogUserInfo | undefined;
+  productId: string;
+  name: string;
+  category: string;
+  price: number;
+  warrantyHours?: number | undefined;
+  date?: Date | undefined;
+}
+
+export interface ProductUpdatedLogData {
+  admin?: LogUserInfo | undefined;
+  productId: string;
+  name: string;
+  changes: string;
+  date?: Date | undefined;
+}
+
+export interface ProductDeletedLogData {
+  admin?: LogUserInfo | undefined;
+  productId: string;
+  name: string;
+  category?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface StockAddedLogData {
+  admin?: LogUserInfo | undefined;
+  productId: string;
+  productName: string;
+  addedCount: number;
+  totalUnsoldStock?: number | undefined;
+  date?: Date | undefined;
+}
+
+export interface StockRemovedLogData {
+  admin?: LogUserInfo | undefined;
+  productId: string;
+  productName: string;
+  removedCount: number;
+  action: "CLEAR_ALL" | "DELETE_SINGLE" | "TAKE_MANUAL" | string;
+  date?: Date | undefined;
+}
+
+export interface PromoCreatedLogData {
+  admin?: LogUserInfo | undefined;
+  code: string;
+  discountType: "FIXED" | "PERCENTAGE";
+  discountValue: number;
+  quota: number;
+  minSpend: number;
+  expiresAt: Date;
+  date?: Date | undefined;
+}
+
+export interface PromoUsedLogData {
+  user: LogUserInfo;
+  code: string;
+  discountAmount: number;
+  totalAfterDiscount: number;
+  orderId?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface BroadcastLogData {
+  admin?: LogUserInfo | undefined;
+  filterLabel: string;
+  totalTarget: number;
+  sent: number;
+  failed: number;
+  blocked: number;
+  date?: Date | undefined;
+}
+
+export interface DatabaseBackupLogData {
+  triggeredBy: "ADMIN" | "CRON_AUTO";
+  admin?: LogUserInfo | undefined;
+  fileName?: string | undefined;
+  totalCollections: number;
+  recipientsCount: number;
+  date?: Date | undefined;
+}
+
+export interface CloudflareRuleCreatedLogData {
+  admin?: LogUserInfo | undefined;
+  email: string;
+  destinationEmail: string;
+  domain: string;
+  ruleId?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface CloudflareRuleDeletedLogData {
+  admin?: LogUserInfo | undefined;
+  ruleId: string;
+  zoneId?: string | undefined;
+  date?: Date | undefined;
+}
+
+export interface ConfigUpdatedLogData {
+  admin?: LogUserInfo | undefined;
+  moduleName: string;
+  changeDescription: string;
+  date?: Date | undefined;
+}
+
+export interface AffiliateCommissionLogData {
+  referrer: LogUserInfo;
+  referredUser: LogUserInfo;
+  sourceType: string;
+  sourceOrderId: string;
+  purchaseAmount: number;
+  commissionAmount: number;
+  newAffiliateBalance?: number | undefined;
+  date?: Date | undefined;
+}
+
+export interface AffiliateWithdrawalLogData {
+  user: LogUserInfo;
+  amount: number;
+  newMainBalance?: number | undefined;
+  date?: Date | undefined;
+}
+
+export interface EmailOtpForwardedLogData {
+  provider: "PAYPAL" | "NETFLIX" | "DISCORD" | "GENERIC" | string;
+  subject?: string | undefined;
+  senderEmail: string;
+  recipientEmail?: string | undefined;
+  recipientName?: string | undefined;
+  otpCode?: string | undefined;
+  targetChannel?: string | undefined;
   date?: Date | undefined;
 }
 
@@ -162,6 +329,32 @@ function formatUserHtml(user: LogUserInfo): string {
 // ============================================================================
 
 export class ActivityLogService {
+  private static defaultApi: Api | null = null;
+
+  /**
+   * Sets the global default grammY Api instance for the ActivityLogService.
+   */
+  static setDefaultApi(api: Api): void {
+    this.defaultApi = api;
+  }
+
+  /**
+   * Retrieves the default grammY Api instance or creates a fallback if BOT_TOKEN is present.
+   */
+  static getDefaultApi(): Api | null {
+    if (this.defaultApi) return this.defaultApi;
+    const token = process.env["BOT_TOKEN"];
+    if (token && token.trim() !== "") {
+      try {
+        this.defaultApi = new Api(token.trim());
+        return this.defaultApi;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   /**
    * Retrieves current bot configuration from cache or MongoDB.
    */
@@ -189,13 +382,30 @@ export class ActivityLogService {
   }
 
   /**
+   * Directly sets the in-memory cached configuration (useful for testing and instant cache updates).
+   */
+  static setCachedConfig(config: IBotConfig | null): void {
+    if (config) {
+      configCache.set("config", { config, cachedAt: Date.now() });
+    } else {
+      configCache.delete("config");
+    }
+  }
+
+  /**
    * Low-level dispatcher to send HTML message to configured log channel.
    */
   private static async sendToLogChannel(
-    api: Api,
-    text: string,
+    api?: Api | null,
+    text?: string,
     keyboard?: InlineKeyboard
   ): Promise<boolean> {
+    if (!text) return false;
+    const tgApi = api || this.getDefaultApi();
+    if (!tgApi) {
+      return false;
+    }
+
     try {
       const config = await this.getConfig();
 
@@ -209,7 +419,7 @@ export class ActivityLogService {
 
       const targetChannel = config.logChannel.trim();
 
-      await api.sendMessage(targetChannel, text, {
+      await tgApi.sendMessage(targetChannel, text, {
         parse_mode: "HTML",
         ...(keyboard && { reply_markup: keyboard }),
         link_preview_options: { is_disabled: true },
@@ -238,18 +448,26 @@ export class ActivityLogService {
   // ── 1. User Registration Log ───────────────────────────────────────────────
 
   static async logUserRegistration(
-    api: Api,
+    api: Api | undefined,
     data: UserRegisterLogData
   ): Promise<boolean> {
     const formattedUser = formatUserHtml(data.user);
     const dateStr = formatDateWIB(data.date || new Date());
     const source = data.registeredVia || "/start (Main Menu)";
 
+    let referralLine = "";
+    if (data.referrerUser) {
+      referralLine = `👥 <b>Referral Dari:</b> ${formatUserHtml(data.referrerUser)}\n`;
+    } else if (data.referredBy) {
+      referralLine = `👥 <b>Referral Dari:</b> <code>${escapeHtml(data.referredBy)}</code>\n`;
+    }
+
     const text =
       `🆕 <b>[AUDIT: USER REGISTER]</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `👤 <b>User:</b> ${formattedUser}\n` +
       `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      referralLine +
       `🚪 <b>Sumber:</b> <code>${escapeHtml(source)}</code>\n` +
       `💰 <b>Saldo Awal:</b> Rp 0\n` +
       `📅 <b>Waktu:</b> ${dateStr}\n` +
@@ -631,4 +849,506 @@ export class ActivityLogService {
 
     return this.sendToLogChannel(api, text);
   }
+
+  // ── 13. Manual Balance Mutation Log ────────────────────────────────────────
+
+  static async logBalanceAdjusted(
+    api: Api | undefined,
+    data: BalanceAdjustLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Sistem</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const isCredit = ["CREDIT", "TOPUP", "COMMISSION", "REFUND"].includes(data.type.toUpperCase());
+    const sign = isCredit ? "+" : "-";
+    const badgeType = isCredit ? `🟢 <b>${escapeHtml(data.type)} (TAMBAH)</b>` : `🔴 <b>${escapeHtml(data.type)} (POTONG)</b>`;
+
+    const beforeLine =
+      typeof data.balanceBefore === "number"
+        ? `💵 <b>Saldo Sebelum:</b> ${formatPrice(data.balanceBefore)}\n`
+        : "";
+
+    const text =
+      `💰 <b>[AUDIT: MUTASI SALDO MANUAL]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>User:</b> ${formattedUser}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      `👮 <b>Eksekutor:</b> ${formattedAdmin}\n` +
+      `📊 <b>Jenis Mutasi:</b> ${badgeType}\n` +
+      `🔢 <b>Nominal:</b> <b>${sign}${formatPrice(data.amount)}</b>\n` +
+      beforeLine +
+      `💳 <b>Saldo Akhir:</b> <b>${formatPrice(data.balanceAfter)}</b>\n` +
+      `📝 <b>Alasan:</b> <i>${escapeHtml(data.reason || "Penyesuaian saldo oleh admin")}</i>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Saldo pengguna berhasil dimutasi dan tercatat dalam audit log.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 14. User Ban & Security Action Logs ──────────────────────────────────────
+
+  static async logUserBanned(
+    api: Api | undefined,
+    data: UserBanLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Sistem Anti-Fraud</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `🚫 <b>[AUDIT: USER DIBANNED / BLOKIR]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>User:</b> ${formattedUser}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      `👮 <b>Admin / Eksekutor:</b> ${formattedAdmin}\n` +
+      `📌 <b>Alasan Pemblokiran:</b> <i>${escapeHtml(data.reason || "Pelanggaran aturan / Indikasi fraud")}</i>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status Akun:</b> 🔴 <b>BANNED</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>⚠️ Pengguna telah diblokir dan tidak dapat mengakses fitur transaksi bot.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logUserUnbanned(
+    api: Api | undefined,
+    data: UserUnbanLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `🔓 <b>[AUDIT: USER DI-UNBAN / AKTIF KEMBALI]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>User:</b> ${formattedUser}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      `👮 <b>Admin Pemulih:</b> ${formattedAdmin}\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status Akun:</b> 🟢 <b>ACTIVE</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Akses pengguna telah dipulihkan dan dapat menggunakan bot kembali.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logUserUnflagged(
+    api: Api | undefined,
+    data: UserUnflagLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `✅ <b>[AUDIT: STATUS REVIEW PENGGUNA DIPULIHKAN]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>User:</b> ${formattedUser}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      `👮 <b>Admin Verifikator:</b> ${formattedAdmin}\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status Akun:</b> 🟢 <b>ACTIVE (Unflagged)</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Status UNDER_REVIEW telah dinormalisasi kembali menjadi aktif.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 15. Digital Product Catalog Logs ────────────────────────────────────────
+
+  static async logProductCreated(
+    api: Api | undefined,
+    data: ProductCreatedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const warrantyLine =
+      typeof data.warrantyHours === "number" && data.warrantyHours > 0
+        ? `🛡️ <b>Durasi Garansi:</b> ${data.warrantyHours} Jam\n`
+        : "";
+
+    const text =
+      `🛍️ <b>[AUDIT: PRODUK DIGITAL BARU DIBUAT]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Pembuat:</b> ${formattedAdmin}\n` +
+      `📦 <b>Nama Produk:</b> <b>${escapeHtml(data.name)}</b>\n` +
+      `📂 <b>Kategori:</b> <code>${escapeHtml(data.category)}</code>\n` +
+      `💰 <b>Harga:</b> <b>${formatPrice(data.price)}</b>\n` +
+      warrantyLine +
+      `🆔 <b>Product ID:</b> <code>${escapeHtml(data.productId)}</code>\n` +
+      `📅 <b>Waktu Dibuat:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Produk digital baru telah terdaftar di etalase toko.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logProductUpdated(
+    api: Api | undefined,
+    data: ProductUpdatedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `✏️ <b>[AUDIT: PRODUK DIGITAL DIPERBARUI]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Pengubah:</b> ${formattedAdmin}\n` +
+      `📦 <b>Produk:</b> <b>${escapeHtml(data.name)}</b>\n` +
+      `🆔 <b>Product ID:</b> <code>${escapeHtml(data.productId)}</code>\n` +
+      `📝 <b>Perubahan:</b>\n${escapeHtml(data.changes)}\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Konfigurasi produk digital berhasil diperbarui.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logProductDeleted(
+    api: Api | undefined,
+    data: ProductDeletedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const categoryLine = data.category ? `📂 <b>Kategori:</b> <code>${escapeHtml(data.category)}</code>\n` : "";
+
+    const text =
+      `🗑️ <b>[AUDIT: PRODUK DIGITAL DIHAPUS]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin:</b> ${formattedAdmin}\n` +
+      `📦 <b>Produk:</b> <b>${escapeHtml(data.name)}</b>\n` +
+      categoryLine +
+      `🆔 <b>Product ID:</b> <code>${escapeHtml(data.productId)}</code>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>⚠️ Produk digital telah dihapus dari database.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 16. Digital Stock Inventory Logs ────────────────────────────────────────
+
+  static async logStockAdded(
+    api: Api | undefined,
+    data: StockAddedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const totalLine =
+      typeof data.totalUnsoldStock === "number"
+        ? `📊 <b>Total Stok Tersedia Sekarang:</b> <b>${data.totalUnsoldStock} item</b>\n`
+        : "";
+
+    const text =
+      `📥 <b>[AUDIT: STOK DIGITAL DITAMBAHKAN]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin:</b> ${formattedAdmin}\n` +
+      `📦 <b>Produk:</b> <b>${escapeHtml(data.productName)}</b>\n` +
+      `🆔 <b>Product ID:</b> <code>${escapeHtml(data.productId)}</code>\n` +
+      `➕ <b>Jumlah Ditambahkan:</b> <b>+${data.addedCount} item</b>\n` +
+      totalLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Stok inventaris produk digital siap dijual kepada pelanggan.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logStockRemoved(
+    api: Api | undefined,
+    data: StockRemovedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    let actionLabel = "Pengurangan Stok";
+    if (data.action === "CLEAR_ALL") actionLabel = "Kosongkan Seluruh Stok Belum Terjual";
+    else if (data.action === "DELETE_SINGLE") actionLabel = "Hapus 1 Item Stok Spesifik";
+    else if (data.action === "TAKE_MANUAL") actionLabel = "Pengambilan Stok Manual oleh Admin";
+
+    const text =
+      `📤 <b>[AUDIT: STOK DIGITAL DIKURANGI / DIAMBIL]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin:</b> ${formattedAdmin}\n` +
+      `📦 <b>Produk:</b> <b>${escapeHtml(data.productName)}</b>\n` +
+      `🆔 <b>Product ID:</b> <code>${escapeHtml(data.productId)}</code>\n` +
+      `🎯 <b>Tindakan:</b> <code>${escapeHtml(actionLabel)}</code>\n` +
+      `➖ <b>Jumlah Dikeluarkan:</b> <b>${data.removedCount} item</b>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Item stok digital telah dikeluarkan dari inventaris database.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 17. Promo & Voucher Logs ───────────────────────────────────────────────
+
+  static async logPromoCreated(
+    api: Api | undefined,
+    data: PromoCreatedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const expStr = formatDateWIB(data.expiresAt);
+
+    const discountStr =
+      data.discountType === "FIXED"
+        ? formatPrice(data.discountValue)
+        : `${data.discountValue}%`;
+
+    const text =
+      `🎟️ <b>[AUDIT: KODE PROMO BARU DIBUAT]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Pembuat:</b> ${formattedAdmin}\n` +
+      `🏷️ <b>Kode Promo:</b> <code>${escapeHtml(data.code)}</code>\n` +
+      `💰 <b>Potongan Diskon:</b> <b>${discountStr}</b> (${data.discountType})\n` +
+      `🎯 <b>Kuota Penggunaan:</b> ${data.quota}x\n` +
+      `💵 <b>Min. Belanja:</b> ${formatPrice(data.minSpend)}\n` +
+      `⏰ <b>Kadaluarsa:</b> ${expStr}\n` +
+      `📅 <b>Waktu Dibuat:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Voucher diskon aktif dan dapat digunakan pembeli.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logPromoUsed(
+    api: Api | undefined,
+    data: PromoUsedLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const dateStr = formatDateWIB(data.date || new Date());
+    const orderLine = data.orderId ? `🧾 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` : "";
+
+    const text =
+      `🏷️ <b>[AUDIT: KODE PROMO DIGUNAKAN]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pengguna:</b> ${formattedUser}\n` +
+      `🎟️ <b>Kode Digunakan:</b> <code>${escapeHtml(data.code)}</code>\n` +
+      `🎉 <b>Potongan Diskon:</b> <b>-${formatPrice(data.discountAmount)}</b>\n` +
+      `💰 <b>Total Tagihan Akhir:</b> <b>${formatPrice(data.totalAfterDiscount)}</b>\n` +
+      orderLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Diskon promo berhasil diterapkan pada checkout.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 18. Broadcast Log ──────────────────────────────────────────────────────
+
+  static async logBroadcastExecuted(
+    api: Api | undefined,
+    data: BroadcastLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `📢 <b>[AUDIT: BROADCAST MASSAL SELESAI]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Eksekutor:</b> ${formattedAdmin}\n` +
+      `🎯 <b>Segmen Target:</b> <code>${escapeHtml(data.filterLabel)}</code>\n` +
+      `👥 <b>Total Sasaran:</b> ${data.totalTarget} pengguna\n` +
+      `✅ <b>Berhasil Terkirim:</b> <b>${data.sent}</b>\n` +
+      `🚫 <b>Akun Blokir/Deactive:</b> ${data.blocked}\n` +
+      `❌ <b>Gagal Terkirim:</b> ${data.failed}\n` +
+      `📅 <b>Waktu Selesai:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Pesan broadcast berhasil didistribusikan ke target pengguna.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 19. Database Backup Log ────────────────────────────────────────────────
+
+  static async logDatabaseBackup(
+    api: Api | undefined,
+    data: DatabaseBackupLogData
+  ): Promise<boolean> {
+    const adminStr =
+      data.triggeredBy === "CRON_AUTO"
+        ? "<i>⏰ Jadwal Otomatis Sistem (00:00 WIB)</i>"
+        : data.admin
+        ? formatUserHtml(data.admin)
+        : "<i>Admin</i>";
+
+    const dateStr = formatDateWIB(data.date || new Date());
+    const fileLine = data.fileName ? `📁 <b>File Arsip:</b> <code>${escapeHtml(data.fileName)}</code>\n` : "";
+
+    const text =
+      `🗄️ <b>[AUDIT: BACKUP DATABASE SELESAI]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pemicu Backup:</b> ${adminStr}\n` +
+      fileLine +
+      `📦 <b>Koleksi Dicadangkan:</b> <b>${data.totalCollections} koleksi</b>\n` +
+      `📬 <b>Dikirim Ke:</b> <b>${data.recipientsCount} admin Telegram</b>\n` +
+      `📅 <b>Waktu Selesai:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Backup database lengkap berhasil diexport dan diamankan.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 20. Cloudflare Email Routing Logs ──────────────────────────────────────
+
+  static async logCloudflareRuleCreated(
+    api: Api | undefined,
+    data: CloudflareRuleCreatedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const ruleLine = data.ruleId ? `🆔 <b>Rule ID:</b> <code>${escapeHtml(data.ruleId)}</code>\n` : "";
+
+    const text =
+      `☁️ <b>[AUDIT: CLOUDFLARE EMAIL ROUTING DIBUAT]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Pembuat:</b> ${formattedAdmin}\n` +
+      `📧 <b>Email Baru:</b> <code>${escapeHtml(data.email)}</code>\n` +
+      `🎯 <b>Diteruskan Ke:</b> <code>${escapeHtml(data.destinationEmail)}</code>\n` +
+      `🌐 <b>Domain:</b> <code>${escapeHtml(data.domain)}</code>\n` +
+      ruleLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Email forwarding Cloudflare aktif untuk menerima pesan / OTP.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logCloudflareRuleDeleted(
+    api: Api | undefined,
+    data: CloudflareRuleDeletedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+    const zoneLine = data.zoneId ? `🌐 <b>Zone ID:</b> <code>${escapeHtml(data.zoneId)}</code>\n` : "";
+
+    const text =
+      `🗑️ <b>[AUDIT: CLOUDFLARE EMAIL ROUTING DIHAPUS]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin:</b> ${formattedAdmin}\n` +
+      `🆔 <b>Rule ID:</b> <code>${escapeHtml(data.ruleId)}</code>\n` +
+      zoneLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Rule email forwarding telah dihapus dari Cloudflare.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 21. Bot Settings & Configurations Changed Log ──────────────────────────
+
+  static async logConfigUpdated(
+    api: Api | undefined,
+    data: ConfigUpdatedLogData
+  ): Promise<boolean> {
+    const formattedAdmin = data.admin ? formatUserHtml(data.admin) : "<i>Admin</i>";
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const text =
+      `⚙️ <b>[AUDIT: PENGATURAN BOT DIUBAH]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👮 <b>Admin Pengubah:</b> ${formattedAdmin}\n` +
+      `🔧 <b>Modul / Fitur:</b> <b>${escapeHtml(data.moduleName)}</b>\n` +
+      `📝 <b>Detail Perubahan:</b>\n<i>${escapeHtml(data.changeDescription)}</i>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Konfigurasi runtime bot berhasil diperbarui di database.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 22. Affiliate / Referral Program Logs ──────────────────────────────────
+
+  static async logAffiliateCommission(
+    api: Api | undefined,
+    data: AffiliateCommissionLogData
+  ): Promise<boolean> {
+    const formattedReferrer = formatUserHtml(data.referrer);
+    const formattedReferee = formatUserHtml(data.referredUser);
+    const dateStr = formatDateWIB(data.date || new Date());
+    const balanceLine =
+      typeof data.newAffiliateBalance === "number"
+        ? `📊 <b>Saldo Afiliasi Sekarang:</b> <b>${formatPrice(data.newAffiliateBalance)}</b>\n`
+        : "";
+
+    const text =
+      `👥 <b>[AUDIT: KOMISI AFILIASI DITERIMA]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🎁 <b>Penerima Komisi:</b> ${formattedReferrer}\n` +
+      `🛍️ <b>Pembeli (Referral):</b> ${formattedReferee}\n` +
+      `📦 <b>Sumber Transaksi:</b> <code>${escapeHtml(data.sourceType)}</code>\n` +
+      `🧾 <b>Order ID:</b> <code>${escapeHtml(data.sourceOrderId)}</code>\n` +
+      `💵 <b>Total Pembelian:</b> ${formatPrice(data.purchaseAmount)}\n` +
+      `💰 <b>Komisi Diperoleh:</b> <b>+${formatPrice(data.commissionAmount)}</b>\n` +
+      balanceLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Bonus komisi referral otomatis dikreditkan ke saldo afiliasi.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  static async logAffiliateWithdrawal(
+    api: Api | undefined,
+    data: AffiliateWithdrawalLogData
+  ): Promise<boolean> {
+    const formattedUser = formatUserHtml(data.user);
+    const dateStr = formatDateWIB(data.date || new Date());
+    const balanceLine =
+      typeof data.newMainBalance === "number"
+        ? `💳 <b>Saldo Utama Baru:</b> <b>${formatPrice(data.newMainBalance)}</b>\n`
+        : "";
+
+    const text =
+      `💸 <b>[AUDIT: PENARIKAN SALDO AFILIASI]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pengguna:</b> ${formattedUser}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.user.telegramId}</code>\n` +
+      `💰 <b>Nominal Ditarik:</b> <b>${formatPrice(data.amount)}</b>\n` +
+      balanceLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status:</b> ✅ <b>Dipindahkan ke Saldo Utama</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Saldo komisi afiliasi berhasil dikonversi ke saldo belanja utama.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 23. IMAP OTP Forwarded Log ─────────────────────────────────────────────
+
+  static async logEmailOtpForwarded(
+    api: Api | undefined,
+    data: EmailOtpForwardedLogData
+  ): Promise<boolean> {
+    const dateStr = formatDateWIB(data.date || new Date());
+    const recipientLine = data.recipientEmail
+      ? `👤 <b>Penerima:</b> <code>${escapeHtml(data.recipientEmail)}</code>\n`
+      : data.recipientName
+      ? `👤 <b>Nama Penerima:</b> <code>${escapeHtml(data.recipientName)}</code>\n`
+      : "";
+
+    const codeLine = data.otpCode ? `📬 <b>Kode OTP:</b> <code>${escapeHtml(data.otpCode)}</code>\n` : "";
+    const channelLine = data.targetChannel ? `📢 <b>Diteruskan Ke:</b> <code>${escapeHtml(data.targetChannel)}</code>\n` : "";
+    const subjectLine = data.subject ? `📝 <b>Subjek:</b> <i>${escapeHtml(data.subject)}</i>\n` : "";
+
+    const text =
+      `📬 <b>[AUDIT: EMAIL OTP DITERUSKAN]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🌐 <b>Provider:</b> <b>${escapeHtml(data.provider)}</b>\n` +
+      `📧 <b>Pengirim:</b> <code>${escapeHtml(data.senderEmail)}</code>\n` +
+      recipientLine +
+      subjectLine +
+      codeLine +
+      channelLine +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status:</b> ✅ <b>Berhasil Diteruskan Otomatis</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Email OTP dari IMAP listener telah berhasil diproses & diforward.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
 }
+

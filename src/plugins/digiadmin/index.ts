@@ -6,6 +6,7 @@ import { WarrantyService } from "../../services/warranty.js";
 import { DigitalOrder } from "../../models/DigitalOrder.js";
 import { WarrantyUnit } from "../../models/DigitalProduct.js";
 import { isAdmin } from "../../core/admin.js";
+import { ActivityLogService } from "../../services/activityLog.js";
 
 // ============================================================================
 //  ADMIN PLUGIN — DIGITAL PRODUCTS & STOCK MANAGER
@@ -589,6 +590,13 @@ const digiAdminPlugin: Plugin = {
 
       await DigitalProductService.updateProduct(productId, { isActive: !prod.isActive });
 
+      ActivityLogService.logProductUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        productId,
+        name: prod.name,
+        changes: `Status diubah: ${!prod.isActive ? "🟢 Aktif" : "🔴 Nonaktif"}`,
+      }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
       const card = await buildProductDetailCard(productId, page);
       if (card) {
         try {
@@ -629,7 +637,17 @@ const digiAdminPlugin: Plugin = {
       const productId = ctx.match[1]!;
       const page = parseInt(ctx.match[2]!, 10);
 
+      const prod = await DigitalProductService.getProductWithStock(productId);
       await DigitalProductService.deleteProduct(productId);
+
+      if (prod) {
+        ActivityLogService.logProductDeleted(ctx.api, {
+          admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+          productId,
+          name: prod.name,
+          category: prod.category,
+        }).catch((logErr) => console.error("[digiadmin] ActivityLog deleteProduct error:", logErr));
+      }
 
       const { text, keyboard } = await buildProductListPage(page);
       await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
@@ -879,7 +897,16 @@ const digiAdminPlugin: Plugin = {
       if (!isAdmin(ctx)) return;
 
       const productId = ctx.match[1]!;
+      const prod = await DigitalProductService.getProductWithStock(productId);
       const deletedCount = await DigitalProductService.clearUnsoldStock(productId);
+
+      ActivityLogService.logStockRemoved(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        productId,
+        productName: prod?.name || productId,
+        removedCount: deletedCount,
+        action: "CLEAR_ALL",
+      }).catch((logErr) => console.error("[digiadmin] ActivityLog clearUnsoldStock error:", logErr));
 
       await ctx.reply(`✅ <b>${deletedCount} item stok berhasil dikosongkan.</b>`, { parse_mode: "HTML" });
 
@@ -1152,7 +1179,13 @@ const digiAdminPlugin: Plugin = {
       const minQty = parseInt(ctx.match[2]!, 10);
       const page = ctx.match[3] ? parseInt(ctx.match[3], 10) : 0;
 
-      await DigitalProductService.removeBulkDiscountTier(productId, minQty);
+      const updatedProd = await DigitalProductService.removeBulkDiscountTier(productId, minQty);
+      ActivityLogService.logProductUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        productId,
+        name: updatedProd?.name ?? "—",
+        changes: `Hapus tier grosir: Beli ≥ ${minQty} item`,
+      }).catch((logErr) => console.error("[digiadmin] ActivityLog removeBulkDiscountTier error:", logErr));
 
       const card = await buildBulkDiscountsCard(productId, page);
       if (card) {
@@ -1192,7 +1225,13 @@ const digiAdminPlugin: Plugin = {
       const productId = ctx.match[1]!;
       const page = ctx.match[2] ? parseInt(ctx.match[2], 10) : 0;
 
-      await DigitalProductService.clearBulkDiscounts(productId);
+      const updatedProd = await DigitalProductService.clearBulkDiscounts(productId);
+      ActivityLogService.logProductUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        productId,
+        name: updatedProd?.name ?? "—",
+        changes: `Hapus semua tier diskon grosir`,
+      }).catch((logErr) => console.error("[digiadmin] ActivityLog clearBulkDiscounts error:", logErr));
 
       const card = await buildBulkDiscountsCard(productId, page);
       if (card) {
@@ -1364,6 +1403,14 @@ const digiAdminPlugin: Plugin = {
           const { added, lines } = await DigitalProductService.addStockBulk(state.productId, text, ctx.api);
           const prod = await DigitalProductService.getProductWithStock(state.productId);
 
+          ActivityLogService.logStockAdded(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            productName: prod?.name ?? "Produk Digital",
+            addedCount: added,
+            totalUnsoldStock: prod?.stockCount ?? added,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog addStock error:", logErr));
+
           await ctx.reply(
             `✅ <b>Berhasil Menambahkan ${added} Item Stok!</b>\n\n` +
             `📦 Produk: <b>${prod?.name ?? "—"}</b>\n` +
@@ -1418,6 +1465,14 @@ const digiAdminPlugin: Plugin = {
           const prodAfter = await DigitalProductService.getProductWithStock(state.productId);
           const remaining = prodAfter?.stockCount ?? 0;
 
+          ActivityLogService.logStockRemoved(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            productName: prodBefore.name,
+            removedCount: takenItems.length,
+            action: "TAKE_MANUAL",
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog takeStock error:", logErr));
+
           const combinedText = takenItems.map((i) => i.content).join("\n");
 
           let replyMsg =
@@ -1468,6 +1523,13 @@ const digiAdminPlugin: Plugin = {
 
         try {
           const updated = await DigitalProductService.updateProduct(state.productId, { price });
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? "—",
+            changes: `Harga diubah menjadi: ${formatPrice(price)}`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
           await ctx.reply(
             `✅ <b>Harga Berhasil Diperbarui!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? "—"}</b>\n` +
@@ -1490,6 +1552,13 @@ const digiAdminPlugin: Plugin = {
 
         try {
           const updated = await DigitalProductService.updateProduct(state.productId, { description: newDesc });
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? "—",
+            changes: `Deskripsi diperbarui:\n${newDesc ? newDesc : "(Kosong)"}`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
           await ctx.reply(
             `✅ <b>Deskripsi Produk Berhasil Diperbarui!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? "—"}</b>\n` +
@@ -1512,6 +1581,13 @@ const digiAdminPlugin: Plugin = {
 
         try {
           const updated = await DigitalProductService.updateProduct(state.productId, { deliveryMessage: newMsg });
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? "—",
+            changes: `Pesan pengiriman diperbarui:\n${newMsg ? newMsg : "(Kosong)"}`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
           await ctx.reply(
             `✅ <b>Pesan Pengiriman Berhasil Diperbarui!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? "—"}</b>\n` +
@@ -1553,6 +1629,13 @@ const digiAdminPlugin: Plugin = {
           });
 
           const wText = WarrantyService.formatWarrantyText(parsed.duration, parsed.unit, updated?.maxClaims);
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? "—",
+            changes: `Garansi diperbarui: ${wText}`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
           await ctx.reply(
             `✅ <b>Garansi Produk Berhasil Diperbarui!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? "—"}</b>\n` +
@@ -1579,6 +1662,13 @@ const digiAdminPlugin: Plugin = {
 
         try {
           const updated = await DigitalProductService.updateProduct(state.productId, { maxClaims });
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? "—",
+            changes: `Batas klaim garansi diubah menjadi: ${maxClaims}x klaim per order`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog updateProduct error:", logErr));
+
           await ctx.reply(
             `✅ <b>Batas Maksimal Klaim Berhasil Diperbarui!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? "—"}</b>\n` +
@@ -1662,6 +1752,15 @@ const digiAdminPlugin: Plugin = {
             maxClaims,
           });
 
+          ActivityLogService.logProductCreated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: String(newProd._id),
+            name: newProd.name,
+            category: newProd.category,
+            price: newProd.price,
+            warrantyHours: warrantyUnit === "HOURS" ? warrantyDuration : warrantyUnit === "DAYS" ? warrantyDuration * 24 : undefined,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog createProduct error:", logErr));
+
           const wText = WarrantyService.formatWarrantyText(warrantyDuration, warrantyUnit, maxClaims);
 
           await ctx.reply(
@@ -1738,6 +1837,14 @@ const digiAdminPlugin: Plugin = {
         try {
           const updated = await DigitalProductService.addBulkDiscountTier(state.productId, minQty, pricePerUnit);
           const discPct = prod.price > 0 ? Math.round(((prod.price - pricePerUnit) / prod.price) * 100) : 0;
+
+          ActivityLogService.logProductUpdated(ctx.api, {
+            admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+            productId: state.productId,
+            name: updated?.name ?? prod.name,
+            changes: `Tambah tier grosir: Beli ≥ ${minQty} item ➔ ${formatPrice(pricePerUnit)}/item (-${discPct}% OFF)`,
+          }).catch((logErr) => console.error("[digiadmin] ActivityLog addBulkDiscountTier error:", logErr));
+
           await ctx.reply(
             `✅ <b>Tier Grosir Berhasil Ditambahkan!</b>\n\n` +
             `📦 Produk: <b>${updated?.name ?? prod.name}</b>\n` +
@@ -1822,6 +1929,15 @@ const digiAdminPlugin: Plugin = {
           warrantyUnit,
           maxClaims,
         });
+
+        ActivityLogService.logProductCreated(ctx.api, {
+          admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+          productId: String(newProd._id),
+          name: newProd.name,
+          category: newProd.category,
+          price: newProd.price,
+          warrantyHours: warrantyUnit === "HOURS" ? warrantyDuration : warrantyUnit === "DAYS" ? warrantyDuration * 24 : undefined,
+        }).catch((logErr) => console.error("[digiadmin] ActivityLog createProduct error:", logErr));
 
         const wText = WarrantyService.formatWarrantyText(warrantyDuration, warrantyUnit, maxClaims);
 
@@ -2356,6 +2472,13 @@ const digiAdminPlugin: Plugin = {
 
       if (!target || target.toLowerCase() === "all" || target.toLowerCase() === "semua") {
         await DigitalProductService.clearBulkDiscounts(productId);
+        ActivityLogService.logProductUpdated(ctx.api, {
+          admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+          productId,
+          name: prod.name,
+          changes: `Hapus semua tier diskon grosir via /delbulk`,
+        }).catch((logErr) => console.error("[digiadmin] ActivityLog clearBulkDiscounts error:", logErr));
+
         await ctx.reply(`🧹 Semua tier diskon grosir untuk <b>${prod.name}</b> berhasil dihapus.`, { parse_mode: "HTML" });
         return;
       }
@@ -2367,6 +2490,13 @@ const digiAdminPlugin: Plugin = {
       }
 
       await DigitalProductService.removeBulkDiscountTier(productId, minQty);
+      ActivityLogService.logProductUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        productId,
+        name: prod.name,
+        changes: `Hapus tier grosir (≥${minQty} item) via /delbulk`,
+      }).catch((logErr) => console.error("[digiadmin] ActivityLog removeBulkDiscountTier error:", logErr));
+
       await ctx.reply(`✅ Tier grosir (≥${minQty} item) untuk <b>${prod.name}</b> berhasil dihapus.`, { parse_mode: "HTML" });
     });
 

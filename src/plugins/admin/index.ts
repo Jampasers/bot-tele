@@ -1773,6 +1773,12 @@ const adminPlugin: Plugin = {
       const nextState = !config.testimonialEnabled;
       await TestimonialService.updateConfig({ testimonialEnabled: nextState });
 
+      ActivityLogService.logConfigUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        moduleName: "Testimonial Otomatis",
+        changeDescription: `Status diubah: ${nextState ? "🟢 DIAKTIFKAN" : "🔴 DINONAKTIFKAN"}`,
+      }).catch((logErr) => console.error("[admin] ActivityLog testi config error:", logErr));
+
       await ctx.answerCallbackQuery({
         text: nextState ? "🟢 Fitur Testimoni Otomatis DIAKTIFKAN!" : "🔴 Fitur Testimoni Otomatis DINONAKTIFKAN!",
       });
@@ -1966,6 +1972,12 @@ const adminPlugin: Plugin = {
       const config = await ActivityLogService.getConfig();
       const nextState = !config.logChannelEnabled;
       await ActivityLogService.updateConfig({ logChannelEnabled: nextState });
+
+      ActivityLogService.logConfigUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        moduleName: "Audit Log Channel",
+        changeDescription: `Status diubah: ${nextState ? "🟢 DIAKTIFKAN" : "🔴 DINONAKTIFKAN"}`,
+      }).catch((logErr) => console.error("[admin] ActivityLog log config error:", logErr));
 
       await ctx.answerCallbackQuery({
         text: nextState ? "🟢 Fitur Log Aktivitas DIAKTIFKAN!" : "🔴 Fitur Log Aktivitas DINONAKTIFKAN!",
@@ -3211,6 +3223,12 @@ const adminPlugin: Plugin = {
       const nextState = !config.forceSubEnabled;
       await ForceSubService.updateConfig({ forceSubEnabled: nextState });
 
+      ActivityLogService.logConfigUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        moduleName: "Force-Subscription",
+        changeDescription: `Status diubah: ${nextState ? "🟢 DIAKTIFKAN" : "🔴 DINONAKTIFKAN"}`,
+      }).catch((logErr) => console.error("[admin] ActivityLog fsub config error:", logErr));
+
       await ctx.answerCallbackQuery({
         text: nextState ? "🟢 Fitur Wajib Join Channel DIAKTIFKAN!" : "🔴 Fitur Wajib Join Channel DINONAKTIFKAN!",
       });
@@ -3858,6 +3876,21 @@ const adminPlugin: Plugin = {
           }
         });
 
+        ActivityLogService.logBroadcastExecuted(ctx.api, {
+          admin: ctx.from
+            ? {
+                telegramId: ctx.from.id,
+                firstName: ctx.from.first_name,
+                username: ctx.from.username,
+              }
+            : undefined,
+          filterLabel: label,
+          totalTarget: result.total,
+          sent: result.sent,
+          failed: result.failed,
+          blocked: result.blocked,
+        }).catch((logErr) => console.error("[admin] ActivityLog broadcast error:", logErr));
+
         const finalText =
           `📢 <b>Broadcast Selesai!</b>\n${"─".repeat(30)}\n\n` +
           `✅ Terkirim: <b>${result.sent}</b>\n` +
@@ -4087,6 +4120,12 @@ const adminPlugin: Plugin = {
       const nextState = config.enabled === false ? true : false;
       config.enabled = nextState;
       await config.save();
+
+      ActivityLogService.logConfigUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        moduleName: "SMS Bower OTP",
+        changeDescription: `Status layanan diubah: ${nextState ? "🟢 DIAKTIFKAN" : "🔴 DINONAKTIFKAN"}`,
+      }).catch((logErr) => console.error("[admin] ActivityLog otp config error:", logErr));
 
       await ctx.reply(
         nextState
@@ -4705,6 +4744,12 @@ const adminPlugin: Plugin = {
       await config.save();
       clearMaintenanceCache();
 
+      ActivityLogService.logConfigUpdated(ctx.api, {
+        admin: ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined,
+        moduleName: "Mode Pemeliharaan",
+        changeDescription: `Status diubah: ${config.isMaintenance ? "🔴 DIAKTIFKAN (Maintenance Mode)" : "🟢 DINONAKTIFKAN (Normal Mode)"}`,
+      }).catch((logErr) => console.error("[admin] ActivityLog maintenance config error:", logErr));
+
       const newStatus = config.isMaintenance
         ? `🔴 <b>MAINTENANCE AKTIF</b> — Bot diblokir untuk user non-admin.`
         : `🟢 <b>Bot Kembali Normal</b> — Semua user bisa mengakses bot.`;
@@ -4796,6 +4841,26 @@ const adminPlugin: Plugin = {
         return;
       }
 
+      ActivityLogService.logBalanceAdjusted(ctx.api, {
+        user: {
+          telegramId: targetUser.telegramId,
+          firstName: targetUser.firstName,
+          username: targetUser.username,
+        },
+        admin: ctx.from
+          ? {
+              telegramId: ctx.from.id,
+              firstName: ctx.from.first_name,
+              username: ctx.from.username,
+            }
+          : undefined,
+        type: "CREDIT",
+        amount,
+        balanceBefore: targetUser.balance,
+        balanceAfter: result.newBalance!,
+        reason,
+      }).catch((logErr) => console.error("[admin] ActivityLog addsaldo error:", logErr));
+
       const handle = targetUser.username ? `@${targetUser.username}` : `<code>${targetUser.telegramId}</code>`;
       await ctx.reply(
         `✅ <b>Saldo Berhasil Ditambahkan</b>\n${"─".repeat(30)}\n\n` +
@@ -4836,6 +4901,26 @@ const adminPlugin: Plugin = {
         await ctx.reply(`❌ Gagal: ${result.message}`, { parse_mode: "HTML" });
         return;
       }
+
+      ActivityLogService.logBalanceAdjusted(ctx.api, {
+        user: {
+          telegramId: targetUser.telegramId,
+          firstName: targetUser.firstName,
+          username: targetUser.username,
+        },
+        admin: ctx.from
+          ? {
+              telegramId: ctx.from.id,
+              firstName: ctx.from.first_name,
+              username: ctx.from.username,
+            }
+          : undefined,
+        type: "DEBIT",
+        amount,
+        balanceBefore: targetUser.balance,
+        balanceAfter: result.newBalance!,
+        reason,
+      }).catch((logErr) => console.error("[admin] ActivityLog minsaldo error:", logErr));
 
       const handle = targetUser.username ? `@${targetUser.username}` : `<code>${targetUser.telegramId}</code>`;
       await ctx.reply(
@@ -4970,6 +5055,22 @@ const adminPlugin: Plugin = {
           quota,
           expiresAt,
         });
+
+        ActivityLogService.logPromoCreated(ctx.api, {
+          admin: ctx.from
+            ? {
+                telegramId: ctx.from.id,
+                firstName: ctx.from.first_name,
+                username: ctx.from.username,
+              }
+            : undefined,
+          code: promo.code,
+          discountType,
+          discountValue,
+          quota,
+          minSpend,
+          expiresAt,
+        }).catch((logErr) => console.error("[admin] ActivityLog promo error:", logErr));
 
         const formatIDR = (n: number) => `Rp ${n.toLocaleString("id-ID")}`;
         const discountStr = discountType === "FIXED" ? formatIDR(discountValue) : `${discountValue}%`;
@@ -5179,7 +5280,8 @@ const adminPlugin: Plugin = {
     bot.command("backup", async (ctx) => {
       if (!isAdmin(ctx)) { await ctx.reply("⛔ Hanya admin."); return; }
       const msg = await ctx.reply("⏳ <b>Membuat backup database…</b>\nProses ini memerlukan beberapa detik.", { parse_mode: "HTML" });
-      const result = await createAndSendBackup(ctx.api);
+      const adminUser = ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined;
+      const result = await createAndSendBackup(ctx.api, adminUser, "ADMIN");
       if (!result.success) {
         await ctx.reply(`❌ Backup gagal: ${result.message}`);
         return;
@@ -5192,7 +5294,8 @@ const adminPlugin: Plugin = {
     bot.callbackQuery("adm_backup", async (ctx) => {
       await ctx.answerCallbackQuery({ text: "⏳ Membuat backup…" });
       if (!isAdmin(ctx)) return;
-      const result = await createAndSendBackup(ctx.api);
+      const adminUser = ctx.from ? { telegramId: ctx.from.id, firstName: ctx.from.first_name, username: ctx.from.username } : undefined;
+      const result = await createAndSendBackup(ctx.api, adminUser, "ADMIN");
       await ctx.reply(
         result.success
           ? `✅ Backup berhasil dibuat dan dikirim ke DM admin.`

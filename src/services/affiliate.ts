@@ -2,6 +2,7 @@ import { User } from "../models/User.js";
 import { AffiliateLog, AffiliateSourceType } from "../models/AffiliateLog.js";
 import { BotConfig } from "../models/BotConfig.js";
 import { adjustBalance } from "./balance.js";
+import { ActivityLogService } from "./activityLog.js";
 
 // ============================================================================
 //  Affiliate / Referral Commission Service
@@ -71,6 +72,24 @@ export async function awardCommission(
       commissionAmount,
     });
 
+    ActivityLogService.logAffiliateCommission(undefined, {
+      referrer: {
+        telegramId: referrer.telegramId,
+        firstName: referrer.firstName,
+        username: referrer.username,
+      },
+      referredUser: {
+        telegramId: referredUser.telegramId,
+        firstName: referredUser.firstName,
+        username: referredUser.username,
+      },
+      sourceType,
+      sourceOrderId,
+      purchaseAmount,
+      commissionAmount,
+      newAffiliateBalance: (referrer.affiliateBalance ?? 0) + commissionAmount,
+    }).catch((logErr) => console.error("[affiliate] ActivityLog commission error:", logErr));
+
     console.log(
       `[affiliate] Commission Rp${commissionAmount.toLocaleString("id-ID")} awarded to ${referrerId} ` +
       `(referred ${referredUserId}, ${sourceType})`
@@ -114,6 +133,16 @@ export async function withdrawAffiliateBalance(userId: string): Promise<{
 
   // Record in BalanceLog
   await adjustBalance(userId, amount, "COMMISSION", "Penarikan saldo afiliasi ke saldo utama");
+
+  ActivityLogService.logAffiliateWithdrawal(undefined, {
+    user: {
+      telegramId: user.telegramId,
+      firstName: user.firstName,
+      username: user.username,
+    },
+    amount,
+    newMainBalance: updated.balance,
+  }).catch((logErr) => console.error("[affiliate] ActivityLog withdrawal error:", logErr));
 
   return {
     success: true,
