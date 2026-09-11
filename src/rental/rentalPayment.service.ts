@@ -5,7 +5,7 @@ import { BalanceLog } from "../models/BalanceLog.js";
 import { RentalPlan } from "../models/RentalPlan.js";
 import { RentalPayment, type IRentalPayment } from "../models/RentalPayment.js";
 import { User } from "../models/User.js";
-import { getTenantContext, PLATFORM_TENANT_ID } from "../tenant/context.js";
+import { getTenantContext, PLATFORM_TENANT_ID, platformContext, runWithTenant } from "../tenant/context.js";
 import { generatePlatformQris, getPlatformPaymentClients } from "../payments/platformPayment.service.js";
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
 import { applyRenewal, refreshRentalState, type RentalRuntimeState } from "./rental.service.js";
@@ -35,8 +35,8 @@ async function authorizeRental(rentalId: string, actorTelegramId: string) {
   return rental;
 }
 
-/** Initial self-service activation uses the same platform balance as digital products. */
-export async function activatePendingRentalFromBalance(
+/** Initial self-service activation or renewal uses the same platform balance as digital products. */
+export async function payRentalFromBalance(
   rentalId: string,
   actorTelegramId: string,
   planId: string,
@@ -45,14 +45,24 @@ export async function activatePendingRentalFromBalance(
   if (!Types.ObjectId.isValid(planId)) throw new Error("Paket tidak valid.");
   const plan = await RentalPlan.findOne({ _id: planId, enabled: true }).lean();
   if (!plan) throw new Error("Paket tidak tersedia.");
-  const paymentId = `balance-initial-${rentalId}`;
+
+  const isInitial = rental.status === "pending";
+  const paymentId = isInitial
+    ? `balance-initial-${rentalId}`
+    : `balance-renewal-${rentalId}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
   if (rental.appliedRentalPaymentIds.includes(paymentId)) {
     const state = await applyRenewal(rentalId, paymentId, plan.durationDays, String(plan._id));
-    const user = await User.findOne({ telegramId: actorTelegramId }).select("balance").lean();
+    const user = await runWithTenant(platformContext(), () =>
+      User.findOne({ telegramId: actorTelegramId }).select("balance").lean()
+    );
     return { status: "paid", rentalId, rental: state, remainingBalance: user?.balance ?? 0 };
   }
-  if (rental.status !== "pending") throw new Error("Pembayaran saldo hanya tersedia untuk aktivasi awal rental.");
+
+  if (rental.status === "terminated") {
+    throw new Error("Rental sudah dibatalkan dan tidak dapat diperpanjang.");
+  }
+
   const pendingInvoice = await RentalPayment.exists({
     rentalId,
     $or: [
@@ -62,21 +72,28 @@ export async function activatePendingRentalFromBalance(
   });
   if (pendingInvoice) return { status: "invoice_pending", rentalId };
 
-  const before = await User.findOne({ telegramId: actorTelegramId }).select("balance").lean();
-  const updated = await User.findOneAndUpdate({
-    telegramId: actorTelegramId,
-    balance: { $gte: plan.price },
-    appliedRentalBalancePaymentIds: { $ne: paymentId },
-  }, {
-    $inc: { balance: -plan.price, totalOrders: 1 },
-    $addToSet: { appliedRentalBalancePaymentIds: paymentId },
-  }, { returnDocument: "after" }).select("+appliedRentalBalancePaymentIds");
+  const before = await runWithTenant(platformContext(), () =>
+    User.findOne({ telegramId: actorTelegramId }).select("balance").lean()
+  );
+
+  const updated = await runWithTenant(platformContext(), () =>
+    User.findOneAndUpdate({
+      telegramId: actorTelegramId,
+      balance: { $gte: plan.price },
+      appliedRentalBalancePaymentIds: { $ne: paymentId },
+    }, {
+      $inc: { balance: -plan.price, totalOrders: 1 },
+      $addToSet: { appliedRentalBalancePaymentIds: paymentId },
+    }, { returnDocument: "after" }).select("+appliedRentalBalancePaymentIds")
+  );
 
   if (!updated) {
-    const alreadyDebited = await User.findOne({
-      telegramId: actorTelegramId,
-      appliedRentalBalancePaymentIds: paymentId,
-    }).select("balance").lean();
+    const alreadyDebited = await runWithTenant(platformContext(), () =>
+      User.findOne({
+        telegramId: actorTelegramId,
+        appliedRentalBalancePaymentIds: paymentId,
+      }).select("balance").lean()
+    );
     if (!alreadyDebited) {
       return {
         status: "insufficient",
@@ -89,19 +106,25 @@ export async function activatePendingRentalFromBalance(
     return { status: "paid", rentalId, rental: state, remainingBalance: alreadyDebited.balance };
   }
 
-  // If activation is interrupted after the debit, keep the durable payment key.
+  // If activation/renewal is interrupted after the debit, keep the durable payment key.
   // A retry reuses it and applies the rental without charging the user again.
   const state = await applyRenewal(rentalId, paymentId, plan.durationDays, String(plan._id));
-  await BalanceLog.create({
-    userId: actorTelegramId,
-    type: "PURCHASE",
-    amount: plan.price,
-    balanceBefore: before?.balance ?? updated.balance + plan.price,
-    balanceAfter: updated.balance,
-    reason: `Aktivasi rental @${rental.botUsername} (${plan.name})`,
-  }).catch(() => console.warn(`[Rental:${rentalId}] Balance audit log write failed.`));
+  await runWithTenant(platformContext(), () =>
+    BalanceLog.create({
+      userId: actorTelegramId,
+      type: "PURCHASE",
+      amount: plan.price,
+      balanceBefore: before?.balance ?? updated.balance + plan.price,
+      balanceAfter: updated.balance,
+      reason: isInitial
+        ? `Aktivasi rental @${rental.botUsername} (${plan.name})`
+        : `Perpanjangan sewa bot @${rental.botUsername} (${plan.name})`,
+    })
+  ).catch(() => console.warn(`[Rental:${rentalId}] Balance audit log write failed.`));
   return { status: "paid", rentalId, rental: state, remainingBalance: updated.balance };
 }
+
+export const activatePendingRentalFromBalance = payRentalFromBalance;
 
 export async function createRentalInvoice(rentalId: string, actorTelegramId: string, planId: string) {
   await authorizeRental(rentalId, actorTelegramId);

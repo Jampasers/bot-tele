@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import type { Context } from "grammy";
 import { BotRental, type IBotRental } from "../models/BotRental.js";
 import { RentalPlan } from "../models/RentalPlan.js";
+import { User } from "../models/User.js";
 import { DAY_MS, deriveRentalLifecycle, refreshRentalState, renewalExpiresAt, type RentalRuntimeState } from "./rental.service.js";
 import { dueExpiryAlerts, notifyRentalExpiry } from "./rentalNotification.service.js";
 import { rentalMiddleware, rentalCommand, isRentalAdministrator } from "./rental.middleware.js";
@@ -98,7 +99,13 @@ function update(actorId: number, text = "", options: { callback?: string; privat
 
 test("inactive customers cannot use business actions or forged renewal callbacks", async (t) => {
   const state = await primeState(t, "expired_grace");
-  for (const action of [update(99, "/start"), update(99, "", { callback: "product_digital" }), update(99, "", { callback: "rental_plan_000000000000000000000100" })]) {
+  for (const action of [
+    update(99, "/start"),
+    update(99, "", { callback: "product_digital" }),
+    update(99, "", { callback: "rental_plan_000000000000000000000100" }),
+    update(99, "", { callback: "rental_bal_000000000000000000000100" }),
+    update(99, "", { callback: "rental_qris_000000000000000000000100" }),
+  ]) {
     let next = false;
     await runWithTenant({ ...state }, () => rentalMiddleware(action.ctx, async () => { next = true; }));
     assert.equal(next, false);
@@ -112,6 +119,9 @@ test("suspended owner and stored admin retain private renewal and status access"
     const query = { sort: () => query, limit: () => query, lean: async () => [] };
     return query;
   });
+  t.mock.method(User, "findOne", () => ({
+    select: () => ({ lean: async () => ({ balance: 0 }) }),
+  }));
   for (const actor of [42, 43]) {
     for (const text of ["/start", "/status", "/help", "/renew"]) {
       const action = update(actor, text);

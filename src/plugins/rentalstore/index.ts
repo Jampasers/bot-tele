@@ -467,16 +467,14 @@ export function createRentalStorePlugin(
         return;
       }
       pendingActivation = rental.status === "pending";
-      if (rental.status === "pending") {
-        const balanceResult = await dependencies.payBalance(
-          rentalId,
-          ownerTelegramId,
-          planId,
-        );
-        if (balanceResult.status === "paid") {
-          await finishBalanceActivation(ctx, balanceResult, rental.botUsername);
-          return;
-        }
+      const balanceResult = await dependencies.payBalance(
+        rentalId,
+        ownerTelegramId,
+        planId,
+      );
+      if (balanceResult.status === "paid") {
+        await finishBalanceActivation(ctx, balanceResult, rental.botUsername);
+        return;
       }
       const invoice = await dependencies.createInvoice(
         rentalId,

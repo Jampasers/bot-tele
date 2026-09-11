@@ -569,4 +569,43 @@ test("owner cancellation displays refund calculation breakdown when refund is cr
   assert.match(text, /32\.501/);
 });
 
+test("owner with existing active rental can renew bot using balance directly without QRIS", async () => {
+  let invoiceCalls = 0;
+  let payBalanceCalls = 0;
+  const harness = await createHarness({
+    findRental: async () => OWNED_RENTAL,
+    listRentals: async () => [OWNED_RENTAL],
+    payBalance: async (rentalId, actorId, planId) => {
+      payBalanceCalls++;
+      return {
+        status: "paid",
+        rentalId,
+        remainingBalance: 50_000,
+        rental: {
+          ...OWNED_RENTAL,
+          rentalId,
+          tenantId: rentalId,
+          ownerTelegramId: String(OWNER_ID),
+          adminTelegramIds: [],
+          plan: planId,
+          enabledFeatures: ["digital"],
+          graceEndsAt: null,
+          expiresAt: new Date("2030-02-01T00:00:00.000Z"),
+        },
+      };
+    },
+    createInvoice: async () => {
+      invoiceCalls++;
+      throw new Error("must not create QRIS when balance is paid");
+    },
+  });
+
+  await harness.bot.handleUpdate(callbackUpdate(90, `rs_pay_${RENTAL_ID}_${PLAN_ID}`));
+  assert.equal(payBalanceCalls, 1);
+  assert.equal(invoiceCalls, 0);
+  assert.match(replyText(harness.apiCalls), /Pembayaran dipotong dari saldo main bot/);
+  assert.match(replyText(harness.apiCalls), /Sisa saldo:\s*Rp\s*50\.000/);
+});
+
+
 

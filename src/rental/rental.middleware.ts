@@ -30,7 +30,7 @@ export const rentalMiddleware: MiddlewareFn<Context> = async (ctx, next) => {
   const admin = isRentalAdministrator(state, actorId);
   const command = rentalCommand(ctx);
   const callback = ctx.callbackQuery?.data ?? "";
-  const renewal = command === "renew" || ctx.message?.text === "📅 Perpanjang Bot" || callback === "rental_renew" || /^rental_plan_[a-f0-9]{24}$/.test(callback) || /^rental_check_[A-Za-z0-9_-]{1,96}$/.test(callback);
+  const renewal = command === "renew" || ctx.message?.text === "📅 Perpanjang Bot" || callback === "rental_renew" || /^rental_(plan|bal|qris)_[a-f0-9]{24}$/.test(callback) || /^rental_check_[A-Za-z0-9_-]{1,96}$/.test(callback);
   const help = command === "help" || ctx.message?.text === "❓ Help";
   const control = renewal || command === "status" || (help && admin);
   if (control) {
