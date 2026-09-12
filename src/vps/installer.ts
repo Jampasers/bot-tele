@@ -140,7 +140,7 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
 }
 
 export interface WindowsInstallInput { ip: string; password: string; windowsPassword: string; os: string; orderId: string; }
-export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; }
+export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
     if (os?.family !== "windows" || !os.windowsImageName) throw new InstallerError("validation");
@@ -152,13 +152,19 @@ umask 077
 state=${quote(directory)}
 mkdir -p /root/.bot-tele-vps
 if ! mkdir "$state" 2>/dev/null; then
-  if [ -f "$state/prepared" ]; then echo __VPS_PREPARED__;
-  elif [ -f "$state/failed" ]; then echo __VPS_FAILED__;
-  else echo __VPS_RUNNING__; fi
-  exit 0
+  if [ -f "$state/prepared" ]; then echo __VPS_PREPARED__; exit 0;
+  elif [ -f "$state/failed" ]; then rm -f "$state/failed";
+  else echo __VPS_RUNNING__; exit 0; fi
 fi
 trap 'touch "$state/failed"' EXIT
 if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi
+for i in $(seq 1 30); do
+  if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+    sleep 2
+  else
+    break
+  fi
+done
 COMMIT=${quote(INSTALLER_COMMIT)}
 curl --connect-timeout 20 --max-time 180 -fLo /root/reinstall.sh "https://raw.githubusercontent.com/bin456789/reinstall/$COMMIT/reinstall.sh"
 sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh
@@ -221,18 +227,19 @@ with open(trans_path, 'w', encoding='utf-8') as f:
 print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', xml=' + str(xml_found))
 EOF_PATCH_PY
 
-python3 -c "
-import re
-with open('/root/reinstall.sh', 'r', encoding='utf-8') as f:
+python3 -c '
+with open("/root/reinstall.sh", "r", encoding="utf-8") as f:
     content = f.read()
-pattern = r'(chmod a\\+x \\$initrd_dir/trans\\\\.sh \\$initrd_dir/initrd-network\\\\.sh)'
-sub = r'\\\\1\\\\n    python3 /root/patch_trans.py \\"\\\\$initrd_dir/trans.sh\\"'
-new_content, count = re.subn(pattern, sub, content)
-assert count == 1, f'Gagal memasang hook di reinstall.sh (match count: {count})'
-with open('/root/reinstall.sh', 'w', encoding='utf-8') as f:
-    f.write(new_content)
-print('[PATCH] Hook patch_trans.py aktif di reinstall.sh')
-"
+target = "chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh"
+replacement = target + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
+if target in content:
+    with open("/root/reinstall.sh", "w", encoding="utf-8") as f:
+        f.write(content.replace(target, replacement, 1))
+    print("[PATCH] Hook patch_trans.py aktif di reinstall.sh")
+else:
+    raise SystemExit("Target hook string not found in reinstall.sh")
+'
+
 bash /root/reinstall.sh windows \\
   --image-name ${quote(os.windowsImageName)} \\
   --lang en-us \\
@@ -249,6 +256,12 @@ echo __VPS_PREPARED__
     const logUrl = extractInstallerLogUrl(sanitized, input.ip);
     const state = result.code === 0 && sanitized.includes("__VPS_PREPARED__") ? "prepared"
         : result.code === 0 && sanitized.includes("__VPS_RUNNING__") ? "running" : "failed";
+    if (state === "failed") {
+        const lines = sanitized.trim().split("\n").filter(Boolean);
+        const errorDetail = lines.slice(-5).join(" | ").slice(0, 300);
+        console.error(`[VPS:${input.orderId}] launchWindows failed (code: ${result.code}):\n${sanitized}`);
+        return { state, ...(logUrl ? { logUrl } : {}), errorDetail };
+    }
     return { state, ...(logUrl ? { logUrl } : {}) };
 }
 
