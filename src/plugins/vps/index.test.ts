@@ -145,11 +145,11 @@ test("selection snapshots configured price and duplicate checkout uses the same 
   await bot.handleUpdate(update(1, "vps_install", true));
   await bot.handleUpdate(update(2, "synthetic-private-token"));
   await bot.handleUpdate(update(3, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(4, callback(calls, "vps_region_"), true));
   assert.match(JSON.stringify(calls), /43\.210/);
-  await bot.handleUpdate(update(4, callback(calls, "vps_os_"), true));
-  const region = callback(calls, "vps_region_");
-  const one = bot.handleUpdate(update(5, region, true));
-  const two = bot.handleUpdate(update(6, region, true));
+  const os = callback(calls, "vps_os_");
+  const one = bot.handleUpdate(update(5, os, true));
+  const two = bot.handleUpdate(update(6, os, true));
   await new Promise(resolve => setImmediate(resolve));
   release!();
   await Promise.all([one, two]);
@@ -279,6 +279,26 @@ test("admin plan wizard stores the selected service and Windows-version price", 
   await bot.handleUpdate(update(5, callback(calls, "vpa_newos_"), true));
   await bot.handleUpdate(update(6, "43210"));
   assert.deepEqual(saved, { name: PLAN.name, serviceType: "install", sizeSlug: PLAN.sizeSlug, regions: PLAN.regions, osPrices: PLAN.osPrices, enabled: true });
+});
+
+test("admin plan wizard supports button selection for size and region", async t => {
+  const old = process.env["ADMIN_ID"];
+  process.env["ADMIN_ID"] = "42";
+  t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
+  let saved: Omit<VpsUiPlan, "id"> | undefined;
+  const { bot, calls } = await harness({ savePlan: async (actor, input) => { assert.equal(actor, "42"); saved = input; return { id: PLAN.id, ...input }; }, listPlans: async () => saved ? [{ id: PLAN.id, ...saved }] : [] }, { admin: true });
+  await bot.handleUpdate(update(1, "vpa_new_purchase", true));
+  await bot.handleUpdate(update(2, "SG 2GB Win"));
+  await bot.handleUpdate(update(3, callback(calls, "vpa_newsz_"), true));
+  await bot.handleUpdate(update(4, callback(calls, "vpa_newreg_"), true));
+  await bot.handleUpdate(update(5, callback(calls, "vpa_newos_"), true));
+  await bot.handleUpdate(update(6, "50000"));
+  assert.ok(saved);
+  assert.equal(saved.name, "SG 2GB Win");
+  assert.equal(saved.serviceType, "purchase");
+  assert.ok(saved.sizeSlug.startsWith("s-"));
+  assert.ok(saved.regions.length > 0);
+  assert.equal(saved.osPrices[0]?.price, 50000);
 });
 
 test("unreadable account metrics remain unknown and status text does not invent RDP login success", () => {

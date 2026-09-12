@@ -158,6 +158,7 @@ if ! mkdir "$state" 2>/dev/null; then
   exit 0
 fi
 trap 'touch "$state/failed"' EXIT
+if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi
 COMMIT=${quote(INSTALLER_COMMIT)}
 curl --connect-timeout 20 --max-time 180 -fLo /root/reinstall.sh "https://raw.githubusercontent.com/bin456789/reinstall/$COMMIT/reinstall.sh"
 sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh

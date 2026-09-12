@@ -4,7 +4,7 @@ import type { Plugin } from "../../types/Plugin.js";
 import { vpsService } from "../../vps/service.js";
 import type { VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
 import { clearVpsInput, setVpsInput } from "./input.js";
-import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
+import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 
 interface Draft {
   id: string;
@@ -77,12 +77,12 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
     const keyboard = new InlineKeyboard();
-    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${plan.name} · ${plan.sizeSlug}`, `vps_plan_${draft.id}_${index + offset}`).row());
+    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${plan.name} · ${formatSize(plan.sizeSlug)}`, `vps_plan_${draft.id}_${index + offset}`).row());
     if (offset) keyboard.text("← Sebelumnya", `vps_page_${draft.id}_${Math.max(0, offset - 10)}`);
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
     keyboard.text("🔙 VPS", "vps_home");
-    await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? "Pilih paket spek:" : "Belum ada paket aktif. Hubungi admin."}${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+    await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? "(Langkah 1/3) Pilih paket spek VPS:" : "Belum ada paket aktif. Hubungi admin."}${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
   }
   async function start(ctx: Context, serviceType: VpsServiceType): Promise<void> {
     if (!deps.enabled()) { await ctx.reply("Pemesanan VPS belum diaktifkan oleh admin.", { reply_markup: homeKeyboard() }); return; }
@@ -148,6 +148,17 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         if (data === "vps_buy" || data === "vps_install") { await start(ctx, data === "vps_buy" ? "purchase" : "install"); return; }
         const page = /^vps_page_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
         if (page) { await choosePlan(ctx, currentDraft(actor, page[1]!), Number(page[2])); return; }
+        const backRegion = /^vps_backregion_([a-f0-9-]{36})$/.exec(data);
+        if (backRegion) {
+          const draft = currentDraft(actor, backRegion[1]!);
+          if (!draft.plan) throw new Error("Unknown plan");
+          delete draft.region; delete draft.os;
+          const keyboard = new InlineKeyboard();
+          draft.plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+          keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
+          await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+          return;
+        }
         const selection = /^vps_(plan|os|region)_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
         if (selection) {
           const draft = currentDraft(actor, selection[2]!);
@@ -156,21 +167,35 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             const plan = draft.plans[index];
             if (!plan) throw new Error("Unknown plan");
             draft.plan = plan;
-            delete draft.os; delete draft.region;
+            delete draft.region; delete draft.os;
             const keyboard = new InlineKeyboard();
-            plan.osPrices.forEach((os, i) => keyboard.text(`${os.label} · ${vpsPrice(os.price)}`, `vps_os_${draft.id}_${i}`).row());
-            await vpsReply(ctx, `${plan.name} · ${plan.sizeSlug}\n\nPilih OS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard.text("Batal", "vps_home"));
-          } else if (selection[1] === "os") {
+            plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+            keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
+            await vpsReply(ctx, `🖥️ ${plan.name} · ${formatSize(plan.sizeSlug)}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+          } else if (selection[1] === "region") {
+            const region = draft.plan?.regions[index];
+            if (!region || !draft.plan) throw new Error("Unknown region");
+            draft.region = region;
+            if (draft.os) {
+              await checkout(ctx, draft);
+              return;
+            }
+            delete draft.os;
+            const keyboard = new InlineKeyboard();
+            draft.plan.osPrices.forEach((os, i) => keyboard.text(`${os.label} · ${vpsPrice(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+            keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
+            await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(region)}\n\n(Langkah 3/3) Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+          } else {
             const os = draft.plan?.osPrices[index];
             if (!os || !draft.plan) throw new Error("Unknown OS");
             draft.os = os.os;
-            const keyboard = new InlineKeyboard();
-            draft.plan.regions.forEach((region, i) => keyboard.text(region, `vps_region_${draft.id}_${i}`).row());
-            await vpsReply(ctx, `${draft.plan.name}\nOS: ${os.label}\nHarga: ${vpsPrice(os.price)}\n\nPilih region (ketersediaan diperiksa melalui DigitalOcean saat checkout):`, keyboard.text("Batal", "vps_home"));
-          } else {
-            const region = draft.plan?.regions[index];
-            if (!region || !draft.os) throw new Error("Unknown region");
-            draft.region = region;
+            if (!draft.region) {
+              const keyboard = new InlineKeyboard();
+              draft.plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+              keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
+              await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+              return;
+            }
             await checkout(ctx, draft);
           }
           return;

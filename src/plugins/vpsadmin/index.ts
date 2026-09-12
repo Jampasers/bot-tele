@@ -27,6 +27,37 @@ function shortText(value: string, max = 80): string {
   return result;
 }
 
+export const STANDARD_SIZES = [
+  { label: "1 vCPU · 1 GB RAM (25GB SSD)", slug: "s-1vcpu-1gb" },
+  { label: "1 vCPU · 2 GB RAM (50GB SSD)", slug: "s-1vcpu-2gb" },
+  { label: "2 vCPU · 2 GB RAM (60GB SSD)", slug: "s-2vcpu-2gb" },
+  { label: "2 vCPU · 4 GB RAM (80GB SSD)", slug: "s-2vcpu-4gb" },
+  { label: "4 vCPU · 8 GB RAM (160GB SSD)", slug: "s-4vcpu-8gb" },
+  { label: "8 vCPU · 16 GB RAM (320GB SSD)", slug: "s-8vcpu-16gb" },
+  { label: "1 vCPU · 512 MB RAM (10GB SSD)", slug: "s-1vcpu-512mb-10gb" },
+] as const;
+
+export const STANDARD_REGIONS = [
+  { label: "🇸🇬 Singapore (sgp1)", regions: ["sgp1"] },
+  { label: "🇩🇪 Frankfurt (fra1)", regions: ["fra1"] },
+  { label: "🇬🇧 London (lon1)", regions: ["lon1"] },
+  { label: "🇳🇱 Amsterdam (ams3)", regions: ["ams3"] },
+  { label: "🇺🇸 New York (nyc1, nyc3)", regions: ["nyc1", "nyc3"] },
+  { label: "🇺🇸 San Francisco (sfo3)", regions: ["sfo3"] },
+  { label: "🇮🇳 Bangalore (blr1)", regions: ["blr1"] },
+  { label: "🇦🇺 Sydney (syd1)", regions: ["syd1"] },
+  { label: "🇨🇦 Toronto (tor1)", regions: ["tor1"] },
+  { label: "🌐 Semua Populer (sgp1, fra1, lon1, ams3, nyc1, nyc3, sfo3)", regions: ["sgp1", "fra1", "lon1", "ams3", "nyc1", "nyc3", "sfo3"] },
+] as const;
+
+interface PendingPlan {
+  name: string;
+  serviceType: VpsServiceType;
+  sizeSlug?: string;
+  regions?: string[];
+  expiresAt: number;
+}
+
 export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
   const deps: VpsUiDependencies = { ...vpsService, ...overrides };
   const actorOf = (ctx: Context): string => String(ctx.from!.id);
@@ -84,30 +115,59 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     });
     await vpsReply(ctx, "➕ Tambah token toko\n\n(1/3) Kirim label akun/token (maksimal 80 karakter). Ketik /batal untuk membatalkan.", new InlineKeyboard().text("Batal", "vpa_home"));
   }
+
+  async function promptSize(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
+    const keyboard = new InlineKeyboard();
+    STANDARD_SIZES.forEach((size, index) => keyboard.text(size.label, `vpa_newsz_${index}`).row());
+    keyboard.text("Batal", "vpa_home");
+
+    input(actor, async (sizeCtx, sizeValue) => {
+      const sizeSlug = shortText(sizeValue, 64);
+      if (!/^[a-z0-9-]+$/.test(sizeSlug)) throw new Error("Invalid size");
+      pending.sizeSlug = sizeSlug;
+      await promptRegions(sizeCtx, actor, pending);
+    });
+
+    await vpsReply(ctx, `➕ Paket ${pending.serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(2/5) Pilih slug size DigitalOcean untuk "${pending.name}":\n\n(Atau kirim teks manual jika menggunakan size custom)`, keyboard);
+  }
+
+  async function promptRegions(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
+    const keyboard = new InlineKeyboard();
+    STANDARD_REGIONS.forEach((reg, index) => keyboard.text(reg.label, `vpa_newreg_${index}`).row());
+    keyboard.text("Batal", "vpa_home");
+
+    input(actor, async (regionCtx, regionValue) => {
+      const regions = [...new Set(regionValue.trim().split(/[,\s]+/))];
+      if (!regions.length || regions.length > 30 || regions.some(region => !/^[a-z]{2,10}\d{1,2}$/.test(region))) throw new Error("Invalid regions");
+      pending.regions = regions;
+      await promptOs(regionCtx, actor, pending);
+    });
+
+    await vpsReply(ctx, `➕ Paket ${pending.serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(3/5) Pilih region yang ditawarkan untuk "${pending.name}" (${pending.sizeSlug}):\n\n(Atau kirim teks manual jika ingin kombinasi custom, contoh: sgp1,fra1)`, keyboard);
+  }
+
+  async function promptOs(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
+    clearVpsInput(actor);
+    const osList = deps.listOs();
+    const keyboard = new InlineKeyboard();
+    osList.forEach((os, index) => keyboard.text(os.label, `vpa_newos_${index}`).row());
+    keyboard.text("Batal", "vpa_home");
+
+    await vpsReply(ctx, `(4/5) Pilih OS untuk "${pending.name}" (${pending.sizeSlug}, ${pending.regions?.join(", ")}):\n\nBuat paket terpisah untuk OS dengan harga berbeda.`, keyboard);
+  }
+
   async function addPlan(ctx: Context, serviceType: VpsServiceType): Promise<void> {
     const actor = actorOf(ctx);
     clearVpsInput(actor);
     input(actor, async (nameCtx, value) => {
       const name = shortText(value);
-      input(actor, async (sizeCtx, sizeValue) => {
-        const sizeSlug = shortText(sizeValue, 64);
-        if (!/^[a-z0-9-]+$/.test(sizeSlug)) throw new Error("Invalid size");
-        input(actor, async (regionCtx, regionValue) => {
-          const regions = [...new Set(regionValue.trim().split(/[,\s]+/))];
-          if (!regions.length || regions.length > 30 || regions.some(region => !/^[a-z]{2,10}\d{1,2}$/.test(region))) throw new Error("Invalid regions");
-          const osList = deps.listOs();
-          const keyboard = new InlineKeyboard();
-          osList.forEach((os, index) => keyboard.text(os.label, `vpa_newos_${index}`).row());
-          pendingPlans.set(actor, { name, serviceType, sizeSlug, regions, expiresAt: Date.now() + 10 * 60_000 });
-          await regionCtx.reply("(4/5) Pilih OS. Buat paket terpisah untuk OS dengan harga berbeda.", { reply_markup: keyboard.text("Batal", "vpa_home") });
-        });
-        await sizeCtx.reply("(3/5) Kirim slug region yang ditawarkan, pisahkan dengan koma. Contoh: sgp1,fra1. Ketersediaan aktual divalidasi melalui DO saat checkout.");
-      });
-      await nameCtx.reply("(2/5) Kirim slug size DigitalOcean. Contoh: s-1vcpu-2gb.");
+      const pending: PendingPlan = { name, serviceType, expiresAt: Date.now() + 10 * 60_000 };
+      pendingPlans.set(actor, pending);
+      await promptSize(nameCtx, actor, pending);
     });
     await vpsReply(ctx, `➕ Paket ${serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(1/5) Kirim nama paket. Ketik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vpa_home"));
   }
-  const pendingPlans = new Map<string, { name: string; serviceType: VpsServiceType; sizeSlug: string; regions: string[]; expiresAt: number }>();
+  const pendingPlans = new Map<string, PendingPlan>();
 
   return {
     name: "vpsadmin", version: "1.0.0", internalOnly: true,
@@ -131,19 +191,39 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           return;
         }
         if (data === "vpa_new_purchase" || data === "vpa_new_install") { await addPlan(ctx, data === "vpa_new_install" ? "install" : "purchase"); return; }
+        const newSz = /^vpa_newsz_(\d{1,2})$/.exec(data);
+        if (newSz) {
+          const pending = pendingPlans.get(actor);
+          const size = STANDARD_SIZES[Number(newSz[1])];
+          if (!pending || !size || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
+          clearVpsInput(actor);
+          pending.sizeSlug = size.slug;
+          await promptRegions(ctx, actor, pending);
+          return;
+        }
+        const newReg = /^vpa_newreg_(\d{1,2})$/.exec(data);
+        if (newReg) {
+          const pending = pendingPlans.get(actor);
+          const reg = STANDARD_REGIONS[Number(newReg[1])];
+          if (!pending || !reg || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
+          clearVpsInput(actor);
+          pending.regions = [...reg.regions];
+          await promptOs(ctx, actor, pending);
+          return;
+        }
         const newOs = /^vpa_newos_(\d{1,3})$/.exec(data);
         if (newOs) {
           const pending = pendingPlans.get(actor);
           const os = deps.listOs()[Number(newOs[1])];
-          if (!pending || !os || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
+          if (!pending || !pending.sizeSlug || !pending.regions || !os || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
           pendingPlans.delete(actor);
           input(actor, async (priceCtx, value) => {
             const price = numeric(value, 1, 100_000_000);
-            const plan = await deps.savePlan(actor, { name: pending.name, serviceType: pending.serviceType, sizeSlug: pending.sizeSlug, regions: pending.regions, osPrices: [{ os: os.id, label: os.label, price }], enabled: true });
+            const plan = await deps.savePlan(actor, { name: pending.name, serviceType: pending.serviceType, sizeSlug: pending.sizeSlug!, regions: pending.regions!, osPrices: [{ os: os.id, label: os.label, price }], enabled: true });
             await priceCtx.reply("Paket dan harga tersimpan di database.");
             await planDetail(priceCtx, plan.id);
           });
-          await vpsReply(ctx, `(5/5) ${pending.name}\nOS: ${os.label}\n\nKirim ${pending.serviceType === "install" ? "biaya jasa" : "harga jual"} dalam Rupiah (angka bulat).`, new InlineKeyboard().text("Batal", "vpa_home"));
+          await vpsReply(ctx, `(5/5) ${pending.name}\nSpek: ${pending.sizeSlug}\nRegion: ${pending.regions.join(", ")}\nOS: ${os.label}\n\nKirim ${pending.serviceType === "install" ? "biaya jasa" : "harga jual"} dalam Rupiah (angka bulat).`, new InlineKeyboard().text("Batal", "vpa_home"));
           return;
         }
         const list = /^vpa_tokens_(all|active|warning|locked|available|problem)_(\d{1,6})$/.exec(data);
