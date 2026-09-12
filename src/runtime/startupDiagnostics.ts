@@ -4,6 +4,7 @@ export type StartupStage =
   | "migration"
   | "provider-data"
   | "platform-bot"
+  | "vps-worker"
   | "rental-runtime"
   | "rental-webhook"
   | "ready";
@@ -14,6 +15,7 @@ const GENERIC_GUIDANCE: Record<StartupStage, string> = {
   migration: "Back up MongoDB, run npm run migrate:tenants as a dry-run, then apply the reviewed migration.",
   "provider-data": "Check SMSBOWER_API_KEY and outbound provider connectivity.",
   "platform-bot": "Check BOT_TOKEN and connectivity to api.telegram.org.",
+  "vps-worker": "Check VPS_ENABLED, VPS_CONCURRENCY (1-5), CREDENTIAL_ENCRYPTION_KEY, VPS indexes and outbound DigitalOcean/SSH connectivity.",
   "rental-runtime": "Check CREDENTIAL_ENCRYPTION_KEY and the encrypted tokens of active rentals.",
   "rental-webhook": "Check RENTAL_WEBHOOK_PORT, RENTAL_WEBHOOK_SECRET, and whether the loopback port is available.",
   ready: "Check the preceding startup logs for the last completed component.",

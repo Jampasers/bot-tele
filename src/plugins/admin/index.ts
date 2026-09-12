@@ -222,6 +222,8 @@ async function buildHomeKeyboard(): Promise<InlineKeyboard> {
     .row()
     .text("🤖 Kelola Bot Rental", "adm_rental")
     .row()
+    .text("🖥️ VPS DigitalOcean", "vpa_home")
+    .row()
     .text("🛡️ Anti-Fraud & Security Monitor", "adm_antifraud")
     .row()
     .text("🔧 Mode Maintenance", "adm_maintenance")

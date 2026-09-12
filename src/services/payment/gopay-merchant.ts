@@ -5,8 +5,8 @@ const DEFAULT_ENDPOINT =
   "https://api.gojekapi.com/merchant-analytics/v2/merchants/transactions";
 
 export interface AccessTokenProvider {
-  getAccessToken(): Promise<string>;
-  refreshAccessToken?(): Promise<string>;
+  getAccessToken(signal?: AbortSignal): Promise<string>;
+  refreshAccessToken?(signal?: AbortSignal): Promise<string>;
 }
 
 export interface GopayMerchantOptions {
@@ -50,10 +50,11 @@ export class GopayMerchant {
     }
   }
 
-  public async getQrisSettlements(query: TransactionQuery): Promise<PaymentTransaction[]> {
+  public async getQrisSettlements(query: TransactionQuery, signal?: AbortSignal): Promise<PaymentTransaction[]> {
     const result: PaymentTransaction[] = [];
     for (let from = 0; ; from += this.pageSize) {
-      const page = await this.fetchPage(query, from);
+      signal?.throwIfAborted();
+      const page = await this.fetchPage(query, from, signal);
       result.push(...page.transactions);
       if (
         page.transactions.length < this.pageSize ||
@@ -68,8 +69,8 @@ export class GopayMerchant {
     return this.getQrisSettlements(query);
   }
 
-  private async fetchPage(query: TransactionQuery, from: number): Promise<Page> {
-    return this.fetchPageWithToken(query, from, await this.token(), false);
+  private async fetchPage(query: TransactionQuery, from: number, signal?: AbortSignal): Promise<Page> {
+    return this.fetchPageWithToken(query, from, await this.token(false, signal), false, signal);
   }
 
   private async fetchPageWithToken(
@@ -77,9 +78,13 @@ export class GopayMerchant {
     from: number,
     token: string,
     refreshed: boolean,
+    signal?: AbortSignal,
   ): Promise<Page> {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const response = await this.fetchImpl(this.url(query, from), {
         headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
@@ -88,7 +93,7 @@ export class GopayMerchant {
       });
       if (response.status === 401 || response.status === 403) {
         if (!refreshed && this.tokenProvider?.refreshAccessToken) {
-          return this.fetchPageWithToken(query, from, await this.token(true), true);
+          return this.fetchPageWithToken(query, from, await this.token(true, signal), true, signal);
         }
         throw new Error("GoPay Merchant API unauthorized.");
       }
@@ -103,12 +108,14 @@ export class GopayMerchant {
           .filter((value): value is PaymentTransaction => value !== null),
       };
     } catch (error) {
+      signal?.throwIfAborted();
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("GoPay Merchant API request timed out.");
       }
       throw error;
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
   }
 
@@ -125,11 +132,12 @@ export class GopayMerchant {
     return `${this.endpoint}?${params.toString()}`;
   }
 
-  private async token(refresh = false): Promise<string> {
+  private async token(refresh = false, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const provider = this.tokenProvider;
     const value = refresh && provider?.refreshAccessToken
-      ? await provider.refreshAccessToken()
-      : provider ? await provider.getAccessToken() : this.options.accessToken;
+      ? await provider.refreshAccessToken(signal)
+      : provider ? await provider.getAccessToken(signal) : this.options.accessToken;
     const token = value?.trim();
     if (!token) throw new Error("GoPay Merchant/GoBiz login belum dikonfigurasi (masukkan email & password Gojek atau accessTokenProvider).");
     return token;

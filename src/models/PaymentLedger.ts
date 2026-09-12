@@ -18,7 +18,7 @@ const claim = new Schema({
   transactionId: { type: String, required: true },
   invoiceReference: { type: String, required: true },
   tenantId: { type: String, required: true },
-  kind: { type: String, enum: ["store", "rental"], required: true },
+  kind: { type: String, enum: ["store", "rental", "vps"], required: true },
   paidAt: { type: Date, required: true },
   createdAt: { type: Date, default: Date.now },
 }, { versionKey: false });

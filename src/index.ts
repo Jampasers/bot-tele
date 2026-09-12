@@ -18,6 +18,9 @@ import { RentalScheduler } from "./runtime/RentalScheduler.js";
 import { createRentalWebhookServer } from "./rental/rentalWebhook.js";
 import { installRentalLogContext } from "./runtime/logging.js";
 import { formatStartupFailure, type StartupStage } from "./runtime/startupDiagnostics.js";
+import { VpsWorker } from "./vps/worker.js";
+import { buyerTokens } from "./vps/security.js";
+import { clearAllVpsInputs } from "./plugins/vps/input.js";
 
 installRentalLogContext();
 
@@ -28,11 +31,13 @@ async function main(): Promise<void> {
   const token = process.env.BOT_TOKEN?.trim();
   if (!token || !process.env.MONGODB_URI?.trim()) throw new Error("BOT_TOKEN and MONGODB_URI are required.");
   const rentalEnabled = process.env.RENTAL_ENABLED === "true";
-  if (rentalEnabled) validateEncryptionKey();
+  const vpsEnabled = process.env.VPS_ENABLED === "true";
+  if (rentalEnabled || vpsEnabled) validateEncryptionKey();
   const context = platformContext();
   let platform: BotInstance | undefined;
   let manager: BotManager | undefined;
   let scheduler: RentalScheduler | undefined;
+  let vpsWorker: VpsWorker | undefined;
   let webhook: Server | undefined;
   let stopBackup: (() => Promise<void>) | undefined;
   let shuttingDown: Promise<void> | undefined;
@@ -50,6 +55,8 @@ async function main(): Promise<void> {
       // No new billing work while runtime instances are being drained.
       const failures: unknown[] = [];
       const stopSteps = [
+        () => { clearAllVpsInputs(); buyerTokens.clear(); },
+        () => vpsWorker?.stop(),
         () => scheduler?.stop(),
         () => webhook ? new Promise<void>(resolve => { webhook!.close(() => resolve()); webhook!.closeIdleConnections(); }) : undefined,
         () => stopBackup?.(),
@@ -92,6 +99,11 @@ async function main(): Promise<void> {
       ActivityLogService.setDefaultApi(bot.api);
       platform = new BotInstance(bot, context);
       platform.start();
+      if (vpsEnabled) {
+        startupStage = "vps-worker";
+        vpsWorker = new VpsWorker(bot.api);
+        vpsWorker.start();
+      }
       stopBackup = scheduleDailyBackup(bot.api);
       backgroundStarts.push(ImapOtpService.start(bot.api).catch(() => console.warn("[Platform] IMAP startup failed.")));
       if (process.env.WHATSAPP_ENABLED === "true" || Boolean(process.env.WHATSAPP_PAIRING_PHONE)) {
@@ -117,7 +129,7 @@ async function main(): Promise<void> {
         }
       }
       startupStage = "ready";
-      console.log(`[Platform] @${bot.botInfo.username} ready. Rental runtime ${rentalEnabled ? "enabled" : "disabled"}.`);
+      console.log(`[Platform] @${bot.botInfo.username} ready. Rental runtime ${rentalEnabled ? "enabled" : "disabled"}. VPS worker ${vpsEnabled ? "enabled" : "disabled"}.`);
     })();
     await startup;
   } catch (error) {

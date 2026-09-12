@@ -4,7 +4,7 @@ import { User, IUser } from "../../models/User.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
 import { ActivityLogService, LogUserInfo } from "../../services/activityLog.js";
 import { HydratedDocument } from "mongoose";
-import { getTenantContext } from "../../tenant/context.js";
+import { getTenantContext, PLATFORM_TENANT_ID } from "../../tenant/context.js";
 import { hasFeature } from "../../tenant/features.js";
 
 // ============================================================================
@@ -26,6 +26,11 @@ function hasRentalCatalog(): boolean {
   return (
     !getTenantContext().rentalId && process.env["RENTAL_ENABLED"] === "true"
   );
+}
+
+function hasVpsCatalog(): boolean {
+  const tenant = getTenantContext();
+  return tenant.tenantId === PLATFORM_TENANT_ID && !tenant.rentalId && process.env["VPS_ENABLED"] === "true";
 }
 
 // ============================================================================
@@ -78,6 +83,7 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
   if (hasFeature("digital"))
     kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
   if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot", "rs_home");
+  if (hasVpsCatalog()) kb.row().text("🖥️ VPS", "vps_home");
   if (hasFeature("affiliate")) kb.row().text("👥 Program Afiliasi", "aff_home");
   return kb;
 }
@@ -152,6 +158,7 @@ export async function buildCatalogText(): Promise<string> {
     otpDesc +
     `📦 <b>Produk Digital</b> — Akun premium, lisensi, voucher, & produk digital instan.\n\n` +
     rentalDesc +
+    (hasVpsCatalog() ? "🖥️ <b>VPS</b> — Beli VPS DigitalOcean atau jasa setup/install pada akun sendiri.\n" : "") +
     `<i>Stok dan pesanan diproses otomatis 24/7.</i>`
   );
 }
@@ -184,6 +191,7 @@ function buildHelpText(): string {
     `💬 <b>Telegram:</b> <a href="https://t.me/myoneandonlyaccount">@myoneandonlyaccount</a>\n` +
     `🕐 <b>Hours:</b>    Mon–Fri, 09:30–22:00 WIB\n` +
     rentalHelp +
+    (hasVpsCatalog() ? "\n🖥️ <b>VPS DigitalOcean:</b> /vps\n" : "") +
     `\n` +
     `<i>Average response time: under 2 hours.</i>`
   );

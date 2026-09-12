@@ -26,6 +26,10 @@ import { SMSBowerService } from "./smsbower.js";
 import { clearMaintenanceCache } from "../middlewares/maintenance.js";
 import { getAdminIds } from "../core/admin.js";
 import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
+import { VpsCredential, VpsAccount } from "../models/VpsCredential.js";
+import { VpsPlan } from "../models/VpsPlan.js";
+import { VpsOrder } from "../models/VpsOrder.js";
+import { PaymentSettlementClaim } from "../models/PaymentLedger.js";
 
 // ============================================================================
 //  Database Backup & Rollback Service
@@ -34,10 +38,14 @@ import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 export interface BackupCollectionInfo {
   name: string;
   model: Model<any>;
+  select?: string;
+  filter?: Record<string, unknown>;
+  platformOnly?: boolean;
+  exportOnly?: boolean;
 }
 
 export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
-  { name: "users",           model: User },
+  { name: "users",           model: User, select: "+appliedVpsPaymentEffectIds +appliedRentalBalancePaymentIds" },
   { name: "digitalproducts", model: DigitalProduct },
   { name: "digitalstocks",   model: DigitalStock },
   { name: "digitalorders",   model: DigitalOrder },
@@ -52,6 +60,11 @@ export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "restockalerts",   model: RestockAlert },
   { name: "warrantyclaims",  model: WarrantyClaim },
   { name: "fraudlogs",       model: FraudLog },
+  { name: "vpscredentials", model: VpsCredential, select: "+tokenEncrypted", platformOnly: true, exportOnly: true },
+  { name: "vpsaccounts", model: VpsAccount, platformOnly: true, exportOnly: true },
+  { name: "vpsplans", model: VpsPlan, platformOnly: true, exportOnly: true },
+  { name: "vpsorders", model: VpsOrder, select: "+passwordEncrypted", platformOnly: true, exportOnly: true },
+  { name: "vpspaymentclaims", model: PaymentSettlementClaim, filter: { tenantId: PLATFORM_TENANT_ID, kind: "vps" }, platformOnly: true, exportOnly: true },
 ] as const;
 
 export const COLLECTION_MODEL_MAP = new Map<string, Model<any>>(
@@ -93,7 +106,10 @@ export async function createBackupZip(): Promise<string> {
 
   // Export each collection to a JSON file
   for (const col of BACKUP_COLLECTIONS) {
-    const docs = await col.model.find({}).lean();
+    if (col.platformOnly && getTenantId() !== PLATFORM_TENANT_ID) continue;
+    const query = col.model.find(col.filter ?? {});
+    if (col.select) query.select(col.select);
+    const docs = await query.lean();
     const filePath = join(tmpDir, `${col.name}.json`);
     writeFileSync(filePath, JSON.stringify(docs, null, 2), "utf-8");
   }
@@ -220,7 +236,8 @@ export function inspectBackupZip(zipBuffer: Buffer): InspectBackupResult {
 
       const colName = fileName.replace(/\.json$/i, "").toLowerCase();
       const model = COLLECTION_MODEL_MAP.get(colName);
-      if (!model) {
+      const info = BACKUP_COLLECTIONS.find(col => col.name === colName);
+      if (!model || (info?.platformOnly && getTenantId() !== PLATFORM_TENANT_ID)) {
         skippedFiles.push(fileName);
         continue;
       }
@@ -298,6 +315,14 @@ export async function executeRollback(
   adminUser?: { telegramId: string | number; firstName?: string | undefined; username?: string | undefined }
 ): Promise<RollbackResult> {
   if (getTenantId() !== PLATFORM_TENANT_ID) throw new Error("Database rollback is platform-only.");
+  // Provider mutations and settled payments cannot be undone by rolling MongoDB
+  // backwards. Export these records, but require an offline reviewed restore.
+  if (collectionsData.some(item => BACKUP_COLLECTIONS.find(col => col.name === item.name)?.exportOnly)) {
+    throw new Error("Backup VPS hanya untuk pemulihan offline setelah rekonsiliasi DigitalOcean dan ledger. Restore chat ditolak agar droplet/pembayaran tidak diproses ulang.");
+  }
+  if (collectionsData.some(item => item.name === "users") && await VpsOrder.exists({ tenantId: PLATFORM_TENANT_ID })) {
+    throw new Error("Restore wallet dengan riwayat VPS memerlukan rekonsiliasi offline agar bukti debit/refund tidak hilang.");
+  }
   // Validate every document before deleting anything. Legacy archives are
   // accepted only into the platform tenant; foreign tenant IDs are rejected.
   for (const item of collectionsData) {

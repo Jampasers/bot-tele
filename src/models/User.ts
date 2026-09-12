@@ -32,6 +32,9 @@ export interface IUser {
   /** Idempotency keys for initial rental purchases paid from platform balance. */
   appliedRentalBalancePaymentIds: string[];
 
+  /** Durable VPS debit/refund receipts, written atomically with the balance. */
+  appliedVpsPaymentEffectIds: string[];
+
   /**
    * Telegram ID of the user who referred this user.
    * Null/undefined if user registered without a referral link.
@@ -116,6 +119,11 @@ const userSchema = new Schema<IUser>(
       min: [0, "totalOrders cannot be negative"],
     },
     appliedRentalBalancePaymentIds: {
+      type: [String],
+      default: [],
+      select: false,
+    },
+    appliedVpsPaymentEffectIds: {
       type: [String],
       default: [],
       select: false,

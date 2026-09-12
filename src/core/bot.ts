@@ -8,6 +8,7 @@ import { antiFraudMiddleware } from "../middlewares/antiFraud.js";
 import { platformContext, runWithTenant, type TenantContext } from "../tenant/context.js";
 import { rentalMiddleware } from "../rental/rental.middleware.js";
 import { rentalTokenInputMiddleware } from "../rental/rentalTokenInput.middleware.js";
+import { vpsInputMiddleware } from "../plugins/vps/input.js";
 
 /**
  * Creates the grammY Bot instance and wires up the dynamic plugin loader.
@@ -50,6 +51,7 @@ export async function createBot(token: string, tenant: TenantContext = platformC
   );
 
   // A BotFather token must be deleted even when a later gate drops the update.
+  bot.use(vpsInputMiddleware);
   bot.use(rentalTokenInputMiddleware);
 
   // 1. Rate Limiter — drop spam before anything else runs

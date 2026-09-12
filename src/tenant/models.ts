@@ -18,9 +18,12 @@ import { BotRental } from "../models/BotRental.js";
 import { RentalPlan } from "../models/RentalPlan.js";
 import { RentalPayment } from "../models/RentalPayment.js";
 import { PaymentAmountReservation, PaymentSettlementClaim } from "../models/PaymentLedger.js";
+import { VpsCredential, VpsAccount } from "../models/VpsCredential.js";
+import { VpsPlan } from "../models/VpsPlan.js";
+import { VpsOrder } from "../models/VpsOrder.js";
 
 /** Tenant data models only. Rental/plan/platform payment metadata is deliberately separate. */
 export const TENANT_MODELS = [AffiliateLog, BalanceLog, BotConfig, Cart, DigitalOrder, DigitalProduct, DigitalStock, FraudLog, Order, PromoCode, RestockAlert, SmsConfig, TopupSession, User, WarrantyClaim, TenantPaymentConfig] as const;
 
 /** Private control-plane collections retain platform-wide uniqueness. */
-export const PLATFORM_MODELS = [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim] as const;
+export const PLATFORM_MODELS = [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, VpsCredential, VpsAccount, VpsPlan, VpsOrder] as const;

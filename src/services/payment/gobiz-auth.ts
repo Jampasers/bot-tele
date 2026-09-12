@@ -26,23 +26,28 @@ export class GobizAuthService {
     this.uniqueId = options.uniqueId ?? "248da1f2-55b6-46d7-be48-eb5861c447f3";
   }
 
-  public async getAccessToken(): Promise<string> {
+  public async getAccessToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     if (this.cachedAccessToken) {
       return this.cachedAccessToken;
     }
 
-    this.cachedAccessToken = await this.login();
+    this.cachedAccessToken = await this.login(signal);
     return this.cachedAccessToken;
   }
 
-  public async refreshAccessToken(): Promise<string> {
-    this.cachedAccessToken = await this.login();
+  public async refreshAccessToken(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    this.cachedAccessToken = await this.login(signal);
     return this.cachedAccessToken;
   }
 
-  private async login(): Promise<string> {
+  private async login(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
 
     try {
       const response = await this.fetchImpl(this.endpoint, {
@@ -91,6 +96,7 @@ export class GobizAuthService {
 
       return accessToken;
     } catch (error) {
+      signal?.throwIfAborted();
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("GoBiz login request timed out");
       }
@@ -98,6 +104,7 @@ export class GobizAuthService {
       throw error;
     } finally {
       clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
     }
   }
 }
