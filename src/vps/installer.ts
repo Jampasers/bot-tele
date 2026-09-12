@@ -164,6 +164,74 @@ sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh
 sed -i "/^confhome_cn=/s|/main$|/$COMMIT|" /root/reinstall.sh
 sed -i 's/command curl --insecure /command curl /' /root/reinstall.sh
 chmod 700 /root/reinstall.sh
+cat << 'EOF_PATCH_PY' > /root/patch_trans.py
+import sys
+
+trans_path = sys.argv[1]
+with open(trans_path, 'r', encoding='utf-8') as f:
+    lines = f.read().splitlines()
+
+new_lines = []
+bats_found = False
+xml_found = False
+
+fix_bat_code = """    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
+@echo off
+rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
+reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System" /v DisableCAD /t REG_DWORD /d 1 /f
+reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
+
+rem Aktifkan Remote Desktop dan matikan NLA (Network Level Authentication)
+reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
+reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
+
+rem Izinkan CredSSP encryption oracle di server
+reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\\\CredSSP\\\\Parameters" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f
+
+rem Izinkan port RDP di Windows Firewall
+netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+netsh advfirewall firewall add rule name="Allow-RDP-TCP" dir=in action=allow protocol=TCP localport=3389
+netsh advfirewall firewall add rule name="Allow-RDP-UDP" dir=in action=allow protocol=UDP localport=3389
+
+rem Pastikan service TermService berjalan otomatis
+sc config TermService start= auto
+net start TermService
+
+del "%~f0"
+EOF_RDP_FIX
+    unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
+    bats="$bats windows-fix-rdp.bat\\""""
+
+xml_patch_code = """    sed -i 's|</RunSynchronous>|<RunSynchronousCommand wcm:action="add"><Order>11</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows\\\\\\\\CurrentVersion\\\\\\\\Policies\\\\\\\\System\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>12</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows NT\\\\\\\\CurrentVersion\\\\\\\\Winlogon\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>13</Order><Path>reg add \\"HKLM\\\\\\\\SYSTEM\\\\\\\\CurrentControlSet\\\\\\\\Control\\\\\\\\Terminal Server\\\\\\\\WinStations\\\\\\\\RDP-Tcp\\" /v UserAuthentication /t REG_DWORD /d 0 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>14</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows\\\\\\\\CurrentVersion\\\\\\\\Policies\\\\\\\\System\\\\\\\\CredSSP\\\\\\\\Parameters\\" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f</Path></RunSynchronousCommand></RunSynchronous>|' /tmp/autounattend.xml
+    sed -i 's|<fDenyTSConnections>false</fDenyTSConnections>|</component><component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><UserAuthentication>0</UserAuthentication></component><component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><fDenyTSConnections>false</fDenyTSConnections>|' /tmp/autounattend.xml"""
+
+for line in lines:
+    new_lines.append(line)
+    if not bats_found and line.strip() == 'bats=':
+        bats_found = True
+        new_lines.append(fix_bat_code)
+    elif not xml_found and 'windows.xml /tmp/autounattend.xml' in line:
+        xml_found = True
+        new_lines.append(xml_patch_code)
+
+with open(trans_path, 'w', encoding='utf-8') as f:
+    f.write('\\n'.join(new_lines) + '\\n')
+print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', xml=' + str(xml_found))
+EOF_PATCH_PY
+
+python3 -c "
+import re
+with open('/root/reinstall.sh', 'r', encoding='utf-8') as f:
+    content = f.read()
+pattern = r'(chmod a\\+x \\$initrd_dir/trans\\\\.sh \\$initrd_dir/initrd-network\\\\.sh)'
+sub = r'\\\\1\\\\n    python3 /root/patch_trans.py \\"\\\\$initrd_dir/trans.sh\\"'
+new_content, count = re.subn(pattern, sub, content)
+assert count == 1, f'Gagal memasang hook di reinstall.sh (match count: {count})'
+with open('/root/reinstall.sh', 'w', encoding='utf-8') as f:
+    f.write(new_content)
+print('[PATCH] Hook patch_trans.py aktif di reinstall.sh')
+"
 bash /root/reinstall.sh windows \\
   --image-name ${quote(os.windowsImageName)} \\
   --lang en-us \\
@@ -253,7 +321,7 @@ export async function inspectWindows(input: { ip: string; windowsPassword: strin
     const logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
     if (signal?.aborted) throw new InstallerError("cancelled");
     return { rdpOpen, loginVerified: false, logState: logReady ? "ready" : "unavailable", ...(logUrl ? { logUrl } : {}),
-        detail: rdpOpen ? "Port TCP RDP terbuka. Login Windows belum diverifikasi."
+        detail: rdpOpen ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
             : logReady ? "Viewer log installer tersedia; instalasi Windows masih dipantau."
                 : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui." };
 }
