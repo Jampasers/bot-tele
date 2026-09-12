@@ -156,7 +156,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   }
   if (order.stage === "monitoring") {
     const inspection = await deps.inspectWindows({ ip: order.publicIp, windowsPassword: password, ...(order.installerLogUrl ? { logUrl: order.installerLogUrl } : {}) }, deps.signal);
-    const successes = inspection.rdpOpen ? order.rdpSuccesses + 1 : 0;
+    const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
     await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
     if (successes >= 3) { await stage("ready", { evidence: "RDP terjangkau pada 3 pemeriksaan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi; silakan uji melalui Remote Desktop." }); deps.clearToken(); }
     else if (deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) await save({ stage: "review", resumeStage: "monitoring", evidence: "Batas pemantauan Windows tercapai. Status instalasi belum pasti; VPS yang sama tetap diperiksa, tanpa create/refund otomatis." });

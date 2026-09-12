@@ -185,16 +185,16 @@ xml_found = False
 fix_bat_code = """    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
-reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System" /v DisableCAD /t REG_DWORD /d 1 /f
-reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
 
 rem Aktifkan Remote Desktop dan matikan NLA (Network Level Authentication)
-reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-reg add "HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
+reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
+reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
 
 rem Izinkan CredSSP encryption oracle di server
-reg add "HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\\\CredSSP\\\\Parameters" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f
+reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\CredSSP\\Parameters" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f
 
 rem Izinkan port RDP di Windows Firewall
 netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
@@ -210,7 +210,7 @@ EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
     bats="$bats windows-fix-rdp.bat\\""""
 
-xml_patch_code = """    sed -i 's|</RunSynchronous>|<RunSynchronousCommand wcm:action="add"><Order>11</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows\\\\\\\\CurrentVersion\\\\\\\\Policies\\\\\\\\System\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>12</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows NT\\\\\\\\CurrentVersion\\\\\\\\Winlogon\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>13</Order><Path>reg add \\"HKLM\\\\\\\\SYSTEM\\\\\\\\CurrentControlSet\\\\\\\\Control\\\\\\\\Terminal Server\\\\\\\\WinStations\\\\\\\\RDP-Tcp\\" /v UserAuthentication /t REG_DWORD /d 0 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>14</Order><Path>reg add \\"HKLM\\\\\\\\SOFTWARE\\\\\\\\Microsoft\\\\\\\\Windows\\\\\\\\CurrentVersion\\\\\\\\Policies\\\\\\\\System\\\\\\\\CredSSP\\\\\\\\Parameters\\" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f</Path></RunSynchronousCommand></RunSynchronous>|' /tmp/autounattend.xml
+xml_patch_code = """    sed -i 's|</RunSynchronous>|<RunSynchronousCommand wcm:action="add"><Order>11</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>12</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>13</Order><Path>reg add \\"HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp\\" /v UserAuthentication /t REG_DWORD /d 0 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>14</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\\\CredSSP\\\\Parameters\\" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f</Path></RunSynchronousCommand></RunSynchronous>|' /tmp/autounattend.xml
     sed -i 's|<fDenyTSConnections>false</fDenyTSConnections>|</component><component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><UserAuthentication>0</UserAuthentication></component><component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><fDenyTSConnections>false</fDenyTSConnections>|' /tmp/autounattend.xml"""
 
 for line in lines:
@@ -274,7 +274,8 @@ if ! mkdir "$state/reboot-requested" 2>/dev/null; then
   if [ -f "$state/reboot-failed" ]; then echo __VPS_REBOOT_FAILED__; else echo __VPS_REBOOT_ALREADY__; fi
   exit 0
 fi
-if shutdown -r +1; then echo __VPS_REBOOT_SCHEDULED__;
+if (sleep 2 && reboot) >/dev/null 2>&1 & then echo __VPS_REBOOT_SCHEDULED__;
+elif shutdown -r +1; then echo __VPS_REBOOT_SCHEDULED__;
 else touch "$state/reboot-failed"; echo __VPS_REBOOT_FAILED__; exit 1; fi
 `;
     const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: "root", command: "bash -s", stdin: script, timeoutMs: 20_000, mutation: true }, signal);
@@ -292,7 +293,21 @@ export async function checkTcpPort(ip: string, port: number, signal?: AbortSigna
         const finish = (open: boolean): void => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy(); resolve(open); };
         const abort = () => finish(false), timer = setTimeout(() => finish(false), 5000);
         signal?.addEventListener("abort", abort, { once: true });
-        socket.once("connect", () => finish(true)); socket.once("error", () => finish(false));
+        socket.once("error", () => finish(false));
+        if (port === 3389) {
+            socket.once("connect", () => {
+                const pdu = Buffer.from([
+                    0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00
+                ]);
+                socket.write(pdu);
+            });
+            socket.on("data", (chunk: Buffer) => {
+                if (chunk.length >= 4 && chunk[0] === 0x03 && chunk[1] === 0x00) finish(true);
+                else if (chunk.length > 0) finish(true);
+            });
+        } else {
+            socket.once("connect", () => finish(true));
+        }
     });
 }
 async function discoverInstallerLogUrl(input: { ip: string; windowsPassword: string }, signal: AbortSignal | undefined, deps: InstallerDependencies): Promise<string | undefined> {
@@ -327,15 +342,36 @@ export interface WindowsInspection { rdpOpen: boolean; loginVerified: false; log
 export async function inspectWindows(input: { ip: string; windowsPassword: string; logUrl?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInspection> {
     validIp(input.ip);
     if (signal?.aborted) throw new InstallerError("cancelled");
-    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
     let logUrl = input.logUrl ? extractInstallerLogUrl(input.logUrl, input.ip) : undefined;
-    if (!logUrl && !rdpOpen) {
-        try { logUrl = await discoverInstallerLogUrl(input, signal, deps); } catch { /* Installer SSH can disappear during reboot. */ }
+    let logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
+    if (!logUrl && !logReady) {
+        try {
+            const discovered = await discoverInstallerLogUrl(input, signal, deps);
+            if (discovered) {
+                logUrl = discovered;
+                logReady = await checkInstallerLogPage(logUrl, signal, deps);
+            }
+        } catch { /* Installer SSH can disappear during reboot. */ }
     }
-    const logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
     if (signal?.aborted) throw new InstallerError("cancelled");
-    return { rdpOpen, loginVerified: false, logState: logReady ? "ready" : "unavailable", ...(logUrl ? { logUrl } : {}),
-        detail: rdpOpen ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
-            : logReady ? "Viewer log installer tersedia; instalasi Windows masih dipantau."
-                : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui." };
+    if (logReady) {
+        return {
+            rdpOpen: false,
+            loginVerified: false,
+            logState: "ready",
+            ...(logUrl ? { logUrl } : {}),
+            detail: "Viewer log installer tersedia; instalasi Windows masih dipantau.",
+        };
+    }
+    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    return {
+        rdpOpen,
+        loginVerified: false,
+        logState: "unavailable",
+        ...(logUrl ? { logUrl } : {}),
+        detail: rdpOpen
+            ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
+            : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui.",
+    };
 }

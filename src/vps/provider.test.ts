@@ -184,3 +184,14 @@ test("installer log discovery reads only random path metadata, restricts host an
     });
     assert.equal(wrong.logState, "unavailable"); assert.equal(wrong.rdpOpen, false);
 });
+
+test("installer log active state forces rdpOpen false to prevent premature ready while installer is running", async () => {
+    const result = await inspectWindows({ ip: "203.0.113.10", windowsPassword: fakePassword, logUrl: "http://203.0.113.10/aB1cD2eF" }, undefined, {
+        tcp: async () => true,
+        fetch: async () => new Response("<title>Reinstall Logs</title>"),
+    });
+    assert.equal(result.logState, "ready");
+    assert.equal(result.rdpOpen, false);
+    assert.match(result.detail, /masih dipantau/);
+});
+

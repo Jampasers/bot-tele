@@ -159,3 +159,13 @@ test("concurrent orders retain separate provider token, specification and genera
     assert.ok(String(second.body?.user_data).includes(twoPassword)); assert.ok(!String(second.body?.user_data).includes(onePassword));
     assert.equal(one.stage, "droplet"); assert.equal(two.stage, "droplet");
 });
+
+test("worker monitoring resets rdpSuccesses and avoids ready when installer log is still active", async () => {
+    const order = orderFixture({ stage: "monitoring", rdpSuccesses: 2 });
+    await advanceVpsOrder(order, dependencies({
+        inspectWindows: async () => ({ rdpOpen: true, loginVerified: false, logState: "ready", logUrl: "http://203.0.113.10/test", detail: "Viewer log installer tersedia" }),
+    }));
+    assert.equal(order.stage, "monitoring");
+    assert.equal(order.rdpSuccesses, 0);
+});
+
