@@ -142,6 +142,7 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.equal(calls[0]?.command, "bash -s");
     assert.ok(calls[0]?.stdin?.includes('if ! mkdir "$state"')); assert.ok(calls[0]?.stdin?.includes('touch "$state/prepared"'));
     assert.ok(calls[0]?.stdin?.includes("patch_trans.py")); assert.ok(calls[0]?.stdin?.includes("DisableCAD")); assert.ok(calls[0]?.stdin?.includes("UserAuthentication"));
+    assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.equal(results[0]?.logUrl, "http://203.0.113.10/aB1cD2eF"); assert.equal(results[1]?.logUrl, "http://203.0.113.11/aB1cD2eF");
     assert.ok(!JSON.stringify(results).includes(fakePassword)); assert.ok(!JSON.stringify(results).includes("ExampleWindows"));
 });
@@ -194,4 +195,3 @@ test("installer log active state forces rdpOpen false to prevent premature ready
     assert.equal(result.rdpOpen, false);
     assert.match(result.detail, /masih dipantau/);
 });
-

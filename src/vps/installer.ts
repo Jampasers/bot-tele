@@ -180,8 +180,6 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 
 new_lines = []
 bats_found = False
-xml_found = False
-
 fix_bat_code = """    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
@@ -210,21 +208,15 @@ EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
     bats="$bats windows-fix-rdp.bat\\""""
 
-xml_patch_code = """    sed -i 's|</RunSynchronous>|<RunSynchronousCommand wcm:action="add"><Order>11</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>12</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Winlogon\\" /v DisableCAD /t REG_DWORD /d 1 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>13</Order><Path>reg add \\"HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Terminal Server\\\\WinStations\\\\RDP-Tcp\\" /v UserAuthentication /t REG_DWORD /d 0 /f</Path></RunSynchronousCommand><RunSynchronousCommand wcm:action="add"><Order>14</Order><Path>reg add \\"HKLM\\\\SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies\\\\System\\\\CredSSP\\\\Parameters\\" /v AllowEncryptionOracle /t REG_DWORD /d 2 /f</Path></RunSynchronousCommand></RunSynchronous>|' /tmp/autounattend.xml
-    sed -i 's|<fDenyTSConnections>false</fDenyTSConnections>|</component><component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><UserAuthentication>0</UserAuthentication></component><component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="%arch%" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><fDenyTSConnections>false</fDenyTSConnections>|' /tmp/autounattend.xml"""
-
 for line in lines:
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
         new_lines.append(fix_bat_code)
-    elif not xml_found and 'windows.xml /tmp/autounattend.xml' in line:
-        xml_found = True
-        new_lines.append(xml_patch_code)
 
 with open(trans_path, 'w', encoding='utf-8') as f:
     f.write('\\n'.join(new_lines) + '\\n')
-print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', xml=' + str(xml_found))
+print('[PATCH] trans.sh patched: bats=' + str(bats_found))
 EOF_PATCH_PY
 
 python3 -c '
