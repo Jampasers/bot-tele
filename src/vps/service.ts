@@ -3,9 +3,11 @@ import { isIP } from "node:net";
 import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
 import { VpsPlan, type IVpsPlan } from "../models/VpsPlan.js";
+import { VpsCatalog } from "../models/VpsCatalog.js";
 import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
+import { getVpsCatalog } from "./catalog.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
@@ -27,9 +29,13 @@ export function orderDto(order: IVpsOrder): VpsUiOrder {
     installerLogUrl: order.installerLogUrl };
 }
 type Plan = IVpsPlan;
-function planDto(p: Pick<Plan, "_id" | "name" | "serviceType" | "sizeSlug" | "regions" | "osPrices" | "enabled">): VpsUiPlan {
+export function vpsPlanPrice(plan: Pick<Plan, "osPrices" | "priceMatrix">, region: string, os: string): number | undefined {
+  return plan.priceMatrix?.find(item => item.region === region && item.os === os)?.price ?? plan.osPrices.find(item => item.os === os)?.price;
+}
+function planDto(p: Pick<Plan, "_id" | "name" | "serviceType" | "sizeSlug" | "regions" | "osPrices" | "priceMatrix" | "enabled">): VpsUiPlan {
   return { id: p._id, name: p.name, serviceType: p.serviceType as "purchase" | "install", sizeSlug: p.sizeSlug,
-    regions: [...p.regions], osPrices: p.osPrices.map(o => ({ os: o.os, label: o.label, price: o.price })), enabled: p.enabled };
+    regions: [...p.regions], osPrices: p.osPrices.map(o => ({ os: o.os, label: o.label, price: o.price })),
+    ...(p.priceMatrix?.length ? { priceMatrix: p.priceMatrix.map(item => ({ region: item.region, os: item.os, price: item.price })) } : {}), enabled: p.enabled };
 }
 async function acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }> {
   assertVpsEnabled();
@@ -46,13 +52,14 @@ async function acceptBuyerToken(actor: string, orderId: string, token: string): 
 }
 async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Promise<VpsUiOrder> {
   assertVpsEnabled();
+  await getVpsCatalog();
   if (!validId(input.requestId) || !/^\d{1,20}$/.test(input.actorTelegramId) || input.chatId !== input.actorTelegramId) throw new Error("Checkout hanya melalui chat pribadi.");
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
   const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType, enabled: true }).lean();
   const os = getOs(input.os);
-  const price = plan?.osPrices.find(o => o.os === input.os)?.price;
-  if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket atau harga tidak tersedia.");
+  const price = plan ? vpsPlanPrice(plan, input.region, input.os) : undefined;
+  if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket, region, atau harga tidak tersedia.");
   if (input.installChrome === true && os.family !== "windows") throw new Error("Chrome hanya tersedia untuk Windows.");
   let accountId: string | null = null;
   let sourceUsername: string | null = null;
@@ -128,7 +135,30 @@ async function cancel(actor: string, orderId: string): Promise<void> {
 
 export const vpsService: VpsUiDependencies = {
   enabled: vpsEnabled,
-  listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name })),
+  listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name, family: os.family })),
+  async listCatalog() {
+    const catalog = await getVpsCatalog();
+    return { regions: catalog.regions.map(region => ({ slug: region.slug, name: region.name, country: region.country })), sizes: catalog.sizes.map(size => ({ slug: size.slug, label: `${size.cpu} vCPU · ${size.ram} RAM (${size.disk})` })), os: catalog.os.map(os => ({ id: os.key, label: os.name, family: os.family as "linux" | "windows" })) };
+  },
+  async addCatalogEntry(actor, input) {
+    assertVpsAdmin(actor);
+    const catalog = await getVpsCatalog();
+    if (input.kind === "region") {
+      const [slug, name, country] = input.value;
+      if (!slug || !name || !country || !/^[a-z][a-z0-9]{1,11}$/.test(slug) || /[\r\n\0]/.test(`${name}${country}`) || name.length > 80 || country.length > 80) throw new Error("Region tidak valid.");
+      if (!catalog.regions.some(item => item.slug === slug)) catalog.regions.push({ slug, name, country });
+    } else if (input.kind === "size") {
+      const [slug, cpuText, ram, disk, transfer, price] = input.value; const cpu = Number(cpuText);
+      if (!slug || !ram || !disk || !transfer || !price || !Number.isInteger(cpu) || cpu < 1 || cpu > 128 || !/^[a-z0-9-]{1,80}$/.test(slug)) throw new Error("Spek tidak valid.");
+      if (!catalog.sizes.some(item => item.slug === slug)) catalog.sizes.push({ slug, cpu, ram, disk, transfer, price });
+    } else {
+      const [key, name, slug, family, windowsImageName] = input.value;
+      if (!key || !name || !slug || (family !== "linux" && family !== "windows") || !/^[a-z][a-z0-9_-]{1,31}$/.test(key) || /[\r\n\0]/.test(`${name}${slug}${windowsImageName ?? ""}`)) throw new Error("OS tidak valid.");
+      if (!catalog.os.some(item => item.key === key)) catalog.os.push({ key, name, slug, family, installerImage: family === "linux" ? slug : "ubuntu-24-04-x64", ...(family === "windows" ? { windowsImageName: windowsImageName || `${name} ServerStandard` } : {}) });
+    }
+    await VpsCatalog.updateOne({ _id: "platform" }, { $set: { regions: catalog.regions, sizes: catalog.sizes, os: catalog.os } });
+    await getVpsCatalog();
+  },
   async listPlans(serviceType, includeDisabled = false) {
     assertVpsPlatform();
     return (await VpsPlan.find({ tenantId: "platform", ...(serviceType ? { serviceType } : {}), ...(includeDisabled ? {} : { enabled: true }) }).sort({ name: 1, _id: 1 }).limit(200).lean()).map(planDto);
@@ -169,7 +199,8 @@ export const vpsService: VpsUiDependencies = {
       || !input.regions.length || input.regions.length > 30 || input.regions.some(r => !/^[a-z0-9]{2,12}$/.test(r)) || !input.osPrices.length || input.osPrices.length > 24
       || new Set(input.osPrices.map(p => p.os)).size !== input.osPrices.length || input.osPrices.some(p => !getOs(p.os) || !Number.isSafeInteger(p.price) || p.price < 1 || p.price > 100_000_000)) throw new Error("Paket tidak valid.");
     const p = await VpsPlan.create({ _id: randomUUID(), tenantId: "platform", name: input.name.trim(), serviceType: input.serviceType, sizeSlug: input.sizeSlug,
-      regions: [...new Set(input.regions)], enabled: input.enabled, osPrices: input.osPrices.map(p => ({ os: p.os, label: getOs(p.os)!.name, price: p.price })) });
+      regions: [...new Set(input.regions)], enabled: input.enabled, osPrices: input.osPrices.map(p => ({ os: p.os, label: getOs(p.os)!.name, price: p.price })),
+      priceMatrix: input.priceMatrix?.length ? input.priceMatrix : input.regions.flatMap(region => input.osPrices.map(os => ({ region, os: os.os, price: os.price }))) });
     return planDto(p);
   },
   async updatePlan(actor, id, input) {
@@ -178,7 +209,13 @@ export const vpsService: VpsUiDependencies = {
     const plan = await VpsPlan.findOne({ _id: id, tenantId: "platform" });
     if (!plan) throw new Error("Paket tidak ditemukan.");
     if (input.enabled !== undefined) plan.enabled = input.enabled;
-    if (input.price !== undefined) for (const os of plan.osPrices) if (!input.os || input.os === os.os) os.price = input.price;
+    if (input.price !== undefined) {
+      if (input.os && input.region) {
+        const entry = plan.priceMatrix.find(item => item.os === input.os && item.region === input.region);
+        if (entry) entry.price = input.price;
+        else plan.priceMatrix.push({ os: input.os, region: input.region, price: input.price });
+      } else for (const os of plan.osPrices) if (!input.os || input.os === os.os) os.price = input.price;
+    }
     await plan.save();
   },
 };

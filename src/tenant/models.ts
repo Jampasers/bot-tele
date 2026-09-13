@@ -21,9 +21,10 @@ import { PaymentAmountReservation, PaymentSettlementClaim } from "../models/Paym
 import { VpsCredential, VpsAccount } from "../models/VpsCredential.js";
 import { VpsPlan } from "../models/VpsPlan.js";
 import { VpsOrder } from "../models/VpsOrder.js";
+import { VpsCatalog } from "../models/VpsCatalog.js";
 
 /** Tenant data models only. Rental/plan/platform payment metadata is deliberately separate. */
 export const TENANT_MODELS = [AffiliateLog, BalanceLog, BotConfig, Cart, DigitalOrder, DigitalProduct, DigitalStock, FraudLog, Order, PromoCode, RestockAlert, SmsConfig, TopupSession, User, WarrantyClaim, TenantPaymentConfig] as const;
 
 /** Private control-plane collections retain platform-wide uniqueness. */
-export const PLATFORM_MODELS = [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, VpsCredential, VpsAccount, VpsPlan, VpsOrder] as const;
+export const PLATFORM_MODELS = [BotRental, RentalPlan, RentalPayment, PaymentAmountReservation, PaymentSettlementClaim, VpsCredential, VpsAccount, VpsPlan, VpsOrder, VpsCatalog] as const;

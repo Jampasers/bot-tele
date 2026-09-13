@@ -21,6 +21,7 @@ import { formatStartupFailure, type StartupStage } from "./runtime/startupDiagno
 import { VpsWorker } from "./vps/worker.js";
 import { buyerTokens } from "./vps/security.js";
 import { clearAllVpsInputs } from "./plugins/vps/input.js";
+import { getVpsCatalog } from "./vps/catalog.js";
 
 installRentalLogContext();
 
@@ -101,6 +102,7 @@ async function main(): Promise<void> {
       platform.start();
       if (vpsEnabled) {
         startupStage = "vps-worker";
+        await getVpsCatalog();
         vpsWorker = new VpsWorker(bot.api);
         vpsWorker.start();
       }

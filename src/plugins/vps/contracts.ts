@@ -7,6 +7,7 @@ export interface VpsUiPlan {
   sizeSlug: string;
   regions: string[];
   osPrices: { os: string; label: string; price: number }[];
+  priceMatrix?: { region: string; os: string; price: number }[];
   enabled: boolean;
 }
 export interface VpsUiOrder {
@@ -52,7 +53,9 @@ export interface VpsUiCredential {
 }
 export interface VpsUiDependencies {
   enabled(): boolean;
-  listOs(): { id: string; label: string }[];
+  listOs(): { id: string; label: string; family?: "linux" | "windows" }[];
+  listCatalog?(): Promise<{ regions: { slug: string; name: string; country: string }[]; sizes: { slug: string; label: string }[]; os: { id: string; label: string; family: "linux" | "windows" }[] }>;
+  addCatalogEntry?(actor: string, input: { kind: "region" | "size" | "os"; value: string[] }): Promise<void>;
   listPlans(serviceType?: VpsServiceType, includeDisabled?: boolean): Promise<VpsUiPlan[]>;
   acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }>;
   clearBuyerToken(actor: string, orderId: string): void;
@@ -72,5 +75,5 @@ export interface VpsUiDependencies {
   checkAllCredentials(actor: string): Promise<void>;
   updateCredential(actor: string, id: string, input: { enabled?: boolean; priority?: number }): Promise<void>;
   savePlan(actor: string, input: Omit<VpsUiPlan, "id">): Promise<VpsUiPlan>;
-  updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string }): Promise<void>;
+  updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string; region?: string }): Promise<void>;
 }

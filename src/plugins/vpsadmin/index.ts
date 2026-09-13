@@ -9,6 +9,7 @@ import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
   .text("💰 Paket & harga", "vpa_plans_0").text("➕ Tambah paket", "vpa_addplan").row()
+  .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🔙 Admin", "adm_home");
 const known = (value: string | number | null | undefined): string => value === null || value === undefined || value === "" ? "belum diketahui" : String(value).slice(0, 400);
 export function vpsCredentialText(credential: VpsUiCredential): string {
@@ -38,16 +39,11 @@ export const STANDARD_SIZES = [
 ] as const;
 
 export const STANDARD_REGIONS = [
-  { label: "🇸🇬 Singapore (sgp1)", regions: ["sgp1"] },
-  { label: "🇩🇪 Frankfurt (fra1)", regions: ["fra1"] },
-  { label: "🇬🇧 London (lon1)", regions: ["lon1"] },
-  { label: "🇳🇱 Amsterdam (ams3)", regions: ["ams3"] },
-  { label: "🇺🇸 New York (nyc1, nyc3)", regions: ["nyc1", "nyc3"] },
-  { label: "🇺🇸 San Francisco (sfo3)", regions: ["sfo3"] },
-  { label: "🇮🇳 Bangalore (blr1)", regions: ["blr1"] },
-  { label: "🇦🇺 Sydney (syd1)", regions: ["syd1"] },
-  { label: "🇨🇦 Toronto (tor1)", regions: ["tor1"] },
-  { label: "🌐 Semua Populer (sgp1, fra1, lon1, ams3, nyc1, nyc3, sfo3)", regions: ["sgp1", "fra1", "lon1", "ams3", "nyc1", "nyc3", "sfo3"] },
+  { label: "🇺🇸 New York 1 (nyc1)", regions: ["nyc1"] }, { label: "🇺🇸 New York 2 (nyc2)", regions: ["nyc2"] }, { label: "🇺🇸 New York 3 (nyc3)", regions: ["nyc3"] },
+  { label: "🇳🇱 Amsterdam (ams3)", regions: ["ams3"] }, { label: "🇺🇸 San Francisco 2 (sfo2)", regions: ["sfo2"] }, { label: "🇺🇸 San Francisco 3 (sfo3)", regions: ["sfo3"] },
+  { label: "🇸🇬 Singapore (sgp1)", regions: ["sgp1"] }, { label: "🇬🇧 London (lon1)", regions: ["lon1"] }, { label: "🇩🇪 Frankfurt (fra1)", regions: ["fra1"] },
+  { label: "🇨🇦 Toronto (tor1)", regions: ["tor1"] }, { label: "🇮🇳 Bangalore (blr1)", regions: ["blr1"] }, { label: "🇦🇺 Sydney (syd1)", regions: ["syd1"] },
+  { label: "🇺🇸 Atlanta (atl1)", regions: ["atl1"] }, { label: "🇺🇸 Richmond (ric1)", regions: ["ric1"] }, { label: "🇺🇸 Kansas City (mkc1)", regions: ["mkc1"] }, { label: "🇺🇸 Memphis (mem1)", regions: ["mem1"] },
 ] as const;
 
 interface PendingPlan {
@@ -56,6 +52,7 @@ interface PendingPlan {
   sizeSlug?: string;
   regions?: string[];
   expiresAt: number;
+  osOptions?: { id: string; label: string }[];
 }
 
 export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
@@ -93,9 +90,9 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     const plan = (await deps.listPlans(undefined, true)).find(item => item.id === id);
     if (!plan) throw new Error("Plan unavailable");
     const keyboard = new InlineKeyboard();
-    plan.osPrices.forEach((os, index) => keyboard.text(`Ubah harga ${os.label}`, `vpa_price_${id}_${index}`).row());
+    (plan.priceMatrix?.length ? plan.priceMatrix.map(item => ({ ...item, label: plan.osPrices.find(os => os.os === item.os)?.label ?? item.os })) : plan.osPrices.map(os => ({ region: "*", os: os.os, price: os.price, label: os.label }))).forEach((item, index) => keyboard.text(`Harga ${item.region} / ${item.label}`, `vpa_price_${id}_${index}`).row());
     keyboard.text(plan.enabled ? "Nonaktifkan paket" : "Aktifkan paket", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Paket", "vpa_plans_0");
-    await vpsReply(ctx, `💰 ${plan.name}\n\nLayanan: ${plan.serviceType === "install" ? "Jasa setup/install" : "Beli VPS"}\nSpek: ${plan.sizeSlug}\nRegion: ${plan.regions.join(", ")}\nStatus: ${plan.enabled ? "aktif" : "nonaktif"}\n\n${plan.osPrices.map(os => `${os.label}: ${vpsPrice(os.price)}`).join("\n")}\n\nPerubahan harga hanya berlaku pada checkout baru.`, keyboard);
+    await vpsReply(ctx, `💰 ${plan.name}\n\nLayanan: ${plan.serviceType === "install" ? "Jasa setup/install" : "Beli VPS"}\nSpek: ${plan.sizeSlug}\nRegion: ${plan.regions.join(", ")}\nStatus: ${plan.enabled ? "aktif" : "nonaktif"}\n\n${(plan.priceMatrix?.length ? plan.priceMatrix.map(item => `${item.region} / ${plan.osPrices.find(os => os.os === item.os)?.label ?? item.os}: ${vpsPrice(item.price)}`) : plan.osPrices.map(os => `${os.label}: ${vpsPrice(os.price)}`)).join("\n")}\n\nPerubahan harga hanya berlaku pada checkout baru.`, keyboard);
   }
   async function addToken(ctx: Context): Promise<void> {
     const actor = actorOf(ctx);
@@ -148,12 +145,25 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
 
   async function promptOs(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
     clearVpsInput(actor);
-    const osList = deps.listOs();
+    const osList = overrides.listOs ? deps.listOs() : (await deps.listCatalog?.())?.os ?? deps.listOs();
+    pending.osOptions = osList.map(os => ({ id: os.id, label: os.label }));
     const keyboard = new InlineKeyboard();
     osList.forEach((os, index) => keyboard.text(os.label, `vpa_newos_${index}`).row());
     keyboard.text("Batal", "vpa_home");
 
     await vpsReply(ctx, `(4/5) Pilih OS untuk "${pending.name}" (${pending.sizeSlug}, ${pending.regions?.join(", ")}):\n\nBuat paket terpisah untuk OS dengan harga berbeda.`, keyboard);
+  }
+  async function catalogHome(ctx: Context): Promise<void> {
+    const catalog = await deps.listCatalog?.();
+    if (!catalog) throw new Error("Katalog belum tersedia");
+    await vpsReply(ctx, `🧩 Katalog VPS\n\nRegion: ${catalog.regions.length}\nSpek: ${catalog.sizes.length}\nOS: ${catalog.os.length}\n\nTambah dengan format teks berikut. Data disimpan di MongoDB dan langsung tersedia untuk wizard berikutnya.`, new InlineKeyboard()
+      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row().text("🔙 Admin VPS", "vpa_home"));
+  }
+  function addCatalog(ctx: Context, kind: "region" | "size" | "os"): void {
+    const actor = actorOf(ctx);
+    const instructions = kind === "region" ? "slug,nama,country (contoh: sgp1,Singapore,Singapore)" : kind === "size" ? "slug,cpu,ram,disk,transfer,harga-label (contoh: 4gb,2,4 GB,80 GB,4 TB,$24/month)" : "key,nama,slug,family[,windowsImageName] (family: linux/windows)";
+    input(actor, async (inputCtx, value) => { await deps.addCatalogEntry?.(actor, { kind, value: value.split(",").map(item => item.trim()) }); await inputCtx.reply("Katalog tersimpan."); await catalogHome(inputCtx); });
+    void vpsReply(ctx, `➕ Tambah ${kind}\n\nKirim: ${instructions}\nKetik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vpa_catalog"));
   }
 
   async function addPlan(ctx: Context, serviceType: VpsServiceType): Promise<void> {
@@ -179,6 +189,8 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const actor = actorOf(ctx);
         clearVpsInput(actor);
         if (data === "vpa_home") { pendingPlans.delete(actor); await home(ctx); return; }
+        if (data === "vpa_catalog") { await catalogHome(ctx); return; }
+        if (data === "vpa_addregion" || data === "vpa_addsize" || data === "vpa_addos") { await addCatalog(ctx, data === "vpa_addregion" ? "region" : data === "vpa_addsize" ? "size" : "os"); return; }
         if (data === "vpa_addtoken") { await addToken(ctx); return; }
         if (data === "vpa_checkall") {
           await ctx.reply("Pemeriksaan seluruh token dimulai dengan concurrency terbatas. Buka daftar token untuk melihat waktu dan hasil pemeriksaan.");
@@ -214,7 +226,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const newOs = /^vpa_newos_(\d{1,3})$/.exec(data);
         if (newOs) {
           const pending = pendingPlans.get(actor);
-          const os = deps.listOs()[Number(newOs[1])];
+          const os = pending?.osOptions?.[Number(newOs[1])] ?? deps.listOs()[Number(newOs[1])];
           if (!pending || !pending.sizeSlug || !pending.regions || !os || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
           pendingPlans.delete(actor);
           input(actor, async (priceCtx, value) => {
@@ -278,10 +290,11 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         if (price) {
           const id = price[1]!;
           const plan = (await deps.listPlans(undefined, true)).find(item => item.id === id);
-          const os = plan?.osPrices[Number(price[2])];
-          if (!plan || !os) throw new Error("Plan unavailable");
-          input(actor, async (priceCtx, value) => { await deps.updatePlan(actor, id, { price: numeric(value, 1, 100_000_000), os: os.os }); await planDetail(priceCtx, id); });
-          await vpsReply(ctx, `Kirim harga baru untuk ${plan.name} / ${os.label} dalam Rupiah. Pesanan existing tetap memakai snapshot checkout.`, new InlineKeyboard().text("Batal", "vpa_home"));
+          const entries = plan?.priceMatrix?.length ? plan.priceMatrix.map(item => ({ ...item, label: plan.osPrices.find(os => os.os === item.os)?.label ?? item.os })) : plan?.osPrices.map(os => ({ region: "*", os: os.os, price: os.price, label: os.label }));
+          const item = entries?.[Number(price[2])];
+          if (!plan || !item) throw new Error("Plan unavailable");
+          input(actor, async (priceCtx, value) => { await deps.updatePlan(actor, id, { price: numeric(value, 1, 100_000_000), os: item.os, ...(item.region === "*" ? {} : { region: item.region }) }); await planDetail(priceCtx, id); });
+          await vpsReply(ctx, `Kirim harga baru untuk ${plan.name} / ${item.region} / ${item.label} dalam Rupiah. Pesanan existing tetap memakai snapshot checkout.`, new InlineKeyboard().text("Batal", "vpa_home"));
           return;
         }
         await home(ctx);
