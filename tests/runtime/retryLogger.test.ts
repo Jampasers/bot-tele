@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ThrottledWarningLogger } from "./retryLogger.js";
+import { ThrottledWarningLogger } from "../../src/runtime/retryLogger.js";
 
 test("throttled warnings include the cause once and summarize repeats", () => {
   let now = 0;

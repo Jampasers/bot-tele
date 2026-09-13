@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { IVpsOrder } from "../models/VpsOrder.js";
-import { advanceVpsOrder, type VpsStepDependencies } from "./worker.js";
-import { DigitalOceanClient } from "./digitalOcean.js";
-import { InstallerError } from "./installer.js";
-import { getOs } from "./installer.js";
+import type { IVpsOrder } from "../../src/models/VpsOrder.js";
+import { advanceVpsOrder, type VpsStepDependencies } from "../../src/vps/worker.js";
+import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
+import { InstallerError } from "../../src/vps/installer.js";
+import { getOs } from "../../src/vps/installer.js";
 
 function orderFixture(patch: Partial<IVpsOrder> = {}): IVpsOrder {
     const now = new Date();

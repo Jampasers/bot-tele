@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
-import { VpsAccount, VpsCredential } from "../models/VpsCredential.js";
-import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
-import { encryptSecret } from "../services/crypto.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
-import { DigitalOceanClient, DigitalOceanError, type DoDroplet } from "./digitalOcean.js";
-import { checkCredential, providerForCredential, reserveStoreCapacity } from "./credentials.js";
+import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
+import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
+import { encryptSecret } from "../../src/services/crypto.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
+import { DigitalOceanClient, DigitalOceanError, type DoDroplet } from "../../src/vps/digitalOcean.js";
+import { checkCredential, providerForCredential, reserveStoreCapacity } from "../../src/vps/credentials.js";
 
 type Row = Record<string, any>;
 function value(row: any, names: string[]): any {

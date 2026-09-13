@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
-import { User } from "../models/User.js";
-import { VpsOrder } from "../models/VpsOrder.js";
-import { BalanceLog } from "../models/BalanceLog.js";
-import { PaymentAmountReservation, PaymentSettlementClaim } from "../models/PaymentLedger.js";
-import { GopayMerchant } from "../services/payment/gopay-merchant.js";
-import { GobizAuthService } from "../services/payment/gobiz-auth.js";
-import { QrisGenerator } from "../services/payment/qris.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
-import { checkVpsPayment, createVpsInvoice, payVpsFromBalance, refundVpsOrder, reconcileVpsPayments } from "./payment.js";
+import { User } from "../../src/models/User.js";
+import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { BalanceLog } from "../../src/models/BalanceLog.js";
+import { PaymentAmountReservation, PaymentSettlementClaim } from "../../src/models/PaymentLedger.js";
+import { GopayMerchant } from "../../src/services/payment/gopay-merchant.js";
+import { GobizAuthService } from "../../src/services/payment/gobiz-auth.js";
+import { QrisGenerator } from "../../src/services/payment/qris.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
+import { checkVpsPayment, createVpsInvoice, payVpsFromBalance, refundVpsOrder, reconcileVpsPayments } from "../../src/vps/payment.js";
 
 type Row = Record<string, any>;
 const read = (row: Row, path: string): any => path.split(".").reduce((value, name) => value?.[name], row);

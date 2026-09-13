@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Bot, Context } from "grammy";
-import { RentalScheduler, type RentalSchedulerDependencies } from "./RentalScheduler.js";
-import type { RentalRuntimeState } from "../rental/rental.service.js";
-import { getTenantContext } from "../tenant/context.js";
+import { RentalScheduler, type RentalSchedulerDependencies } from "../../src/runtime/RentalScheduler.js";
+import type { RentalRuntimeState } from "../../src/rental/rental.service.js";
+import { getTenantContext } from "../../src/tenant/context.js";
 
 function state(rentalId: string, status: RentalRuntimeState["status"] = "active"): RentalRuntimeState {
   return { rentalId, tenantId: rentalId, ownerTelegramId: "42", adminTelegramIds: [], botUsername: `${rentalId}_bot`,

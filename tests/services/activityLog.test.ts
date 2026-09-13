@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Api } from "grammy";
-import { ActivityLogService } from "./activityLog.js";
-import { IBotConfig } from "../models/BotConfig.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
+import { ActivityLogService } from "../../src/services/activityLog.js";
+import { IBotConfig } from "../../src/models/BotConfig.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
 
 // Mock BotConfig for testing
 const mockConfig: Partial<IBotConfig> = {

@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import adminPlugin from "./admin/index.js";
-import digiAdminPlugin from "./digiadmin/index.js";
-import rentalAdminPlugin from "./rentaladmin/index.js";
+import adminPlugin from "../../src/plugins/admin/index.js";
+import digiAdminPlugin from "../../src/plugins/digiadmin/index.js";
+import rentalAdminPlugin from "../../src/plugins/rentaladmin/index.js";
 import {
   ADMIN_HELP_SECTION_IDS,
   buildAdminHelpText,
   buildRentalAdminHelpText,
-} from "./adminHelp.js";
-import { formatAdminValue, formatSecretStatus, isPrivateAdminChat } from "./adminDisplay.js";
+} from "../../src/plugins/adminHelp.js";
+import { formatAdminValue, formatSecretStatus, isPrivateAdminChat } from "../../src/plugins/adminDisplay.js";
 
 test("data operasional admin ditampilkan utuh tanpa masking", () => {
   assert.equal(formatAdminValue("customer.full@example.com"), "customer.full@example.com");

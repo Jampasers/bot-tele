@@ -4,12 +4,12 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import test from "node:test";
 import mongoose, { Schema } from "mongoose";
-import { runWithTenant, platformContext } from "./context.js";
-import { tenantPlugin } from "./tenantPlugin.js";
-import { assertTenantMigrationReady } from "./migration.js";
-import { User } from "../models/User.js";
-import { BotConfig } from "../models/BotConfig.js";
-import { SmsConfig } from "../models/SmsConfig.js";
+import { runWithTenant, platformContext } from "../../src/tenant/context.js";
+import { tenantPlugin } from "../../src/tenant/tenantPlugin.js";
+import { assertTenantMigrationReady } from "../../src/tenant/migration.js";
+import { User } from "../../src/models/User.js";
+import { BotConfig } from "../../src/models/BotConfig.js";
+import { SmsConfig } from "../../src/models/SmsConfig.js";
 
 const uri = process.env.TEST_MONGODB_URI;
 const execute = promisify(execFile);

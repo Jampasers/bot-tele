@@ -3,14 +3,14 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { Bot } from "grammy";
 import type { RunnerHandle } from "@grammyjs/runner";
-import { BotManager } from "./BotManager.js";
-import { BotInstance } from "./BotInstance.js";
-import { getTenantId, runWithTenant, type TenantContext } from "../tenant/context.js";
-import { TenantMap } from "../tenant/TenantMap.js";
-import { clearTenantInterval, setTenantInterval, stopTenantTimers } from "./tenantTimers.js";
-import type { RentalRuntimeState } from "../rental/rental.service.js";
-import { installRentalLogContext } from "./logging.js";
-import { loadPlugins } from "../core/pluginLoader.js";
+import { BotManager } from "../../src/runtime/BotManager.js";
+import { BotInstance } from "../../src/runtime/BotInstance.js";
+import { getTenantId, runWithTenant, type TenantContext } from "../../src/tenant/context.js";
+import { TenantMap } from "../../src/tenant/TenantMap.js";
+import { clearTenantInterval, setTenantInterval, stopTenantTimers } from "../../src/runtime/tenantTimers.js";
+import type { RentalRuntimeState } from "../../src/rental/rental.service.js";
+import { installRentalLogContext } from "../../src/runtime/logging.js";
+import { loadPlugins } from "../../src/core/pluginLoader.js";
 
 function state(id: string, status: RentalRuntimeState["status"] = "active"): RentalRuntimeState {
   return { rentalId: id, tenantId: `tenant_${id}`, ownerTelegramId: "123", adminTelegramIds: [],

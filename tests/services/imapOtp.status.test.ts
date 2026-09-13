@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeImapStatusDates, type ImapStatusSummary } from "./imapOtp.js";
+import { normalizeImapStatusDates, type ImapStatusSummary } from "../../src/services/imapOtp.js";
 
 function baseStatus(overrides: Partial<ImapStatusSummary>): ImapStatusSummary {
   return {

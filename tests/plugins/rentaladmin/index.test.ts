@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Bot } from "grammy";
-import { QrisGenerator } from "../../services/payment/qris.js";
-import { runWithTenant, type TenantContext } from "../../tenant/context.js";
+import { QrisGenerator } from "../../../src/services/payment/qris.js";
+import { runWithTenant, type TenantContext } from "../../../src/tenant/context.js";
 import {
   createRentalAdminPlugin,
   type RentalAdminDependencies,
-} from "./index.js";
+} from "../../../src/plugins/rentaladmin/index.js";
 
 const OWNER_ID = 4242;
 const TENANT: TenantContext = {

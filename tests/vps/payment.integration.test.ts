@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
-import { User } from "../models/User.js";
-import { BalanceLog } from "../models/BalanceLog.js";
-import { VpsOrder } from "../models/VpsOrder.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
-import { payVpsFromBalance, refundVpsOrder } from "./payment.js";
+import { User } from "../../src/models/User.js";
+import { BalanceLog } from "../../src/models/BalanceLog.js";
+import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
+import { payVpsFromBalance, refundVpsOrder } from "../../src/vps/payment.js";
 
 const uri = process.env["VPS_TEST_MONGODB_URI"];
 

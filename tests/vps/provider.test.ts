@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DigitalOceanClient, DigitalOceanError, type FetchLike } from "./digitalOcean.js";
+import { DigitalOceanClient, DigitalOceanError, type FetchLike } from "../../src/vps/digitalOcean.js";
 import { buildUserData, generatePassword, getOs, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
-    extractInstallerLogUrl, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "./installer.js";
+    extractInstallerLogUrl, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "../../src/vps/installer.js";
 
 const account = (uuid = "user-one", team = "shared-team") => ({ account: { uuid, team: { uuid: team, name: "Shop" }, status: "active", status_message: "", droplet_limit: 2 } });
 const droplet = (id: number) => ({ id, name: `order-${id}`, status: "active", tags: [], networks: { v4: [

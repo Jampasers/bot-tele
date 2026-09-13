@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Bot } from "grammy";
-import { rateLimitMiddleware } from "../middlewares/rateLimit.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
+import { rateLimitMiddleware } from "../../src/middlewares/rateLimit.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
 import {
   clearRentalTokenInput,
   setRentalTokenInput,
-} from "./rentalTokenInput.js";
-import { rentalTokenInputMiddleware } from "./rentalTokenInput.middleware.js";
+} from "../../src/rental/rentalTokenInput.js";
+import { rentalTokenInputMiddleware } from "../../src/rental/rentalTokenInput.middleware.js";
 
 const OWNER_ID = 880000042;
 const TOKEN = "123456:abcdefghijklmnopqrstuvwxyzABCD";

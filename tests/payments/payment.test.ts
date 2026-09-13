@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "node:crypto";
-import { encryptSecret, decryptSecret, validateEncryptionKey } from "../services/crypto.js";
-import { matchesSettlement, claimSettlement, reservePaymentAmount } from "./paymentLedger.service.js";
-import { validateTenantQrisImage, validateTenantQrisPayload } from "./paymentConfigValidation.js";
-import { getTenantPaymentClients, invalidateTenantPaymentConfig, saveTenantPaymentConfig } from "./tenantPayment.service.js";
-import { getPlatformPaymentClients } from "./platformPayment.service.js";
-import { TenantPaymentConfig } from "../models/TenantPaymentConfig.js";
-import { TopupSession } from "../models/TopupSession.js";
-import { PaymentAmountReservation } from "../models/PaymentLedger.js";
-import { getTenantId, runWithTenant, type TenantContext } from "../tenant/context.js";
-import { QrisGenerator } from "../services/payment/qris.js";
+import { encryptSecret, decryptSecret, validateEncryptionKey } from "../../src/services/crypto.js";
+import { matchesSettlement, claimSettlement, reservePaymentAmount } from "../../src/payments/paymentLedger.service.js";
+import { validateTenantQrisImage, validateTenantQrisPayload } from "../../src/payments/paymentConfigValidation.js";
+import { getTenantPaymentClients, invalidateTenantPaymentConfig, saveTenantPaymentConfig } from "../../src/payments/tenantPayment.service.js";
+import { getPlatformPaymentClients } from "../../src/payments/platformPayment.service.js";
+import { TenantPaymentConfig } from "../../src/models/TenantPaymentConfig.js";
+import { TopupSession } from "../../src/models/TopupSession.js";
+import { PaymentAmountReservation } from "../../src/models/PaymentLedger.js";
+import { getTenantId, runWithTenant, type TenantContext } from "../../src/tenant/context.js";
+import { QrisGenerator } from "../../src/services/payment/qris.js";
 
 const context = (tenantId: string): TenantContext => ({ tenantId, rentalId: tenantId, ownerTelegramId: "100", adminTelegramIds: ["101"] });
 const rawQris = (name: string) => `00020101021126190015ID.CO.GOPAY.WWW53033605802ID59${String(name.length).padStart(2, "0")}${name}6007JAKARTA`;

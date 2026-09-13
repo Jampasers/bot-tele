@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Bot } from "grammy";
-import { platformContext, runWithTenant, type TenantContext } from "../../tenant/context.js";
-import { SmsConfig } from "../../models/SmsConfig.js";
-import { buildCatalogKeyboard, buildCatalogText } from "../panel/index.js";
-import { createVpsPlugin, vpsOrderText } from "./index.js";
-import { createVpsAdminPlugin, vpsCredentialText } from "../vpsadmin/index.js";
-import { clearAllVpsInputs, vpsInputMiddleware } from "./input.js";
-import type { VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
+import { platformContext, runWithTenant, type TenantContext } from "../../../src/tenant/context.js";
+import { SmsConfig } from "../../../src/models/SmsConfig.js";
+import { buildCatalogKeyboard, buildCatalogText } from "../../../src/plugins/panel/index.js";
+import { createVpsPlugin, vpsOrderText } from "../../../src/plugins/vps/index.js";
+import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vpsadmin/index.js";
+import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
+import type { VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };

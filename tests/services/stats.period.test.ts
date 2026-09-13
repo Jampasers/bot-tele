@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getRevenuePeriodRange } from "./stats.js";
+import { getRevenuePeriodRange } from "../../src/services/stats.js";
 
 const now = new Date(2026, 7, 31, 15, 20, 0);
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatStartupFailure, type StartupStage } from "./startupDiagnostics.js";
+import { formatStartupFailure, type StartupStage } from "../../src/runtime/startupDiagnostics.js";
 
 test("startup diagnostics expose safe configuration guidance", () => {
   assert.match(

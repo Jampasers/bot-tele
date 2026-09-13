@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
-import { BuyerTokenVault, buyerTokens } from "./security.js";
-import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
-import { VpsPlan } from "../models/VpsPlan.js";
-import { DigitalOceanClient } from "./digitalOcean.js";
-import { getOs } from "./installer.js";
-import { vpsService, requestVpsReboot } from "./service.js";
-import { decryptSecret } from "../services/crypto.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
-import { BACKUP_COLLECTIONS, executeRollback } from "../services/backup.js";
+import { BuyerTokenVault, buyerTokens } from "../../src/vps/security.js";
+import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsPlan } from "../../src/models/VpsPlan.js";
+import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
+import { getOs } from "../../src/vps/installer.js";
+import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
+import { decryptSecret } from "../../src/services/crypto.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
+import { BACKUP_COLLECTIONS, executeRollback } from "../../src/services/backup.js";
 
 const platform = <T>(fn: () => Promise<T> | T) => runWithTenant(platformContext(), fn);
 function fixture(overrides: Partial<IVpsOrder> = {}): IVpsOrder {

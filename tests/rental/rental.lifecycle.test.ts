@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import type { Context } from "grammy";
-import { BotRental, type IBotRental } from "../models/BotRental.js";
-import { RentalPlan } from "../models/RentalPlan.js";
-import { User } from "../models/User.js";
-import { DAY_MS, deriveRentalLifecycle, refreshRentalState, renewalExpiresAt, type RentalRuntimeState } from "./rental.service.js";
-import { dueExpiryAlerts, notifyRentalExpiry } from "./rentalNotification.service.js";
-import { rentalMiddleware, rentalCommand, isRentalAdministrator } from "./rental.middleware.js";
-import { runWithTenant } from "../tenant/context.js";
-import { parseRentalFeatures, validateProvisionIdentity } from "../scripts/rentalAdmin.js";
-import { parseShopSetting } from "../plugins/rentaladmin/index.js";
+import { BotRental, type IBotRental } from "../../src/models/BotRental.js";
+import { RentalPlan } from "../../src/models/RentalPlan.js";
+import { User } from "../../src/models/User.js";
+import { DAY_MS, deriveRentalLifecycle, refreshRentalState, renewalExpiresAt, type RentalRuntimeState } from "../../src/rental/rental.service.js";
+import { dueExpiryAlerts, notifyRentalExpiry } from "../../src/rental/rentalNotification.service.js";
+import { rentalMiddleware, rentalCommand, isRentalAdministrator } from "../../src/rental/rental.middleware.js";
+import { runWithTenant } from "../../src/tenant/context.js";
+import { parseRentalFeatures, validateProvisionIdentity } from "../../src/scripts/rentalAdmin.js";
+import { parseShopSetting } from "../../src/plugins/rentaladmin/index.js";
 
 const expiry = new Date("2026-10-06T00:00:00.000Z");
 

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Schema, model, type PipelineStage } from "mongoose";
-import { getTenantContext, getTenantId, platformContext, runWithTenant, tenantEnvironment } from "./context.js";
-import { scopeTenantFilter, scopeTenantPipeline, scopeTenantUpdate, tenantPlugin } from "./tenantPlugin.js";
-import { TENANT_MODELS } from "./models.js";
-import { BotConfig } from "../models/BotConfig.js";
-import { SmsConfig } from "../models/SmsConfig.js";
+import { getTenantContext, getTenantId, platformContext, runWithTenant, tenantEnvironment } from "../../src/tenant/context.js";
+import { scopeTenantFilter, scopeTenantPipeline, scopeTenantUpdate, tenantPlugin } from "../../src/tenant/tenantPlugin.js";
+import { TENANT_MODELS } from "../../src/tenant/models.js";
+import { BotConfig } from "../../src/models/BotConfig.js";
+import { SmsConfig } from "../../src/models/SmsConfig.js";
 
 test("tenant context fails closed and stays isolated across overlapping promises and timers", async () => {
   assert.throws(getTenantContext, /Tenant context is required/);

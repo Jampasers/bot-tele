@@ -1,15 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Types } from "mongoose";
-import { BotRental } from "../models/BotRental.js";
-import { RentalPlan } from "../models/RentalPlan.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
+import { BotRental } from "../../src/models/BotRental.js";
+import { RentalPlan } from "../../src/models/RentalPlan.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
 import {
   parseRentalPlanSetup,
   parseRentalProvisionSetup,
   provisionRental,
   validateProvisionIdentity,
-} from "./rentalProvisioning.service.js";
+} from "../../src/rental/rentalProvisioning.service.js";
 
 test("main bot parses a configurable rental plan and rejects internal features", () => {
   assert.deepEqual(parseRentalPlanSetup("monthly | 30 | 25000 | Paket Bulanan | digital,affiliate"), {

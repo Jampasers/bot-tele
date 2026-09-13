@@ -4,12 +4,12 @@ import { Bot } from "grammy";
 import {
   createRentalStorePlugin,
   type RentalStoreDependencies,
-} from "./index.js";
+} from "../../../src/plugins/rentalstore/index.js";
 import type {
   OwnedRentalSummary,
   SelfServiceRentalPlan,
-} from "../../rental/rentalSelfService.service.js";
-import { calculateRentalRefund } from "../../rental/rental.service.js";
+} from "../../../src/rental/rentalSelfService.service.js";
+import { calculateRentalRefund } from "../../../src/rental/rental.service.js";
 
 const OWNER_ID = 4242;
 const PLAN_ID = "64b000000000000000000001";

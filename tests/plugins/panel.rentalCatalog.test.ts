@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SmsConfig } from "../models/SmsConfig.js";
-import { platformContext, runWithTenant } from "../tenant/context.js";
+import { SmsConfig } from "../../src/models/SmsConfig.js";
+import { platformContext, runWithTenant } from "../../src/tenant/context.js";
 import {
   buildCatalogKeyboard,
   buildCatalogText,
   buildMainMenuReplyKeyboard,
-} from "./panel/index.js";
+} from "../../src/plugins/panel/index.js";
 
 function rendered(value: unknown): string {
   return JSON.stringify(value);

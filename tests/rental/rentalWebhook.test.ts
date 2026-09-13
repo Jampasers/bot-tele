@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHmac, randomBytes } from "node:crypto";
-import { verifyRentalWebhook } from "./rentalWebhook.js";
+import { verifyRentalWebhook } from "../../src/rental/rentalWebhook.js";
 
 test("webhook signature rejects changed payload, secret, stale timestamp and malformed signature", () => {
   const secret = randomBytes(32).toString("hex");
