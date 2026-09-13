@@ -340,7 +340,7 @@ import sys
 
 trans_path = sys.argv[1]
 initrd_dir = os.path.dirname(trans_path)
-if os.path.exists('/root/wallpaper.jpg'):
+if ${wallpaperB64 ? "True" : "False"} and os.path.exists('/root/wallpaper.jpg'):
     shutil.copyfile('/root/wallpaper.jpg', os.path.join(initrd_dir, 'wallpaper.jpg'))
 
 with open(trans_path, 'r', encoding='utf-8') as f:
@@ -350,12 +350,9 @@ new_lines = []
 bats_found = False
 gpo_found = False
 wallpaper_copy_code = r'''    if [ -f /wallpaper.jpg ]; then
-        win_dir="$os_dir/Windows"
-        [ -d "$win_dir" ] || win_dir="$os_dir/windows"
-        if [ -d "$win_dir" ]; then
-            mkdir -p "$win_dir/Web/Wallpaper/Windows"
-            cp -f /wallpaper.jpg "$win_dir/Web/Wallpaper/Windows/img0.jpg" 2>/dev/null || true
-            cp -f /wallpaper.jpg "$win_dir/wallpaper.jpg" 2>/dev/null || true
+        wallpaper_win_dir=$(get_path_in_correct_case "$os_dir/Windows")
+        if [ -d "$wallpaper_win_dir" ]; then
+            cp -f /wallpaper.jpg "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
         fi
     fi'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
@@ -453,8 +450,33 @@ sc config XblGameSave start= disabled >nul 2>&1
 sc config XboxNetApiSvc start= disabled >nul 2>&1
 sc config XboxGipSvc start= disabled >nul 2>&1
 
+del "%~f0"
+EOF_RDP_FIX
+    unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
+    bats="$bats windows-fix-rdp.bat"'''
+
+# Keep cosmetic setup after the upstream network scripts. A failed optional
+# customization must not abort SetupComplete before the VPS has networking.
+wallpaper_bat_code = r'''    cat << 'EOF_WALLPAPER_PS1' > "$os_dir/danka-wallpaper.ps1"
+$ErrorActionPreference = 'Stop'
+$wallpaper = Join-Path $env:SystemRoot 'wallpaper.jpg'
+if (-not (Test-Path -LiteralPath $wallpaper)) { exit 0 }
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name Wallpaper -Value $wallpaper
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name WallpaperStyle -Value '10'
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name TileWallpaper -Value '0'
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public class DankaWallpaper {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
+}
+'@
+[DankaWallpaper]::SystemParametersInfo(0x0014, 0, $wallpaper, 3) | Out-Null
+EOF_WALLPAPER_PS1
+    cat << 'EOF_WALLPAPER_INSTALL' > "$os_dir/windows-set-wallpaper.bat"
+@echo off
 rem ========================================================
-rem 9. PASANG WALLPAPER KUSTOM (DANKA STORE)
+rem PASANG WALLPAPER KUSTOM (DANKA STORE)
 rem ========================================================
 if exist "%SystemRoot%\\wallpaper.jpg" (
     copy /y "%SystemRoot%\\wallpaper.jpg" "%SystemDrive%\\Wallpaper.jpg" >nul 2>&1
@@ -480,25 +502,29 @@ if exist "%SystemRoot%\\wallpaper.jpg" (
     reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v WallpaperStyle /t REG_SZ /d "10" /f >nul 2>&1
     reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v TileWallpaper /t REG_SZ /d "0" /f >nul 2>&1
 
-    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce" /v SetDankaWallpaper /t REG_SZ /d "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \\\"Add-Type 'using System.Runtime.InteropServices;public class W{[DllImport(\\\\\\\"user32.dll\\\\\\\")]public static extern int SystemParametersInfo(int a,int b,string c,int d);}';[W]::SystemParametersInfo(0x0014,0,'%SystemRoot%\\\\wallpaper.jpg',3)\\\"" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce" /v SetDankaWallpaper /t REG_SZ /d "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File %SystemDrive%\\danka-wallpaper.ps1" /f >nul 2>&1
 )
 
 del "%~f0"
-EOF_RDP_FIX
-    unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
-    bats="$bats windows-fix-rdp.bat"'''
+EOF_WALLPAPER_INSTALL
+    unix2dos "$os_dir/danka-wallpaper.ps1" 2>/dev/null || true
+    unix2dos "$os_dir/windows-set-wallpaper.bat" 2>/dev/null || true
+    bats="$bats windows-set-wallpaper.bat"'''
 
 ${chromeBatPatch}
 
 for line in lines:
     if not gpo_found and line.strip() == 'if $use_gpo; then':
         gpo_found = True
+${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
 ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
-        new_lines.append(wallpaper_copy_code)
         new_lines.append(fix_bat_code)
+
+if not bats_found or not gpo_found:
+    raise SystemExit('Windows setup hook not found; refusing incomplete installer patch')
 
 with open(trans_path, 'w', encoding='utf-8') as f:
     f.write('\\n'.join(new_lines) + '\\n')
