@@ -70,7 +70,11 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     }
     if (order.resumeStage !== "monitoring" && order.resumeStage !== "ssh" && order.resumeStage !== "droplet") return;
     // These steps only observe the existing VPS and cannot allocate another droplet.
-    await save({ stage: order.resumeStage as IVpsOrder["stage"] });
+    const resumeStage = order.resumeStage as IVpsOrder["stage"];
+    await save({
+      stage: resumeStage,
+      ...(resumeStage === "monitoring" ? { stageStartedAt: new Date(deps.now()), rdpSuccesses: 0 } : {}),
+    });
   }
   if (order.stage === "queued") {
     if (order.createAttemptedAt) { await stage("creating"); return; }

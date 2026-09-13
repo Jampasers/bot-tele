@@ -66,6 +66,19 @@ test("missing prepared marker after OS disk replacement goes to observation, not
     assert.equal(order.stage, "monitoring"); assert.equal(order.rdpSuccesses, 1);
 });
 
+test("review recovery resets the monitoring timeout before checking Windows again", async () => {
+    const old = new Date("2026-09-12T15:51:00.000Z");
+    const now = new Date("2026-09-13T00:40:00.000Z");
+    const order = orderFixture({ stage: "review", resumeStage: "monitoring", stageStartedAt: old, updatedAt: old });
+    await advanceVpsOrder(order, dependencies({
+        now: () => now.getTime(),
+        inspectWindows: async () => ({ rdpOpen: true, loginVerified: false, logState: "unavailable", detail: "RDP only" }),
+    }));
+    assert.equal(order.stage, "monitoring");
+    assert.equal(order.rdpSuccesses, 1);
+    assert.equal(order.stageStartedAt.getTime(), now.getTime());
+});
+
 test("buyer token loss during ambiguous create review preserves creating recovery target", async () => {
     const order = orderFixture({ stage: "review", resumeStage: "creating", dropletId: null, publicIp: null });
     await advanceVpsOrder(order, dependencies({ client: async () => undefined }));
@@ -168,4 +181,3 @@ test("worker monitoring resets rdpSuccesses and avoids ready when installer log 
     assert.equal(order.stage, "monitoring");
     assert.equal(order.rdpSuccesses, 0);
 });
-
