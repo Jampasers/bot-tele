@@ -23,7 +23,10 @@
   ],
   "allowScripts": {
     "esbuild": true,
-    "puppeteer": true
+    "puppeteer": true,
+    "ssh2@1.17.0": true,
+    "@whiskeysockets/baileys@7.0.0-rc14": true,
+    "protobufjs@7.6.6": true
   },
   "author": "",
   "license": "MIT",
