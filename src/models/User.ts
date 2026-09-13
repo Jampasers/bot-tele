@@ -1,6 +1,11 @@
 import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import { Schema, model, Document, Model } from "mongoose";
 
+/** Match the schema's UTF-16 length limit without splitting an astral character. */
+export function normalizeUserFirstName(value: string): string {
+  return value.trim().slice(0, 64).replace(/[\uD800-\uDBFF]$/u, "").trim() || "User";
+}
+
 // ---------------------------------------------------------------------------
 // 1. TypeScript Interface
 // ---------------------------------------------------------------------------
@@ -100,6 +105,7 @@ const userSchema = new Schema<IUser>(
       type: String,
       required: [true, "firstName is required"],
       trim: true,
+      set: (value: unknown) => typeof value === "string" ? normalizeUserFirstName(value) : value,
       maxlength: [64, "firstName must be 64 characters or fewer"],
     },
     username: {

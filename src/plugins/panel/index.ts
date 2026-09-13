@@ -1,6 +1,6 @@
 import { Api, Bot, Context, InlineKeyboard, Keyboard } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
-import { User, IUser } from "../../models/User.js";
+import { User, IUser, normalizeUserFirstName } from "../../models/User.js";
 import { SmsConfig } from "../../models/SmsConfig.js";
 import { ActivityLogService, LogUserInfo } from "../../services/activityLog.js";
 import { HydratedDocument } from "mongoose";
@@ -208,6 +208,7 @@ export async function findOrCreateUser(
   api?: Api,
   referredBy?: string,
 ): Promise<HydratedDocument<IUser>> {
+  firstName = normalizeUserFirstName(firstName);
   const existing = await User.findOne({ telegramId });
   if (!existing) {
     const newUser = await User.create({

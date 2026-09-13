@@ -7,6 +7,7 @@ import { clearVpsInput, setVpsInput } from "./input.js";
 import { getOs } from "../../vps/installer.js";
 import { planPrice } from "../../vps/catalogPlans.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
+import { DigitalOceanError } from "../../vps/digitalOcean.js";
 
 interface Draft {
   id: string;
@@ -83,7 +84,30 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         return;
       }
       try { await handler(ctx); }
-      catch { await ctx.reply("Permintaan VPS belum dapat diproses. Pilihan mungkin kedaluwarsa atau layanan sedang sibuk. Buka detail pesanan untuk melihat status terakhir.", { reply_markup: homeKeyboard() }).catch(() => {}); }
+      catch (err) {
+        if (err instanceof Error && err.message === "Expired VPS selection") {
+          const ref = randomUUID();
+          console.warn("[VPS_SESSION_EXPIRED]", ref);
+          await ctx.reply(
+            `Sesi VPS sudah kedaluwarsa atau pilihan tidak ditemukan. Buka /vps untuk memulai ulang.\n\nReferensi: ${ref} [VPS_SESSION_EXPIRED]`,
+            { reply_markup: homeKeyboard() },
+          ).catch(() => {});
+        } else if (err instanceof DigitalOceanError && (err.kind === "permission" || err.kind === "invalid_token")) {
+          const ref = randomUUID();
+          console.warn("[VPS_DO_PERMISSION]", ref);
+          await ctx.reply(
+            `Izin token DigitalOcean tidak mencukupi untuk operasi ini.\n\nReferensi: ${ref} [VPS_DO_PERMISSION]`,
+            { reply_markup: homeKeyboard() },
+          ).catch(() => {});
+        } else {
+          const ref = randomUUID();
+          console.warn("[VPS_INTERNAL]", ref);
+          await ctx.reply(
+            `Permintaan VPS tidak dapat diproses saat ini. Buka detail pesanan untuk melihat status terakhir.\n\nReferensi: ${ref} [VPS_INTERNAL]`,
+            { reply_markup: homeKeyboard() },
+          ).catch(() => {});
+        }
+      }
     };
   }
   async function showHome(ctx: Context): Promise<void> {
@@ -181,8 +205,11 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const actor = actorOf(ctx);
     if (!draft.order) {
       draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: { ...draft.direct } } : {}) });
-      try { draft.order = await draft.checkout; }
-      finally { delete draft.checkout; if (draft.direct) draft.direct.password = ""; }
+      try {
+        draft.order = await draft.checkout;
+        // Only clear password after a confirmed successful checkout, so retries still work.
+        if (draft.direct) draft.direct.password = "";
+      } finally { delete draft.checkout; }
     }
     await showOrder(ctx, draft.order._id);
   }

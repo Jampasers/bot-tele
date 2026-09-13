@@ -10,6 +10,7 @@ import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/
 import type { VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
 import { catalogPlans, planPrice } from "../../../src/vps/catalogPlans.js";
+import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
@@ -122,6 +123,65 @@ test("direct install order shows Windows access without a DigitalOcean token act
   assert.match(vpsOrderText(directOrder), /VPS milik buyer/);
 });
 
+test("Chrome checkout can be retried with the same intent and memory-only VPS password", async t => {
+  t.mock.method(console, "warn", () => {});
+  const attempts: Parameters<VpsUiDependencies["checkout"]>[0][] = [];
+  const { bot, calls } = await harness({ checkout: async input => {
+    attempts.push(structuredClone(input));
+    if (attempts.length === 1) throw new Error("synthetic database timeout");
+    return ORDER;
+  } });
+  await bot.handleUpdate(update(1, "vps_install_direct", true));
+  await bot.handleUpdate(update(2, "192.0.2.10"));
+  await bot.handleUpdate(update(3, "root"));
+  await bot.handleUpdate(update(4, "synthetic-source-password"));
+  await bot.handleUpdate(update(5, callback(calls, "vps_plan_"), true));
+  const chrome = callback(calls, "vps_chrome_").replace(/_no$/, "_yes");
+  await bot.handleUpdate(update(6, chrome, true));
+  await bot.handleUpdate(update(7, chrome, true));
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[1]?.requestId, attempts[0]?.requestId);
+  assert.equal(attempts[1]?.direct?.password, "synthetic-source-password");
+  assert.equal(attempts[1]?.installChrome, true);
+  assert.doesNotMatch(JSON.stringify(calls), /synthetic-source-password|synthetic database timeout/);
+});
+
+test("expired VPS buttons explain session recovery separately from provider failure", async t => {
+  const logs: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { logs.push(args); });
+  const { bot, calls } = await harness();
+  await bot.handleUpdate(update(1, `vps_chrome_${ORDER_ID}_yes`, true));
+  assert.match(replies(calls), /sesi.*kedaluwarsa.*\/vps/is);
+  assert.match(replies(calls), /VPS_SESSION_EXPIRED/);
+  assert.match(JSON.stringify(logs), /VPS_SESSION_EXPIRED/);
+  assert.doesNotMatch(JSON.stringify(logs), new RegExp(ORDER_ID));
+});
+
+test("VPS failures expose safe cause and a matching reference without raw payloads", async t => {
+  const logs: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { logs.push(args); });
+  const failure = Object.assign(new DigitalOceanError("permission", false, 403), {
+    message: "provider echoed synthetic-secret", request: { token: "synthetic-secret" },
+  });
+  const { bot, calls } = await harness({ listPlans: async () => { throw failure; } });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  assert.match(replies(calls), /izin token/i);
+  assert.match(replies(calls), /VPS_DO_PERMISSION/);
+  const reference = /Referensi: ([a-f0-9-]{36})/.exec(replies(calls))?.[1];
+  assert.ok(reference);
+  assert.match(JSON.stringify(logs), new RegExp(reference));
+  assert.doesNotMatch(JSON.stringify([calls, logs]), /synthetic-secret|provider echoed/);
+});
+
+test("unknown VPS errors log a code, not an arbitrary error message or callback", async t => {
+  const logs: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { logs.push(args); });
+  const { bot, calls } = await harness({ listPlans: async () => { throw new Error("synthetic-secret"); } });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  assert.match(replies(calls), /VPS_INTERNAL/);
+  assert.doesNotMatch(JSON.stringify([calls, logs]), /synthetic-secret/);
+});
+
 test("buyer token is deleted before validation and cannot reach generic text handlers", async () => {
   let accepted = 0;
   let staleHandlerCalls = 0;
@@ -227,7 +287,7 @@ test("draft callback from another buyer cannot checkout", async () => {
   await bot.handleUpdate(update(1, "vps_buy", true));
   await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true, 77));
   assert.equal(checkoutCalls, 0);
-  assert.match(replies(calls), /belum dapat diproses/);
+  assert.match(replies(calls), /VPS_SESSION_EXPIRED/);
 });
 
 test("a locked payment remains recoverable with only the selected method", async () => {
