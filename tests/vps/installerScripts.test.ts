@@ -73,10 +73,9 @@ async function installerPatch(directory: string, installChrome: boolean, wallpap
     const encodedImage = script.match(/cat << 'EOF_WALLPAPER_B64'[^\n]*\n([^\n]+)\nEOF_WALLPAPER_B64/);
     assert.equal(Boolean(encodedImage), wallpaper);
     if (encodedImage) writeFileSync(path.join(directory, "source-wallpaper.jpg"), Buffer.from(encodedImage[1]!, "base64"));
-    // Remap only absolute fixture file locations; preserve all generated code
-    // and quoting through Python -> Bash -> Windows batch/PowerShell.
-    return patch.replaceAll("'/root/wallpaper.jpg'", JSON.stringify(path.join(directory, "source-wallpaper.jpg")))
-        .replaceAll(/(?<=\s)\/wallpaper\.jpg(?=\s)/g, '"$PWD/source-wallpaper.jpg"');
+    // Remap only the Python shutil.copyfile source path for local test execution;
+    // wallpaper_copy_code now uses BASH_SOURCE-relative paths that resolve correctly.
+    return patch.replaceAll("'/root/wallpaper.jpg'", JSON.stringify(path.join(directory, "source-wallpaper.jpg")));
 }
 
 function patchFixture(directory: string, patch: string, fixture = transFixture) {
@@ -125,6 +124,20 @@ for (const anchor of ["bats=\n", "if $use_gpo; then\n"]) {
         assert.equal(readFileSync(path.join(directory, "trans.sh"), "utf8"), original, "failed patch must leave the upstream script intact");
     });
 }
+
+test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
+    const directory = temporaryDirectory(t);
+    const patched = patchFixture(directory, await installerPatch(directory, false, true));
+    assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+    const patchedScript = readFileSync(path.join(directory, "trans.sh"), "utf8");
+    // The wallpaper copy block must NOT reference a hardcoded absolute /wallpaper.jpg
+    const copyBlock = patchedScript.match(/_wp_dir=[\s\S]*?fi\r?\n\s*fi/)?.[0] ?? "";
+    assert.ok(copyBlock, "wallpaper copy block must exist in patched trans.sh");
+    assert.doesNotMatch(copyBlock, /\s\/wallpaper\.jpg/, "wallpaper source path must not be hardcoded /wallpaper.jpg");
+    assert.match(copyBlock, /\$_wp_dir\/wallpaper\.jpg/, "wallpaper source path must use $_wp_dir");
+    assert.match(patchedScript, /BASH_SOURCE/, "wallpaper_copy_code must use BASH_SOURCE to find wallpaper.jpg");
+});
+
 
 function sanitizeBatch(batch: string): string {
     return batch.split(/\r?\n/).map(line => {

@@ -349,10 +349,11 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 new_lines = []
 bats_found = False
 gpo_found = False
-wallpaper_copy_code = r'''    if [ -f /wallpaper.jpg ]; then
+wallpaper_copy_code = r'''    _wp_dir=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+    if [ -f "$_wp_dir/wallpaper.jpg" ]; then
         wallpaper_win_dir=$(get_path_in_correct_case "$os_dir/Windows")
         if [ -d "$wallpaper_win_dir" ]; then
-            cp -f /wallpaper.jpg "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
+            cp -f "$_wp_dir/wallpaper.jpg" "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
         fi
     fi'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
