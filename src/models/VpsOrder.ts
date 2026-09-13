@@ -11,6 +11,7 @@ export interface IVpsOrder {
   stage: "queued" | "creating" | "droplet" | "ssh" | "installing" | "rebooting" | "monitoring" | "ready" | "needs_token" | "review" | "failed" | "cancelled";
   resumeStage: string | null; credentialId: string | null; accountId: string | null;
   dropletId: number | null; publicIp: string | null; createName: string;
+  sourceUsername?: string | null; sourcePasswordEncrypted?: string | null;
   createAttemptedAt: Date | null; reservationActive: boolean;
   passwordEncrypted: string; lastError: string | null; evidence: string;
   installerLogUrl: string | null; stageStartedAt: Date; rdpSuccesses: number;
@@ -30,6 +31,7 @@ const schema = new Schema<IVpsOrder>({
   stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },
   resumeStage: { type: String, default: null }, credentialId: { type: String, default: null }, accountId: { type: String, default: null },
   dropletId: { type: Number, default: null }, publicIp: { type: String, default: null }, createName: { type: String, required: true, unique: true },
+  sourceUsername: { type: String, default: null }, sourcePasswordEncrypted: { type: String, default: null, select: false },
   createAttemptedAt: { type: Date, default: null }, reservationActive: { type: Boolean, default: false }, passwordEncrypted: { type: String, required: true, select: false },
   lastError: { type: String, default: null }, evidence: { type: String, default: "Belum diperiksa" }, installerLogUrl: { type: String, default: null },
   stageStartedAt: { type: Date, default: Date.now }, rdpSuccesses: { type: Number, default: 0 }, lockOwner: { type: String, default: null }, lockUntil: { type: Date, default: null }, nextRunAt: { type: Date, default: Date.now },

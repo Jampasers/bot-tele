@@ -19,11 +19,16 @@ interface Draft {
   region?: string;
   order?: VpsUiOrder;
   checkout?: Promise<VpsUiOrder>;
+  direct?: { ip: string; username: string; password: string };
 }
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard()
   .text("🛒 Beli VPS", "vps_buy").text("🛠 Jasa setup/install", "vps_install").row()
   .text("🖥️ VPS Saya", "vps_my_0").text("📋 Riwayat pesanan", "vps_history_0").row()
   .text("🔙 Catalog", "menu_catalog");
+const directHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
+  .text("VPS DigitalOcean", "vps_buy").text("Jasa install DO", "vps_install").row()
+  .text("Install Windows VPS sendiri", "vps_install_direct").row()
+  .text("VPS Saya", "vps_my_0").text("Riwayat pesanan", "vps_history_0").row().text("Catalog", "menu_catalog");
 const serviceLabel = (service: VpsServiceType): string => service === "install" ? "Jasa setup/install" : "Beli VPS";
 const feeNotice = "Pembayaran ke toko hanya biaya jasa setup/install. Biaya DigitalOcean ditagihkan ke akun buyer dan menjadi tanggungan buyer.";
 
@@ -74,6 +79,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     };
   }
   async function showHome(ctx: Context): Promise<void> {
+    await ctx.reply("Pilih sumber VPS untuk jasa install Windows:", { reply_markup: new InlineKeyboard().text("Jasa install dari DO", "vps_install").row().text("Install di VPS sendiri", "vps_install_direct") });
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
     await vpsReply(ctx, `🖥️ VPS DigitalOcean\n\nBeli VPS memakai akun toko atau gunakan jasa setup/install pada akun DigitalOcean milikmu.\n\n${feeNotice}${deps.enabled() ? "" : "\n\nPemesanan baru sementara dinonaktifkan."}`, homeKeyboard());
@@ -87,7 +93,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     keyboard.text("🔙 VPS", "vps_home");
     await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? "(Langkah 1/3) Pilih paket spek VPS:" : "Belum ada paket aktif. Hubungi admin."}${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
   }
-  async function start(ctx: Context, serviceType: VpsServiceType): Promise<void> {
+  async function start(ctx: Context, serviceType: VpsServiceType, direct = false): Promise<void> {
     if (!deps.enabled()) { await ctx.reply("Pemesanan VPS belum diaktifkan oleh admin.", { reply_markup: homeKeyboard() }); return; }
     const actor = actorOf(ctx);
     clearVpsInput(actor);
@@ -96,6 +102,24 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: await deps.listPlans(serviceType) };
     drafts.set(actor, draft);
     if (serviceType === "purchase") { await choosePlan(ctx, draft); return; }
+    if (direct) {
+      setVpsInput(actor, { secret: false, cancel: () => dropDraft(actor), receive: async (inputCtx, ip) => {
+        draft.direct = { ip: ip.trim(), username: "", password: "" };
+        setVpsInput(actor, { secret: false, cancel: () => dropDraft(actor), receive: async (usernameCtx, username) => {
+          if (!draft.direct) throw new Error("Missing connection");
+          draft.direct.username = username.trim();
+          setVpsInput(actor, { secret: true, cancel: () => dropDraft(actor), receive: async (passwordCtx, password) => {
+            if (!draft.direct) throw new Error("Missing connection");
+            draft.direct.password = password;
+            await choosePlan(passwordCtx, draft);
+          } });
+          await usernameCtx.reply("(3/3) Kirim password VPS. Pesan akan dihapus otomatis.");
+        } });
+        await inputCtx.reply("(2/3) Kirim username VPS (contoh: root atau ubuntu).");
+      } });
+      await vpsReply(ctx, "🛠️ Install Windows di VPS sendiri\n\n(1/3) Kirim IP VPS. VPS harus sudah bisa diakses via SSH.", new InlineKeyboard().text("Batal", "vps_home"));
+      return;
+    }
     setVpsInput(actor, {
       secret: true,
       cancel: () => dropDraft(actor),
@@ -131,7 +155,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
     const actor = actorOf(ctx);
     if (!draft.order) {
-      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}) });
+      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: draft.direct } : {}) });
       try { draft.order = await draft.checkout; }
       finally { delete draft.checkout; }
     }
@@ -149,6 +173,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         clearVpsInput(actor);
         if (data === "vps_home") { await showHome(ctx); return; }
         if (data === "vps_buy" || data === "vps_install") { await start(ctx, data === "vps_buy" ? "purchase" : "install"); return; }
+        if (data === "vps_install_direct") { await start(ctx, "install", true); return; }
         const page = /^vps_page_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
         if (page) { await choosePlan(ctx, currentDraft(actor, page[1]!), Number(page[2])); return; }
         const backRegion = /^vps_backregion_([a-f0-9-]{36})$/.exec(data);
@@ -171,6 +196,16 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             if (!plan) throw new Error("Unknown plan");
             draft.plan = plan;
             delete draft.region; delete draft.os;
+            if (draft.direct) {
+              draft.region = plan.regions[0] ?? "external";
+              const windows = plan.osPrices.find(os => getOs(os.os)?.family === "windows");
+              if (!windows) throw new Error("Paket install belum memiliki harga Windows.");
+              draft.os = windows.os;
+              await vpsReply(ctx, `${plan.name}\nOS: ${windows.label}\n\nVPS sendiri siap diproses. Tambahkan Google Chrome?`, new InlineKeyboard()
+                .text("Lanjut tanpa Chrome", `vps_chrome_${draft.id}_no`).row()
+                .text("+ Chrome (Gratis)", `vps_chrome_${draft.id}_yes`).row().text("Batal", "vps_home"));
+              return;
+            }
             const keyboard = new InlineKeyboard();
             plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");

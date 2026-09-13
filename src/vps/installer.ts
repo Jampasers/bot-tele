@@ -114,9 +114,9 @@ const executeSsh: SshExecutor = (input, signal) => new Promise((resolve, reject)
     } catch { finish(new InstallerError("ssh", input.mutation === true)); }
 });
 
-export async function testSsh(input: { ip: string; password: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<boolean> {
+export async function testSsh(input: { ip: string; password: string; username?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<boolean> {
     try {
-        const result = await (deps.ssh ?? executeSsh)({ ...input, username: "root", command: "test \"$(id -u)\" = 0 && printf '__VPS_SSH_READY__'", timeoutMs: 20_000 }, signal);
+        const result = await (deps.ssh ?? executeSsh)({ ...input, username: input.username ?? "root", command: "id >/dev/null && printf '__VPS_SSH_READY__'", timeoutMs: 20_000 }, signal);
         return result.code === 0 && result.output.includes("__VPS_SSH_READY__");
     } catch (error) { if (signal?.aborted) throw new InstallerError("cancelled"); if (error instanceof InstallerError && error.kind === "validation") throw error; return false; }
 }
@@ -139,7 +139,7 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; }
+export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; }
 export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
@@ -262,7 +262,7 @@ touch "$state/prepared"
 trap - EXIT
 echo __VPS_PREPARED__
 `;
-    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: "root", command: "bash -s", stdin: script, timeoutMs: 15 * 60_000, mutation: true }, signal);
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root", command: "bash -s", stdin: script, timeoutMs: 15 * 60_000, mutation: true }, signal);
     const sanitized = redactInstallerOutput(result.output, [input.password, input.windowsPassword]);
     const logUrl = extractInstallerLogUrl(sanitized, input.ip);
     const state = result.code === 0 && sanitized.includes("__VPS_PREPARED__") ? "prepared"
@@ -276,7 +276,7 @@ echo __VPS_PREPARED__
     return { state, ...(logUrl ? { logUrl } : {}) };
 }
 
-export async function scheduleInstallerReboot(input: { ip: string; password: string; orderId: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<"scheduled" | "already_scheduled" | "failed"> {
+export async function scheduleInstallerReboot(input: { ip: string; password: string; username?: string; orderId: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<"scheduled" | "already_scheduled" | "failed"> {
     const directory = stateDirectory(input.orderId);
     const script = `set -eu
 state=${quote(directory)}
@@ -289,7 +289,7 @@ if (sleep 2 && reboot) >/dev/null 2>&1 & then echo __VPS_REBOOT_SCHEDULED__;
 elif shutdown -r +1; then echo __VPS_REBOOT_SCHEDULED__;
 else touch "$state/reboot-failed"; echo __VPS_REBOOT_FAILED__; exit 1; fi
 `;
-    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: "root", command: "bash -s", stdin: script, timeoutMs: 20_000, mutation: true }, signal);
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root", command: "bash -s", stdin: script, timeoutMs: 20_000, mutation: true }, signal);
     if (result.code === 0 && result.output.includes("__VPS_REBOOT_SCHEDULED__")) return "scheduled";
     if (result.code === 0 && result.output.includes("__VPS_REBOOT_ALREADY__")) return "already_scheduled";
     return "failed";

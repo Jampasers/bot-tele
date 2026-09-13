@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
 import { VpsPlan, type IVpsPlan } from "../models/VpsPlan.js";
@@ -15,7 +16,7 @@ export async function ownedOrder(actor: string, orderId: string, includeSecret =
   assertVpsPlatform();
   if (!/^\d{1,20}$/.test(actor) || !validId(orderId)) throw new Error("Pesanan tidak ditemukan.");
   const q = VpsOrder.findOne({ _id: orderId, tenantId: "platform", buyerId: actor });
-  if (includeSecret) q.select("+passwordEncrypted");
+  if (includeSecret) q.select("+passwordEncrypted +sourcePasswordEncrypted");
   return q.lean();
 }
 export function orderDto(order: IVpsOrder): VpsUiOrder {
@@ -54,8 +55,15 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket atau harga tidak tersedia.");
   if (input.installChrome === true && os.family !== "windows") throw new Error("Chrome hanya tersedia untuk Windows.");
   let accountId: string | null = null;
+  let sourceUsername: string | null = null;
+  let sourcePasswordEncrypted: string | null = null;
   let client: DigitalOceanClient | undefined;
-  if (input.serviceType === "install") {
+  if (input.serviceType === "install" && input.direct) {
+    if (getOs(input.os)?.family !== "windows" || !isIP(input.direct.ip) || !/^[A-Za-z_][A-Za-z0-9_.-]{0,31}$/.test(input.direct.username)
+      || !input.direct.password || /[\r\n\0]/.test(input.direct.password) || input.direct.password.length > 256) throw new Error("Koneksi VPS atau OS Windows tidak valid.");
+    sourceUsername = input.direct.username;
+    sourcePasswordEncrypted = encryptSecret(input.direct.password, `platform:vps:source-password:${input.requestId}`);
+  } else if (input.serviceType === "install") {
     const token = buyerTokens.get(input.actorTelegramId, input.buyerSessionId ?? input.requestId);
     if (!token) throw new Error("Kirim ulang token buyer sebelum checkout.");
     client = new DigitalOceanClient(token.token);
@@ -72,12 +80,12 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
       } catch { /* No secrets or raw provider errors in checkout diagnostics. */ }
     }
   }
-  if (!client) throw new Error("Akun VPS belum tersedia.");
-  const selected = await client.validateSelection({ os: input.os, region: input.region, size: plan.sizeSlug });
+  if (input.serviceType === "purchase" && !client) throw new Error("Akun VPS belum tersedia.");
+  const selected = client ? await client.validateSelection({ os: input.os, region: input.region, size: plan.sizeSlug }) : { os: { image: os.image }, size: { vcpus: 0, memory: 0, disk: 0 } };
   const password = generatePassword();
   try {
     const order = await VpsOrder.create({ _id: input.requestId, tenantId: "platform", buyerId: input.actorTelegramId, chatId: input.chatId,
-      service: input.serviceType, accountId, createName: `bt-vps-${input.requestId}`,
+      service: input.serviceType, accountId, sourceUsername, sourcePasswordEncrypted, createName: `bt-vps-${input.requestId}`,
       passwordEncrypted: encryptSecret(password, `platform:vps:password:${input.requestId}`),
       snapshot: { planId: plan._id, planName: plan.name, size: plan.sizeSlug, region: input.region, os: input.os, image: selected.os.image,
         price, vcpus: selected.size.vcpus, memory: selected.size.memory, disk: selected.size.disk, installChrome: input.installChrome === true },

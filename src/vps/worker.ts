@@ -16,6 +16,8 @@ export interface VpsStepDependencies {
   client(): Promise<DigitalOceanClient | undefined>;
   reserve(): Promise<{ credentialId: string; accountId: string } | null>;
   password(): string;
+  sourcePassword?(): string;
+  sourceUsername?(): string;
   testSsh: typeof testSsh;
   launchWindows: typeof launchWindows;
   scheduleInstallerReboot: typeof scheduleInstallerReboot;
@@ -94,6 +96,10 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     await save({ stage: resumeStage });
   }
   if (order.stage === "queued") {
+    if (order.service === "install" && order.publicIp && order.sourceUsername && order.sourcePasswordEncrypted) {
+      await stage("ssh", { evidence: "VPS pelanggan diterima. Menunggu koneksi SSH untuk instalasi Windows." });
+      return;
+    }
     if (order.createAttemptedAt) { await stage("creating"); return; }
     if (order.service === "purchase" && !order.credentialId) {
       const capacity = await deps.reserve();
@@ -142,15 +148,17 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   }
   if (!order.publicIp) return;
   const password = deps.password();
+  const sourcePassword = order.service === "install" && order.sourcePasswordEncrypted ? (deps.sourcePassword?.() ?? password) : password;
+  const sourceUsername = order.service === "install" && order.sourceUsername ? (deps.sourceUsername?.() ?? order.sourceUsername) : "root";
   if (order.stage === "ssh") {
-    if (await deps.testSsh({ ip: order.publicIp, password }, deps.signal)) {
+    if (await deps.testSsh({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal)) {
       if (getOs(order.snapshot.os)?.family === "linux") { await stage("ready", { evidence: "Login SSH root berhasil diverifikasi." }); deps.clearToken(); }
       else await stage("installing", { evidence: "SSH Linux berhasil; menyiapkan installer Windows." });
     } else if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
     return;
   }
   if (order.stage === "installing") {
-    const result = await deps.launchWindows({ ip: order.publicIp, password, windowsPassword: password, os: order.snapshot.os, orderId: order._id, installChrome: order.snapshot.installChrome === true }, deps.signal);
+    const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password, os: order.snapshot.os, orderId: order._id, installChrome: order.snapshot.installChrome === true }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
     if (result.state === "prepared") await stage("rebooting", { evidence: "Installer Windows disiapkan. Menjadwalkan reboot instalasi." });
     else if (result.state === "failed" || deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) {
@@ -166,7 +174,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     // the missing prepared marker prevents any reboot command on the installed OS.
     let result: Awaited<ReturnType<typeof scheduleInstallerReboot>>;
     try {
-      result = await deps.scheduleInstallerReboot({ ip: order.publicIp, password, orderId: order._id }, deps.signal);
+      result = await deps.scheduleInstallerReboot({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, orderId: order._id }, deps.signal);
     } catch {
       await stage("monitoring", { evidence: "Hasil reboot instalasi belum terkonfirmasi; memantau VPS yang sama tanpa mengulang persiapan installer." });
       return;
@@ -208,7 +216,7 @@ export class VpsWorker {
             { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
             { rebootState: { $in: ["requested", "submitting", "running"] } },
           ] } ],
-        }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { sort: { nextRunAt: 1 }, returnDocument: "after" }).select("+passwordEncrypted").lean();
+        }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { sort: { nextRunAt: 1 }, returnDocument: "after" }).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
         if (!order) break;
         const task = this.process(order).catch(error => { this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Worker step deferred`, error); });
         this.tasks.add(task); void task.finally(() => this.tasks.delete(task));
@@ -266,6 +274,8 @@ export class VpsWorker {
         },
         reserve: () => reserveStoreCapacity(order, leaseId),
         password: () => decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
+        sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
+        sourceUsername: () => order.sourceUsername ?? "root",
         testSsh, launchWindows, scheduleInstallerReboot, inspectWindows,
         clearToken: () => buyerTokens.delete(order.buyerId, order._id), now: Date.now, signal: stopStep.signal,
       });
