@@ -85,23 +85,39 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       }
       try { await handler(ctx); }
       catch (err) {
+        const ref = randomUUID();
         if (err instanceof Error && err.message === "Expired VPS selection") {
-          const ref = randomUUID();
           console.warn("[VPS_SESSION_EXPIRED]", ref);
           await ctx.reply(
             `Sesi VPS sudah kedaluwarsa atau pilihan tidak ditemukan. Buka /vps untuk memulai ulang.\n\nReferensi: ${ref} [VPS_SESSION_EXPIRED]`,
             { reply_markup: homeKeyboard() },
           ).catch(() => {});
-        } else if (err instanceof DigitalOceanError && (err.kind === "permission" || err.kind === "invalid_token")) {
-          const ref = randomUUID();
-          console.warn("[VPS_DO_PERMISSION]", ref);
+        } else if (err instanceof DigitalOceanError) {
+          const kindMap: Record<string, string> = {
+            invalid_token: "Token DigitalOcean tidak valid atau sudah kedaluwarsa.",
+            permission: "Izin token DigitalOcean tidak mencukupi untuk operasi ini.",
+            rate_limit: "Batas request DigitalOcean tercapai. Coba beberapa saat lagi.",
+            timeout: "Request ke DigitalOcean melewati batas waktu. Coba lagi.",
+            network: "Koneksi ke DigitalOcean terputus. Periksa jaringan dan coba lagi.",
+            api: "Respons API DigitalOcean tidak dapat dibaca. Coba lagi.",
+            validation: "Pilihan VPS (region/spek/OS) tidak tersedia di DigitalOcean.",
+            cancelled: "Pemeriksaan DigitalOcean dihentikan.",
+          };
+          const code = `VPS_DO_${err.kind.toUpperCase()}`;
+          console.warn(`[${code}]`, ref, err.kind);
           await ctx.reply(
-            `Izin token DigitalOcean tidak mencukupi untuk operasi ini.\n\nReferensi: ${ref} [VPS_DO_PERMISSION]`,
+            `${kindMap[err.kind] ?? "Layanan DigitalOcean tidak dapat diakses."}\n\nReferensi: ${ref} [${code}]`,
+            { reply_markup: homeKeyboard() },
+          ).catch(() => {});
+        } else if (err instanceof Error && /^(Paket|Region|OS|Pilihan|Harga|Akun|Chrome|Koneksi|Input|Checkout|Token|Kirim ulang|Pemesanan VPS|VPS tidak)/.test(err.message)) {
+          // Safe, user-facing error messages thrown explicitly from service/checkout logic.
+          console.warn("[VPS_USER_ERROR]", ref, err.message);
+          await ctx.reply(
+            `${err.message}\n\nReferensi: ${ref}`,
             { reply_markup: homeKeyboard() },
           ).catch(() => {});
         } else {
-          const ref = randomUUID();
-          console.warn("[VPS_INTERNAL]", ref);
+          console.warn("[VPS_INTERNAL]", ref, err);
           await ctx.reply(
             `Permintaan VPS tidak dapat diproses saat ini. Buka detail pesanan untuk melihat status terakhir.\n\nReferensi: ${ref} [VPS_INTERNAL]`,
             { reply_markup: homeKeyboard() },
