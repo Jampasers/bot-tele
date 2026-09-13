@@ -4,6 +4,7 @@ import { synchronizeRentalLifecycle } from "../rental/rental.service.js";
 import { notifyRentalExpiry } from "../rental/rentalNotification.service.js";
 import { pollPendingRentalPayments } from "../rental/rentalPayment.service.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
+import { ThrottledWarningLogger } from "./retryLogger.js";
 
 export interface RentalSchedulerManager {
   getRentalBot(rentalId: string): Bot<Context> | undefined;
@@ -26,6 +27,7 @@ async function* rentalIds(): AsyncIterable<string> {
 export class RentalScheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private inFlight: Promise<void> | undefined;
+  private readonly warnings = new ThrottledWarningLogger();
   private readonly dependencies: RentalSchedulerDependencies;
   constructor(private readonly manager: RentalSchedulerManager, private readonly intervalMs = 60_000, dependencies: Partial<RentalSchedulerDependencies> = {}) {
     this.dependencies = { rentalIds, synchronize: synchronizeRentalLifecycle, notify: notifyRentalExpiry, pollPayments: pollPendingRentalPayments, ...dependencies };
@@ -42,7 +44,7 @@ export class RentalScheduler {
     if (this.inFlight) return this.inFlight;
     this.inFlight = runWithTenant(platformContext(), async () => {
       try { await this.dependencies.pollPayments(); }
-      catch { console.warn("[RentalScheduler] Payment reconciliation failed; retry on next tick"); }
+      catch (error) { this.warnings.warn("payments", "[RentalScheduler] Payment reconciliation failed; retry on next tick", error); }
       for await (const rentalId of this.dependencies.rentalIds()) {
         try {
           const state = await this.dependencies.synchronize(rentalId);
@@ -53,9 +55,9 @@ export class RentalScheduler {
           let bot = this.manager.getRentalBot(rentalId);
           if (!bot) { await this.manager.startRentalBot(rentalId); bot = this.manager.getRentalBot(rentalId); }
           if (bot) await this.dependencies.notify(bot, state);
-        } catch { console.warn(`[Rental:${rentalId}] Scheduled reconciliation failed; other rentals continue`); }
+        } catch (error) { this.warnings.warn(`rental:${rentalId}`, `[Rental:${rentalId}] Scheduled reconciliation failed; other rentals continue`, error); }
       }
-    }).catch(() => { console.warn("[RentalScheduler] Reconciliation failed; retry on next tick"); }).finally(() => { this.inFlight = undefined; });
+    }).catch(error => { this.warnings.warn("scheduler", "[RentalScheduler] Reconciliation failed; retry on next tick", error); }).finally(() => { this.inFlight = undefined; });
     return this.inFlight;
   }
 

@@ -4,6 +4,7 @@ import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
 import { decryptSecret } from "../services/crypto.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
+import { ThrottledWarningLogger } from "../runtime/retryLogger.js";
 import { DigitalOceanClient, DigitalOceanError } from "./digitalOcean.js";
 import { buildUserData, getOs, inspectWindows, launchWindows, scheduleInstallerReboot, testSsh } from "./installer.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
@@ -184,6 +185,7 @@ export class VpsWorker {
   private readonly tasks = new Set<Promise<void>>();
   private readonly abort = new AbortController();
   private ticking = false;
+  private readonly warnings = new ThrottledWarningLogger();
   private readonly concurrency = boundedEnv("VPS_CONCURRENCY", 2, 1, 5);
   constructor(private readonly api: Pick<Api, "sendMessage">) {}
   start(): void {
@@ -208,10 +210,10 @@ export class VpsWorker {
           ] } ],
         }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { sort: { nextRunAt: 1 }, returnDocument: "after" }).select("+passwordEncrypted").lean();
         if (!order) break;
-        const task = this.process(order).catch(() => { console.warn(`[VPS:${order._id}] Worker step deferred.`); });
+        const task = this.process(order).catch(error => { this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Worker step deferred`, error); });
         this.tasks.add(task); void task.finally(() => this.tasks.delete(task));
       }
-    } catch { console.warn("[VPS] Worker polling deferred; durable orders retained."); }
+    } catch (error) { this.warnings.warn("vps-polling", "[VPS] Worker polling deferred; durable orders retained.", error); }
     finally { this.ticking = false; }
   }
   private async process(order: IVpsOrder): Promise<void> {
@@ -275,9 +277,9 @@ export class VpsWorker {
         // Notification failure cannot alter provisioning, payment or refund state.
         await this.api.sendMessage(order.chatId, `🖥️ VPS ${order._id}\n${order.evidence}\nBuka /vps untuk detail.`).catch(() => console.warn(`[VPS:${order._id}] Notification delivery deferred.`));
       }
-    } catch {
+    } catch (error) {
       await save({ lastError: "step_deferred" }).catch(() => {});
-      console.warn(`[VPS:${order._id}] Step interrupted; persistent stage retained.`);
+      this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Step interrupted; persistent stage retained.`, error);
     } finally {
       clearInterval(heartbeat); clearTimeout(deadline); this.abort.signal.removeEventListener("abort", stop);
       await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + (order.stage === "review" ? 60_000 : 15_000)) } });
