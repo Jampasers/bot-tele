@@ -20,7 +20,7 @@ export async function ownedOrder(actor: string, orderId: string, includeSecret =
   return q.lean();
 }
 export function orderDto(order: IVpsOrder): VpsUiOrder {
-  return { _id: order._id, serviceType: order.service, paymentStatus: order.paymentStatus, paymentMethod: order.paymentMethod, stage: order.stage,
+  return { _id: order._id, serviceType: order.service, sourceMode: order.service === "install" && order.sourceUsername ? "direct" : "digitalocean", paymentStatus: order.paymentStatus, paymentMethod: order.paymentMethod, stage: order.stage,
     price: order.snapshot.price, planName: order.snapshot.planName, sizeSlug: order.snapshot.size, os: order.snapshot.os,
     region: order.snapshot.region, installChrome: order.snapshot.installChrome === true, ip: order.publicIp, dropletId: order.dropletId, needsToken: order.stage === "needs_token",
     evidence: order.evidence, createdAt: order.createdAt, vcpus: order.snapshot.vcpus, memory: order.snapshot.memory, disk: order.snapshot.disk,
@@ -85,7 +85,7 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   const password = generatePassword();
   try {
     const order = await VpsOrder.create({ _id: input.requestId, tenantId: "platform", buyerId: input.actorTelegramId, chatId: input.chatId,
-      service: input.serviceType, accountId, sourceUsername, sourcePasswordEncrypted, createName: `bt-vps-${input.requestId}`,
+      service: input.serviceType, accountId, sourceUsername, sourcePasswordEncrypted, publicIp: input.direct?.ip ?? null, createName: `bt-vps-${input.requestId}`,
       passwordEncrypted: encryptSecret(password, `platform:vps:password:${input.requestId}`),
       snapshot: { planId: plan._id, planName: plan.name, size: plan.sizeSlug, region: input.region, os: input.os, image: selected.os.image,
         price, vcpus: selected.size.vcpus, memory: selected.size.memory, disk: selected.size.disk, installChrome: input.installChrome === true },

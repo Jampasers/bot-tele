@@ -12,6 +12,7 @@ export interface VpsUiPlan {
 export interface VpsUiOrder {
   _id: string;
   serviceType: VpsServiceType;
+  sourceMode?: "digitalocean" | "direct";
   paymentStatus: string;
   paymentMethod?: "balance" | "qris" | null;
   stage: string;

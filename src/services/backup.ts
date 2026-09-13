@@ -63,7 +63,7 @@ export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "vpscredentials", model: VpsCredential, select: "+tokenEncrypted", platformOnly: true, exportOnly: true },
   { name: "vpsaccounts", model: VpsAccount, platformOnly: true, exportOnly: true },
   { name: "vpsplans", model: VpsPlan, platformOnly: true, exportOnly: true },
-  { name: "vpsorders", model: VpsOrder, select: "+passwordEncrypted", platformOnly: true, exportOnly: true },
+  { name: "vpsorders", model: VpsOrder, select: "+passwordEncrypted +sourcePasswordEncrypted", platformOnly: true, exportOnly: true },
   { name: "vpspaymentclaims", model: PaymentSettlementClaim, filter: { tenantId: PLATFORM_TENANT_ID, kind: "vps" }, platformOnly: true, exportOnly: true },
 ] as const;
 

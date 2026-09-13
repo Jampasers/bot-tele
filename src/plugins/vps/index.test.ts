@@ -77,6 +77,49 @@ test("VPS catalog is visible only when enabled on the platform", async t => {
   await runWithTenant(platformContext(), async () => assert.doesNotMatch(JSON.stringify(await buildCatalogKeyboard()), /vps_home/));
 });
 
+test("jasa setup/install keeps both DigitalOcean and direct buyer VPS paths inside one menu", async () => {
+  const { bot, calls } = await harness();
+  await bot.handleUpdate(update(1, "/vps"));
+  assert.match(JSON.stringify(calls), /vps_install/);
+  assert.doesNotMatch(JSON.stringify(calls), /vps_install_direct/);
+
+  await bot.handleUpdate(update(2, "vps_install", true));
+  assert.match(replies(calls), /Pilih sumber VPS/);
+  assert.match(JSON.stringify(calls), /vps_install_do/);
+  assert.match(JSON.stringify(calls), /vps_install_direct/);
+});
+
+test("direct install collects buyer VPS connection and checks out Windows without a DO token", async () => {
+  let checkoutInput: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
+  let acceptedTokens = 0;
+  const { bot, calls } = await harness({
+    acceptBuyerToken: async () => { acceptedTokens++; return { accountId: "unexpected" }; },
+    checkout: async input => { checkoutInput = input; return ORDER; },
+  });
+  await bot.handleUpdate(update(1, "vps_install", true));
+  await bot.handleUpdate(update(2, "vps_install_direct", true));
+  await bot.handleUpdate(update(3, "192.0.2.10"));
+  await bot.handleUpdate(update(4, "ubuntu"));
+  await bot.handleUpdate(update(5, "synthetic-source-password"));
+  await bot.handleUpdate(update(6, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(7, callback(calls, "vps_chrome_"), true));
+
+  assert.equal(acceptedTokens, 0);
+  assert.deepEqual(checkoutInput?.direct, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
+  assert.equal(checkoutInput?.os, "windows2022");
+  assert.doesNotMatch(JSON.stringify(calls), /synthetic-source-password/);
+});
+
+test("direct install order shows Windows access without a DigitalOcean token action", async () => {
+  const directOrder: VpsUiOrder = { ...ORDER, sourceMode: "direct", paymentStatus: "paid", stage: "ready", ip: "192.0.2.10" };
+  const { bot, calls } = await harness({ getOwned: async () => directOrder });
+  await bot.handleUpdate(update(1, `vps_order_${ORDER_ID}`, true));
+  assert.match(JSON.stringify(calls), /vps_access_/);
+  assert.doesNotMatch(JSON.stringify(calls), /vps_token_/);
+  assert.doesNotMatch(vpsOrderText(directOrder), /Biaya DigitalOcean/);
+  assert.match(vpsOrderText(directOrder), /VPS milik buyer/);
+});
+
 test("buyer token is deleted before validation and cannot reach generic text handlers", async () => {
   let accepted = 0;
   let staleHandlerCalls = 0;
@@ -86,7 +129,8 @@ test("buyer token is deleted before validation and cannot reach generic text han
     return { accountId: "team-test" };
   } }, { staleHandler: () => { staleHandlerCalls++; } });
   await bot.handleUpdate(update(1, "vps_install", true));
-  await bot.handleUpdate(update(2, "synthetic-buyer-secret"));
+  await bot.handleUpdate(update(2, "vps_install_do", true));
+  await bot.handleUpdate(update(3, "synthetic-buyer-secret"));
   assert.equal(accepted, 1); assert.equal(staleHandlerCalls, 0);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-buyer-secret/);
   assert.match(replies(calls), /biaya jasa.*Biaya DigitalOcean/s);
@@ -94,9 +138,10 @@ test("buyer token is deleted before validation and cannot reach generic text han
 
 test("failed token deletion clears pending input without validation", async () => {
   let accepted = 0;
-  const { bot, calls } = await harness({ acceptBuyerToken: async () => { accepted++; return { accountId: "team" }; } }, { failDelete: 2 });
+  const { bot, calls } = await harness({ acceptBuyerToken: async () => { accepted++; return { accountId: "team" }; } }, { failDelete: 3 });
   await bot.handleUpdate(update(1, "vps_install", true));
-  await bot.handleUpdate(update(2, "synthetic-private-token"));
+  await bot.handleUpdate(update(2, "vps_install_do", true));
+  await bot.handleUpdate(update(3, "synthetic-private-token"));
   assert.equal(accepted, 0);
   assert.match(replies(calls), /token tidak diproses/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-private-token/);
@@ -143,15 +188,16 @@ test("selection snapshots configured price and duplicate checkout uses the same 
     return ORDER;
   } });
   await bot.handleUpdate(update(1, "vps_install", true));
-  await bot.handleUpdate(update(2, "synthetic-private-token"));
-  await bot.handleUpdate(update(3, callback(calls, "vps_plan_"), true));
-  await bot.handleUpdate(update(4, callback(calls, "vps_region_"), true));
+  await bot.handleUpdate(update(2, "vps_install_do", true));
+  await bot.handleUpdate(update(3, "synthetic-private-token"));
+  await bot.handleUpdate(update(4, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(5, callback(calls, "vps_region_"), true));
   assert.match(JSON.stringify(calls), /43\.210/);
   const os = callback(calls, "vps_os_");
-  await bot.handleUpdate(update(5, os, true));
+  await bot.handleUpdate(update(6, os, true));
   const chrome = callback(calls, "vps_chrome_");
-  const one = bot.handleUpdate(update(6, chrome, true));
-  const two = bot.handleUpdate(update(7, chrome, true));
+  const one = bot.handleUpdate(update(7, chrome, true));
+  const two = bot.handleUpdate(update(8, chrome, true));
   await new Promise(resolve => setImmediate(resolve));
   release!();
   await Promise.all([one, two]);

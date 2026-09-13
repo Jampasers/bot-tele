@@ -25,11 +25,7 @@ const baseHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
   .text("🛒 Beli VPS", "vps_buy").text("🛠 Jasa setup/install", "vps_install").row()
   .text("🖥️ VPS Saya", "vps_my_0").text("📋 Riwayat pesanan", "vps_history_0").row()
   .text("🔙 Catalog", "menu_catalog");
-const homeKeyboard = (): InlineKeyboard => baseHomeKeyboard().row().text("Install Windows VPS sendiri", "vps_install_direct");
-const directHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
-  .text("VPS DigitalOcean", "vps_buy").text("Jasa install DO", "vps_install").row()
-  .text("Install Windows VPS sendiri", "vps_install_direct").row()
-  .text("VPS Saya", "vps_my_0").text("Riwayat pesanan", "vps_history_0").row().text("Catalog", "menu_catalog");
+const homeKeyboard = (): InlineKeyboard => baseHomeKeyboard();
 const serviceLabel = (service: VpsServiceType): string => service === "install" ? "Jasa setup/install" : "Beli VPS";
 const feeNotice = "Pembayaran ke toko hanya biaya jasa setup/install. Biaya DigitalOcean ditagihkan ke akun buyer dan menjadi tanggungan buyer.";
 
@@ -47,7 +43,9 @@ export function vpsOrderText(order: VpsUiOrder): string {
     + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "")
     + (order.installChrome ? "\nChrome: + Chrome (gratis)" : "")
     + (order.needsToken || order.stage === "needs_token" ? "\n\nToken sementara tidak tersedia. Kirim ulang token akun/team yang sama untuk melanjutkan order ini." : "")
-    + (order.serviceType === "install" ? `\n\n${feeNotice}` : "");
+    + (order.serviceType === "install" ? order.sourceMode === "direct"
+      ? "\n\nSumber VPS: VPS milik buyer. Pembayaran hanya untuk jasa instalasi Windows."
+      : `\n\n${feeNotice}` : "");
 }
 
 export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
@@ -57,6 +55,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
 
   function dropDraft(actor: string): void {
     const draft = drafts.get(actor);
+    if (draft?.direct) draft.direct.password = "";
     if (draft && !draft.order && !draft.checkout) deps.clearBuyerToken(actor, draft.id);
     drafts.delete(actor);
   }
@@ -82,7 +81,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   async function showHome(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
-    await vpsReply(ctx, `🖥️ VPS DigitalOcean\n\nBeli VPS memakai akun toko atau gunakan jasa setup/install pada akun DigitalOcean milikmu.\n\n${feeNotice}${deps.enabled() ? "" : "\n\nPemesanan baru sementara dinonaktifkan."}`, homeKeyboard());
+    await vpsReply(ctx, `🖥️ VPS & Jasa Install\n\nBeli VPS memakai akun toko atau gunakan jasa setup/install. Jasa install dapat membuat VPS dari akun DigitalOcean buyer atau memasang Windows langsung di VPS milik buyer.\n\n${deps.enabled() ? "" : "Pemesanan baru sementara dinonaktifkan."}`, homeKeyboard());
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
     const keyboard = new InlineKeyboard();
@@ -91,7 +90,18 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
     keyboard.text("🔙 VPS", "vps_home");
-    await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? "(Langkah 1/3) Pilih paket spek VPS:" : "Belum ada paket aktif. Hubungi admin."}${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+    const notice = draft.direct
+      ? "Pembayaran ke toko hanya biaya instalasi Windows. VPS disediakan oleh buyer."
+      : draft.serviceType === "install" ? feeNotice : "";
+    await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? "(Langkah 1/3) Pilih paket spek VPS:" : "Belum ada paket aktif. Hubungi admin."}${notice ? `\n\n${notice}` : ""}`, keyboard);
+  }
+  async function showInstallSources(ctx: Context): Promise<void> {
+    clearVpsInput(actorOf(ctx));
+    dropDraft(actorOf(ctx));
+    await vpsReply(ctx, "🛠 Jasa setup/install\n\nPilih sumber VPS yang akan diproses:", new InlineKeyboard()
+      .text("Buat dari DigitalOcean", "vps_install_do").row()
+      .text("Install Windows di VPS buyer", "vps_install_direct").row()
+      .text("Kembali", "vps_home"));
   }
   async function start(ctx: Context, serviceType: VpsServiceType, direct = false): Promise<void> {
     if (!deps.enabled()) { await ctx.reply("Pemesanan VPS belum diaktifkan oleh admin.", { reply_markup: homeKeyboard() }); return; }
@@ -99,7 +109,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     clearVpsInput(actor);
     dropDraft(actor);
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
-    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: await deps.listPlans(serviceType) };
+    const listedPlans = await deps.listPlans(serviceType);
+    const plans = direct ? listedPlans.filter(plan => plan.osPrices.some(os => getOs(os.os)?.family === "windows")) : listedPlans;
+    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans };
     drafts.set(actor, draft);
     if (serviceType === "purchase") { await choosePlan(ctx, draft); return; }
     if (direct) {
@@ -143,8 +155,8 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       if (order.paymentStatus === "paying") keyboard.text("🔎 Cek pembayaran", `vps_check_${order._id}`).row();
     }
     if (order.paymentStatus === "unpaid" || (order.paymentStatus === "paid" && !order.dropletId && ["queued", "needs_token", "failed"].includes(order.stage))) keyboard.text("Batalkan pesanan", `vps_cancel_${order._id}`).row();
-    if (order.serviceType === "install" && !["ready", "failed", "cancelled"].includes(order.stage)) keyboard.text("🔑 Kirim ulang token", `vps_token_${order._id}`).row();
-    if (order.ip && order.dropletId) keyboard.text("🔐 Lihat akses VPS", `vps_access_${order._id}`).row();
+    if (order.serviceType === "install" && order.sourceMode !== "direct" && !["ready", "failed", "cancelled"].includes(order.stage)) keyboard.text("🔑 Kirim ulang token", `vps_token_${order._id}`).row();
+    if (order.paymentStatus === "paid" && order.ip && (order.dropletId || order.sourceMode === "direct")) keyboard.text("🔐 Lihat akses VPS", `vps_access_${order._id}`).row();
     const installerLogUrl = validInstallerLogUrl(order);
     if (installerLogUrl) keyboard.url("📄 Log installer", installerLogUrl).row();
     if (order.serviceType === "purchase" && order.dropletId && order.paymentStatus === "paid" && ["ready", "review"].includes(order.stage)) keyboard.text("🔄 Reboot/Restart", `vps_reboot_${order._id}`).row();
@@ -155,9 +167,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
     const actor = actorOf(ctx);
     if (!draft.order) {
-      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: draft.direct } : {}) });
+      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: { ...draft.direct } } : {}) });
       try { draft.order = await draft.checkout; }
-      finally { delete draft.checkout; }
+      finally { delete draft.checkout; if (draft.direct) draft.direct.password = ""; }
     }
     await showOrder(ctx, draft.order._id);
   }
@@ -172,7 +184,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const actor = actorOf(ctx);
         clearVpsInput(actor);
         if (data === "vps_home") { await showHome(ctx); return; }
-        if (data === "vps_buy" || data === "vps_install") { await start(ctx, data === "vps_buy" ? "purchase" : "install"); return; }
+        if (data === "vps_buy") { await start(ctx, "purchase"); return; }
+        if (data === "vps_install") { await showInstallSources(ctx); return; }
+        if (data === "vps_install_do") { await start(ctx, "install"); return; }
         if (data === "vps_install_direct") { await start(ctx, "install", true); return; }
         const page = /^vps_page_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
         if (page) { await choosePlan(ctx, currentDraft(actor, page[1]!), Number(page[2])); return; }

@@ -38,6 +38,35 @@ test("reboot recovery keeps durable intent until scheduling is actually attempte
     assert.equal(order.stage, "monitoring"); assert.equal(writes[0]?.stage, "monitoring");
 });
 
+test("direct buyer VPS skips DigitalOcean creation and installs Windows with supplied SSH access", async () => {
+    const order = orderFixture({ stage: "queued", accountId: null, dropletId: null, createAttemptedAt: null,
+        sourceUsername: "ubuntu", sourcePasswordEncrypted: "encrypted-source", publicIp: "192.0.2.10" });
+    let providerCalls = 0; let sshChecks = 0; let installs = 0;
+    const deps = dependencies({
+        client: async () => { providerCalls++; throw new Error("DigitalOcean must not be used"); },
+        sourceUsername: () => "ubuntu", sourcePassword: () => "synthetic-source-password",
+        testSsh: async input => {
+            sshChecks++;
+            assert.deepEqual(input, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
+            return true;
+        },
+        launchWindows: async input => {
+            installs++;
+            assert.equal(input.ip, "192.0.2.10"); assert.equal(input.username, "ubuntu");
+            assert.equal(input.password, "synthetic-source-password"); assert.equal(input.windowsPassword, "MockPassword123!xyz");
+            return { state: "prepared" };
+        },
+    });
+
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ssh");
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "installing");
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "rebooting");
+    assert.equal(providerCalls, 0); assert.equal(sshChecks, 1); assert.equal(installs, 1);
+});
+
 test("crash after guarded scheduling retains rebooting; recovery observes marker without another reboot", async () => {
     const order = orderFixture(); let remoteScheduled = false; let actualReboots = 0; let schedules = 0;
     const guardedSchedule: VpsStepDependencies["scheduleInstallerReboot"] = async () => {

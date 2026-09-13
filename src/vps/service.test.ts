@@ -93,6 +93,30 @@ test("checkout stores immutable price/spec snapshot and encrypted per-VPS passwo
   });
 });
 
+test("direct Windows checkout stores buyer VPS access encrypted and never calls DigitalOcean", async t => {
+  env(t);
+  let saved: IVpsOrder | null = null;
+  const id = randomUUID();
+  const plan = { _id: randomUUID(), name: "Install Windows", serviceType: "install", enabled: true, sizeSlug: "external-vps", regions: ["external"], osPrices: [{ os: "windows2022", label: "Windows", price: 15000 }] };
+  t.mock.method(VpsOrder, "findOne", () => query(() => saved));
+  t.mock.method(VpsPlan, "findOne", () => query(() => plan));
+  t.mock.method(VpsOrder, "create", async (input: Record<string, unknown>) => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
+  let providerCalls = 0;
+  t.mock.method(DigitalOceanClient.prototype, "account", async () => { providerCalls++; throw new Error("DO must not be called"); });
+  t.mock.method(DigitalOceanClient.prototype, "validateSelection", async () => { providerCalls++; throw new Error("DO must not be called"); });
+
+  await platform(async () => {
+    const result = await vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: id, serviceType: "install", planId: plan._id,
+      os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" } });
+    assert.equal(providerCalls, 0);
+    assert.equal(result.sourceMode, "direct");
+    assert.equal(result.ip, "192.0.2.10");
+    assert.equal(saved?.sourceUsername, "ubuntu");
+    assert.equal(decryptSecret(saved!.sourcePasswordEncrypted!, `platform:vps:source-password:${id}`), "synthetic-source-password");
+    assert.doesNotMatch(JSON.stringify(result), /synthetic-source-password/);
+  });
+});
+
 test("reboot derives ownership from server scope and queues only one action", async t => {
   env(t);
   const order = fixture({ stage: "ready", paymentStatus: "paid", dropletId: 123, accountId: "team:shop", credentialId: randomUUID() });
@@ -125,7 +149,7 @@ test("VPS schemas expose no buyer token persistence field; backup exports encryp
   assert.throws(() => new VpsOrder({ ...order, buyerToken: "never-persist-this" }), /strict/);
   assert.equal(VpsOrder.schema.path("passwordEncrypted").options.select, false);
   assert.equal(VpsOrder.schema.path("snapshot").options.immutable, true);
-  assert.equal(BACKUP_COLLECTIONS.find(c => c.name === "vpsorders")?.select, "+passwordEncrypted");
+  assert.equal(BACKUP_COLLECTIONS.find(c => c.name === "vpsorders")?.select, "+passwordEncrypted +sourcePasswordEncrypted");
   assert.ok(BACKUP_COLLECTIONS.find(c => c.name === "users")?.select?.includes("appliedVpsPaymentEffectIds"));
   await platform(() => assert.rejects(executeRollback([{ name: "vpsorders", count: 1, docs: [order] }]), /offline/));
 });
