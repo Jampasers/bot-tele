@@ -144,6 +144,9 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.ok(calls[0]?.stdin?.includes("patch_trans.py")); assert.ok(calls[0]?.stdin?.includes("DisableCAD")); assert.ok(calls[0]?.stdin?.includes("UserAuthentication"));
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
+    assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bats="\$bats windows-fix-rdp\.bat"'''/);
+    assert.match(calls[0]?.stdin ?? "", /chrome_bat_code = r'''[\s\S]*?bats="\$bats windows-install-chrome\.bat"'''/,
+        "generated patch_trans.py must use a delimiter that cannot be escaped by the batch closing quote");
     assert.ok(!calls[1]?.stdin?.includes("windows-install-chrome.bat"));
     assert.equal(results[0]?.logUrl, "http://203.0.113.10/aB1cD2eF"); assert.equal(results[1]?.logUrl, "http://203.0.113.11/aB1cD2eF");
     assert.ok(!JSON.stringify(results).includes(fakePassword)); assert.ok(!JSON.stringify(results).includes("ExampleWindows"));

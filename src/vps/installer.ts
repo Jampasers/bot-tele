@@ -146,7 +146,7 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     if (os?.family !== "windows" || !os.windowsImageName) throw new InstallerError("validation");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
-chrome_bat_code = """    cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
+chrome_bat_code = r'''    cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
 setlocal
 set "msi=%TEMP%\\google-chrome-enterprise.msi"
@@ -159,7 +159,7 @@ if "%code%"=="3010" exit /b 0
 exit /b %code%
 EOF_CHROME_INSTALL
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
-    bats="$bats windows-install-chrome.bat\\"""
+    bats="$bats windows-install-chrome.bat"'''
 ` : "";
     // mkdir is the durable remote claim. An uncertain attempt is inspected, never executed a second time.
     // Caller must persist INSTALLING before calling and must never return here after scheduling reboot.
@@ -196,7 +196,7 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 
 new_lines = []
 bats_found = False
-fix_bat_code = """    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
+fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
@@ -222,7 +222,7 @@ net start TermService
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
-    bats="$bats windows-fix-rdp.bat\\""""
+    bats="$bats windows-fix-rdp.bat"'''
 
 ${chromeBatPatch}
 
