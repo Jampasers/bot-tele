@@ -1,5 +1,10 @@
 import { randomInt } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createConnection, isIP } from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import jpeg from "jpeg-js";
+import { PNG } from "pngjs";
 import { Client } from "ssh2";
 
 export interface VpsOs { key: string; name: string; family: "linux" | "windows"; image: string; windowsImageName?: string; }
@@ -47,6 +52,45 @@ export function generatePassword(): string {
 function validatePassword(password: string): void {
     if (password.length < 16 || password.length > 128 || /[\r\n\0]/.test(password) || !/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) throw new InstallerError("validation");
 }
+const jpegLib = ((jpeg as unknown as { default?: typeof jpeg }).default || jpeg);
+let cachedWallpaperBase64: string | null = null;
+let cachedWallpaperMtime = 0;
+
+export function getWallpaperJpegBase64(customPath?: string): string | null {
+    try {
+        const candidates = customPath
+            ? [customPath]
+            : [
+                fileURLToPath(new URL("../../Wallpaper.png", import.meta.url)),
+                path.resolve(process.cwd(), "Wallpaper.png"),
+            ];
+        let filePath: string | null = null;
+        for (const c of candidates) {
+            if (existsSync(c)) {
+                filePath = c;
+                break;
+            }
+        }
+        if (!filePath) return null;
+        const stat = statSync(filePath);
+        if (cachedWallpaperBase64 && stat.mtimeMs === cachedWallpaperMtime && !customPath) {
+            return cachedWallpaperBase64;
+        }
+        const pngBuffer = readFileSync(filePath);
+        const png = PNG.sync.read(pngBuffer);
+        const encoded = jpegLib.encode({ data: png.data, width: png.width, height: png.height }, 95);
+        const b64 = encoded.data.toString("base64");
+        if (!customPath) {
+            cachedWallpaperBase64 = b64;
+            cachedWallpaperMtime = stat.mtimeMs;
+        }
+        return b64;
+    } catch (error) {
+        console.error("[VPS:Installer] Failed to load/encode Wallpaper.png:", error);
+        return null;
+    }
+}
+
 function quote(value: string): string { return `'${value.replace(/'/g, "'\\''")}'`; }
 function validIp(ip: string): void { if (!isIP(ip)) throw new InstallerError("validation"); }
 function stateDirectory(orderId: string): string {
@@ -144,7 +188,7 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; }
+export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; wallpaperPath?: string; }
 export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
@@ -255,6 +299,13 @@ EOF_CHROME_INSTALL
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
     bats="$bats windows-install-chrome.bat"'''
 ` : "";
+    const wallpaperB64 = getWallpaperJpegBase64(input.wallpaperPath);
+    const wallpaperScript = wallpaperB64 ? `
+cat << 'EOF_WALLPAPER_B64' | base64 -d > /root/wallpaper.jpg
+${wallpaperB64}
+EOF_WALLPAPER_B64
+chmod 644 /root/wallpaper.jpg
+` : "";
     // mkdir is the durable remote claim. An uncertain attempt is inspected, never executed a second time.
     // Caller must persist INSTALLING before calling and must never return here after scheduling reboot.
     const script = `set -eu
@@ -281,16 +332,32 @@ sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh
 sed -i "/^confhome_cn=/s|/main$|/$COMMIT|" /root/reinstall.sh
 sed -i 's/command curl --insecure /command curl /' /root/reinstall.sh
 chmod 700 /root/reinstall.sh
+${wallpaperScript}
 cat << 'EOF_PATCH_PY' > /root/patch_trans.py
+import os
+import shutil
 import sys
 
 trans_path = sys.argv[1]
+initrd_dir = os.path.dirname(trans_path)
+if os.path.exists('/root/wallpaper.jpg'):
+    shutil.copyfile('/root/wallpaper.jpg', os.path.join(initrd_dir, 'wallpaper.jpg'))
+
 with open(trans_path, 'r', encoding='utf-8') as f:
     lines = f.read().splitlines()
 
 new_lines = []
 bats_found = False
 gpo_found = False
+wallpaper_copy_code = r'''    if [ -f /wallpaper.jpg ]; then
+        win_dir="$os_dir/Windows"
+        [ -d "$win_dir" ] || win_dir="$os_dir/windows"
+        if [ -d "$win_dir" ]; then
+            mkdir -p "$win_dir/Web/Wallpaper/Windows"
+            cp -f /wallpaper.jpg "$win_dir/Web/Wallpaper/Windows/img0.jpg" 2>/dev/null || true
+            cp -f /wallpaper.jpg "$win_dir/wallpaper.jpg" 2>/dev/null || true
+        fi
+    fi'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
@@ -386,6 +453,36 @@ sc config XblGameSave start= disabled >nul 2>&1
 sc config XboxNetApiSvc start= disabled >nul 2>&1
 sc config XboxGipSvc start= disabled >nul 2>&1
 
+rem ========================================================
+rem 9. PASANG WALLPAPER KUSTOM (DANKA STORE)
+rem ========================================================
+if exist "%SystemRoot%\\wallpaper.jpg" (
+    copy /y "%SystemRoot%\\wallpaper.jpg" "%SystemDrive%\\Wallpaper.jpg" >nul 2>&1
+    takeown /f "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" /a >nul 2>&1
+    icacls "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" /grant Administrators:F >nul 2>&1
+    copy /y "%SystemRoot%\\wallpaper.jpg" "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" >nul 2>&1
+    del /f /q "%SystemRoot%\\Web\\4K\\Wallpaper\\Windows\\*.*" >nul 2>&1
+
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v DesktopImagePath /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v DesktopImageUrl /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v LockScreenImagePath /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v LockScreenImageUrl /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+
+    reg load HKU\\DefaultUser "%SystemDrive%\\Users\\Default\\NTUSER.DAT" >nul 2>&1
+    if not errorlevel 1 (
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v Wallpaper /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v WallpaperStyle /t REG_SZ /d "10" /f >nul 2>&1
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v TileWallpaper /t REG_SZ /d "0" /f >nul 2>&1
+        reg unload HKU\\DefaultUser >nul 2>&1
+    )
+
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v Wallpaper /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v WallpaperStyle /t REG_SZ /d "10" /f >nul 2>&1
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v TileWallpaper /t REG_SZ /d "0" /f >nul 2>&1
+
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce" /v SetDankaWallpaper /t REG_SZ /d "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \\\"Add-Type 'using System.Runtime.InteropServices;public class W{[DllImport(\\\\\\\"user32.dll\\\\\\\")]public static extern int SystemParametersInfo(int a,int b,string c,int d);}';[W]::SystemParametersInfo(0x0014,0,'%SystemRoot%\\\\wallpaper.jpg',3)\\\"" /f >nul 2>&1
+)
+
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
@@ -400,6 +497,7 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
+        new_lines.append(wallpaper_copy_code)
         new_lines.append(fix_bat_code)
 
 with open(trans_path, 'w', encoding='utf-8') as f:

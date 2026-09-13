@@ -5,6 +5,8 @@ import { PaymentSettlementClaim } from "../models/PaymentLedger.js";
 import { getTenantContext, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { generatePlatformQris, getPlatformPaymentClients } from "../payments/platformPayment.service.js";
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
+import { ActivityLogService } from "../services/activityLog.js";
+import { TestimonialService } from "../services/testimonial.js";
 
 export type VpsBalanceResult =
   | { status: "paid"; orderId: string; remainingBalance: number }
@@ -49,10 +51,71 @@ async function claimMethod(order: IVpsOrder, method: "balance" | "qris"): Promis
 }
 
 async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: string): Promise<void> {
-  await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "paying", paymentMethod: order.paymentMethod }, { $set: {
+  const result = await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "paying", paymentMethod: order.paymentMethod }, { $set: {
     paymentStatus: "paid", paymentPaidAt: paidAt, nextRunAt: new Date(),
     ...(transactionId === undefined ? {} : { "paymentInvoice.matchedTransactionId": transactionId, "paymentInvoice.paidAt": paidAt }),
   } });
+  if (result.modifiedCount > 0) {
+    if (order.paymentMethod === "qris") {
+      try {
+        await User.updateOne({ telegramId: order.buyerId, tenantId: PLATFORM_TENANT_ID }, { $inc: { totalOrders: 1 } });
+      } catch {}
+    }
+    void (async () => {
+      try {
+        const buyer = await User.findOne({ telegramId: order.buyerId, tenantId: PLATFORM_TENANT_ID })
+          .select("telegramId firstName username balance")
+          .lean();
+        const totalPrice = order.paymentMethod === "qris" ? (order.paymentInvoice?.amount ?? order.snapshot.price) : order.snapshot.price;
+        const buyerInfo = {
+          telegramId: order.buyerId,
+          firstName: buyer?.firstName,
+          username: buyer?.username,
+        };
+
+        // 1. Audit & Order Log to LOG_CHANNEL
+        await ActivityLogService.logVpsOrder(undefined, {
+          orderId: order._id,
+          service: order.service,
+          planName: order.snapshot.planName,
+          sizeSlug: order.snapshot.size,
+          region: order.snapshot.region,
+          os: order.snapshot.os,
+          vcpus: order.snapshot.vcpus,
+          memory: order.snapshot.memory,
+          disk: order.snapshot.disk,
+          installChrome: order.snapshot.installChrome,
+          sourceMode: order.service === "install" && order.sourceUsername ? "direct" : "digitalocean",
+          publicIp: order.publicIp ?? undefined,
+          totalPrice,
+          method: order.paymentMethod === "qris" ? "QRIS" : "SALDO",
+          buyer: buyerInfo,
+          remainingBalance: buyer?.balance,
+          date: paidAt,
+        });
+
+        // 2. Transaction Proof to TESTIMONIAL_CHANNEL
+        const tgApi = ActivityLogService.getDefaultApi();
+        if (tgApi) {
+          await TestimonialService.sendVpsPurchaseTestimonial(tgApi, {
+            orderId: order._id,
+            service: order.service,
+            planName: order.snapshot.planName,
+            os: order.snapshot.os,
+            region: order.snapshot.region,
+            totalPrice,
+            method: order.paymentMethod === "qris" ? "QRIS" : "Saldo Akun",
+            buyer: buyerInfo,
+            date: paidAt,
+          });
+        }
+      } catch (logErr) {
+        if (process.env.NODE_ENV !== "test") {
+          console.warn(`[VPS:${order._id}] Failed to dispatch audit or testimonial log:`, logErr);
+        }
+      }
+    })();
+  }
 }
 
 /** The receipt and balance mutation share ONE MongoDB document update. The
@@ -204,7 +267,33 @@ export async function refundVpsOrder(orderId: string, reason: VpsRefundReason): 
   }
   const effect = await applyWalletEffect(order, "refund", amount);
   if (!effect) throw new Error("Refund VPS menunggu pemulihan wallet; pesanan tetap tercatat.");
-  await VpsOrder.updateOne({ ...scope(orderId, order.buyerId), paymentStatus: "refunding" }, { $set: { paymentStatus: "refunded", refundedAt: new Date() } });
+  const updated = await VpsOrder.updateOne({ ...scope(orderId, order.buyerId), paymentStatus: "refunding" }, { $set: { paymentStatus: "refunded", refundedAt: new Date() } });
+  if (updated.modifiedCount > 0) {
+    void (async () => {
+      try {
+        const buyer = await User.findOne({ telegramId: order.buyerId, tenantId: PLATFORM_TENANT_ID })
+          .select("telegramId firstName username")
+          .lean();
+        await ActivityLogService.logVpsCancelled(undefined, {
+          orderId: order._id,
+          service: order.service,
+          planName: order.snapshot?.planName,
+          reason,
+          refundAmount: amount,
+          buyer: {
+            telegramId: order.buyerId,
+            firstName: buyer?.firstName,
+            username: buyer?.username,
+          },
+          date: new Date(),
+        });
+      } catch (refundLogErr) {
+        if (process.env.NODE_ENV !== "test") {
+          console.warn(`[VPS:${orderId}] Failed to dispatch refund audit log:`, refundLogErr);
+        }
+      }
+    })();
+  }
   return { orderId, status: "refunded" };
 }
 

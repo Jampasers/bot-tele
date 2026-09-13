@@ -4,6 +4,7 @@ import { DigitalOrder } from "../models/DigitalOrder.js";
 import { DigitalProduct } from "../models/DigitalProduct.js";
 import { DigitalStock } from "../models/DigitalStock.js";
 import { TopupSession } from "../models/TopupSession.js";
+import { VpsOrder } from "../models/VpsOrder.js";
 
 // ============================================================================
 //  Types & Interfaces for Statistics
@@ -32,6 +33,12 @@ export interface OverviewStats {
   smsCompletedOrders: number;
   smsTodayRevenue: number;
   smsTodayCompletedCount: number;
+
+  // VPS & Jasa Install
+  vpsTotalRevenue: number;
+  vpsTotalOrders: number;
+  vpsTodayRevenue: number;
+  vpsTodayOrders: number;
 
   // Catalog
   totalDigitalProducts: number;
@@ -132,6 +139,8 @@ export interface RevenueStats {
   digitalOrders: number;
   smsRevenue: number;
   smsOrders: number;
+  vpsRevenue: number;
+  vpsOrders: number;
   totalRevenue: number;
   totalOrders: number;
 }
@@ -163,7 +172,7 @@ export function getStartOfMonth(): Date {
 }
 
 export function getRevenuePeriodRange(
-  period: Exclude<RevenuePeriod, "date"> | "date",
+  period: Exclude<RevenuePeriod, "date"> | "date" = "today",
   dateInput?: string,
   now = new Date()
 ): RevenuePeriodRange {
@@ -220,7 +229,7 @@ export function getRevenuePeriodRange(
 // ============================================================================
 
 export class BotStatsService {
-  /** Revenue from completed digital and SMS orders for one selected period. */
+  /** Revenue from completed digital, SMS, and VPS orders for one selected period. */
   static async getRevenueStats(
     period: Exclude<RevenuePeriod, "date"> | "date" = "today",
     dateInput?: string,
@@ -229,7 +238,7 @@ export class BotStatsService {
     const range = getRevenuePeriodRange(period, dateInput, now);
     const createdAt = { $gte: range.start, $lt: range.end };
 
-    const [digital, sms] = await Promise.all([
+    const [digital, sms, vps] = await Promise.all([
       DigitalOrder.aggregate<{ revenue: number; orders: number }>([
         { $match: { createdAt } },
         {
@@ -250,12 +259,24 @@ export class BotStatsService {
           },
         },
       ]),
+      VpsOrder.aggregate<{ revenue: number; orders: number }>([
+        { $match: { tenantId: "platform", paymentStatus: "paid", createdAt } },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: "$snapshot.price" },
+            orders: { $sum: 1 },
+          },
+        },
+      ]),
     ]);
 
     const digitalRevenue = digital[0]?.revenue ?? 0;
     const digitalOrders = digital[0]?.orders ?? 0;
     const smsRevenue = sms[0]?.revenue ?? 0;
     const smsOrders = sms[0]?.orders ?? 0;
+    const vpsRevenue = vps[0]?.revenue ?? 0;
+    const vpsOrders = vps[0]?.orders ?? 0;
 
     return {
       period: range,
@@ -263,8 +284,10 @@ export class BotStatsService {
       digitalOrders,
       smsRevenue,
       smsOrders,
-      totalRevenue: digitalRevenue + smsRevenue,
-      totalOrders: digitalOrders + smsOrders,
+      vpsRevenue,
+      vpsOrders,
+      totalRevenue: digitalRevenue + smsRevenue + vpsRevenue,
+      totalOrders: digitalOrders + smsOrders + vpsOrders,
     };
   }
 
@@ -366,6 +389,34 @@ export class BotStatsService {
     const smsTodayRevenue = smsTodayRes[0]?.totalCost ?? 0;
     const smsTodayCompletedCount = smsTodayRes[0]?.count ?? 0;
 
+    // 5. VPS & Jasa Install
+    const [vpsAllRes, vpsTodayRes] = await Promise.all([
+      VpsOrder.aggregate<{ totalRev: number; count: number }>([
+        { $match: { tenantId: "platform", paymentStatus: "paid" } },
+        {
+          $group: {
+            _id: null,
+            totalRev: { $sum: "$snapshot.price" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+      VpsOrder.aggregate<{ totalRev: number; count: number }>([
+        { $match: { tenantId: "platform", paymentStatus: "paid", createdAt: { $gte: startOfDay } } },
+        {
+          $group: {
+            _id: null,
+            totalRev: { $sum: "$snapshot.price" },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+    const vpsTotalRevenue = vpsAllRes[0]?.totalRev ?? 0;
+    const vpsTotalOrders = vpsAllRes[0]?.count ?? 0;
+    const vpsTodayRevenue = vpsTodayRes[0]?.totalRev ?? 0;
+    const vpsTodayOrders = vpsTodayRes[0]?.count ?? 0;
+
     return {
       totalUsers,
       newUsersToday,
@@ -383,6 +434,10 @@ export class BotStatsService {
       smsCompletedOrders,
       smsTodayRevenue,
       smsTodayCompletedCount,
+      vpsTotalRevenue,
+      vpsTotalOrders,
+      vpsTodayRevenue,
+      vpsTodayOrders,
       totalDigitalProducts,
       totalStockAvailable,
     };

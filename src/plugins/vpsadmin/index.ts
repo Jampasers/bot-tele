@@ -3,6 +3,7 @@ import type { Plugin } from "../../types/Plugin.js";
 import { isAdmin } from "../../core/admin.js";
 import { vpsService } from "../../vps/service.js";
 import { planPrice } from "../../vps/catalogPlans.js";
+import { VpsOrder } from "../../models/VpsOrder.js";
 import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "../vps/contracts.js";
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
@@ -11,6 +12,7 @@ const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
   .text("💰 Harga per spek / region / OS", "vpa_plans_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
+  .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
   .text("🔙 Admin", "adm_home");
 const known = (value: string | number | null | undefined): string => value === null || value === undefined || value === "" ? "belum diketahui" : String(value).slice(0, 400);
 export function vpsCredentialText(credential: VpsUiCredential): string {
@@ -131,6 +133,115 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     await prompt(ctx, 0);
   }
 
+  type VpsOrderFilter = "all" | "paid" | "ready" | "review" | "unpaid";
+
+  async function ordersList(ctx: Context, filter: VpsOrderFilter, offset: number): Promise<void> {
+    const query: Record<string, any> = { tenantId: "platform" };
+    if (filter === "paid") {
+      query.paymentStatus = "paid";
+      query.stage = { $ne: "ready" };
+    } else if (filter === "ready") {
+      query.stage = "ready";
+    } else if (filter === "review") {
+      query.$or = [{ stage: { $in: ["review", "failed", "needs_token"] } }, { paymentStatus: { $in: ["refunded", "cancelled"] } }];
+    } else if (filter === "unpaid") {
+      query.paymentStatus = { $in: ["unpaid", "paying"] };
+    }
+
+    const limit = 8;
+    const total = await VpsOrder.countDocuments(query);
+    const orders = await VpsOrder.find(query)
+      .sort({ createdAt: -1 })
+      .skip(offset)
+      .limit(limit)
+      .lean();
+
+    const keyboard = new InlineKeyboard()
+      .text(filter === "all" ? "• Semua •" : "Semua", "vpa_orders_all_0")
+      .text(filter === "paid" ? "• Proses •" : "Proses", "vpa_orders_paid_0")
+      .text(filter === "ready" ? "• Ready •" : "Ready", "vpa_orders_ready_0")
+      .row()
+      .text(filter === "review" ? "• Masalah •" : "Masalah", "vpa_orders_review_0")
+      .text(filter === "unpaid" ? "• Belum Bayar •" : "Belum Bayar", "vpa_orders_unpaid_0")
+      .row();
+
+    orders.forEach((o) => {
+      const icon = o.service === "install" ? "🛠️" : "🖥️";
+      const statusIcon = o.stage === "ready" ? "✅" : o.paymentStatus === "paid" ? "⏳" : o.paymentStatus === "unpaid" ? "⚪" : "❌";
+      const label = `${icon} ${o.snapshot?.planName || o._id.slice(0, 8)} · ${statusIcon} ${o.stage}`;
+      keyboard.text(label, `vpa_orderdetail_${o._id}`).row();
+    });
+
+    if (offset > 0) {
+      keyboard.text("← Sebelumnya", `vpa_orders_${filter}_${Math.max(0, offset - limit)}`);
+    }
+    if (offset + limit < total) {
+      keyboard.text("Berikutnya →", `vpa_orders_${filter}_${offset + limit}`);
+    }
+    keyboard.row().text("🔙 Admin VPS", "vpa_home");
+
+    const filterNames: Record<VpsOrderFilter, string> = {
+      all: "Semua Pesanan",
+      paid: "Lunas / Dalam Proses",
+      ready: "Selesai (Ready)",
+      review: "Perlu Review / Masalah / Refund",
+      unpaid: "Belum Bayar",
+    };
+
+    const text =
+      `📋 Log Pesanan VPS & Jasa Install\n` +
+      `Filter: ${filterNames[filter]} (Total: ${total})\n\n` +
+      (orders.length > 0
+        ? "Pilih salah satu pesanan untuk melihat detail:"
+        : "Belum ada pesanan pada kategori filter ini.");
+
+    await vpsReply(ctx, text, keyboard);
+  }
+
+  async function orderDetail(ctx: Context, orderId: string): Promise<void> {
+    const order = await VpsOrder.findOne({ _id: orderId, tenantId: "platform" }).lean();
+    if (!order) throw new Error("Order unavailable");
+
+    const serviceLabel =
+      order.service === "install"
+        ? order.sourceUsername
+          ? "🛠️ Jasa Install OS (VPS Buyer Direct SSH)"
+          : "🛠️ Jasa Install OS (Akun DO Buyer)"
+        : "🖥️ VPS DigitalOcean (Akun Toko)";
+
+    const invoiceAmount = order.paymentInvoice?.amount;
+    const priceDisplay = invoiceAmount ? `${vpsPrice(invoiceAmount)} (QRIS)` : vpsPrice(order.snapshot.price);
+
+    const text =
+      `📋 Rincian Pesanan VPS\n\n` +
+      `Order ID: ${order._id}\n` +
+      `Buyer ID: ${order.buyerId} (Chat: ${order.chatId})\n` +
+      `Layanan: ${serviceLabel}\n` +
+      `Paket Spek: ${order.snapshot.planName} (${order.snapshot.size})\n` +
+      `Spek: ${order.snapshot.vcpus} vCPU · ${order.snapshot.memory} MB · ${order.snapshot.disk} GB\n` +
+      `Region: ${order.snapshot.region}\n` +
+      `OS: ${order.snapshot.os}${order.snapshot.installChrome ? " (+ Chrome)" : ""}\n` +
+      `Harga: ${priceDisplay}\n` +
+      `Pembayaran: ${order.paymentStatus} (${order.paymentMethod || "belum pilih"})\n` +
+      (order.paymentPaidAt ? `Waktu bayar: ${vpsDate(order.paymentPaidAt)}\n` : "") +
+      (order.paymentInvoice?.matchedTransactionId ? `ID Tx GoPay: ${order.paymentInvoice.matchedTransactionId}\n` : "") +
+      `Tahap Proses: ${order.stage}\n` +
+      `IP Publik: ${order.publicIp || "belum tersedia"}\n` +
+      (order.dropletId ? `Droplet ID: ${order.dropletId}\n` : "") +
+      (order.lastError ? `Last Error: ${order.lastError}\n` : "") +
+      `Evidence: ${order.evidence || "Belum ada catatan."}\n` +
+      (order.refundReason ? `Alasan refund: ${order.refundReason}\n` : "") +
+      `Waktu order: ${vpsDate(order.createdAt)}\n` +
+      `Pembaruan: ${vpsDate(order.updatedAt)}`;
+
+    const keyboard = new InlineKeyboard()
+      .text("🔄 Perbarui Info", `vpa_orderdetail_${order._id}`).row()
+      .text("🔙 Daftar Pesanan", "vpa_orders_all_0")
+      .text("🔙 Admin VPS", "vpa_home");
+
+    await vpsReply(ctx, text, keyboard);
+  }
+
   return {
     name: "vpsadmin", version: "1.0.0", internalOnly: true,
     commands: [{ command: "vpsadmin", description: "[Admin] Token DigitalOcean dan harga VPS" }],
@@ -151,6 +262,16 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           return;
         }
         if (data === "vpa_addplan" || data.startsWith("vpa_new")) { await catalogHome(ctx); return; }
+        const orderListMatch = /^vpa_orders_(all|paid|ready|review|unpaid)_(\d{1,6})$/.exec(data);
+        if (orderListMatch) {
+          await ordersList(ctx, orderListMatch[1] as VpsOrderFilter, Number(orderListMatch[2]));
+          return;
+        }
+        const orderDetailMatch = /^vpa_orderdetail_([a-f0-9-]{36})$/.exec(data);
+        if (orderDetailMatch) {
+          await orderDetail(ctx, orderDetailMatch[1]!);
+          return;
+        }
         const list = /^vpa_tokens_(all|active|warning|locked|available|problem)_(\d{1,6})$/.exec(data);
         if (list) {
           const filter = list[1] as VpsCredentialFilter;

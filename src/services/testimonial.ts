@@ -34,6 +34,18 @@ export interface OtpTestimonialData {
   date?: Date | undefined;
 }
 
+export interface VpsTestimonialData {
+  orderId: string;
+  service: "purchase" | "install";
+  planName: string;
+  os: string;
+  region?: string | undefined;
+  totalPrice: number;
+  method?: string | undefined;
+  buyer: BuyerInfo;
+  date?: Date | undefined;
+}
+
 // ============================================================================
 //  Cache & Helpers
 // ============================================================================
@@ -44,8 +56,9 @@ const CACHE_TTL_MS = 10_000; // 10 seconds
 
 const botUsernameCache = new WeakMap<Api, string>();
 
-function escapeHtml(text: string): string {
-  return text
+function escapeHtml(text?: string | null): string {
+  if (!text) return "";
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
@@ -413,6 +426,104 @@ export class TestimonialService {
     } catch (err: any) {
       const errMsg = err?.message || String(err);
       return { success: false, channel: targetChannel, error: errMsg };
+    }
+  }
+
+  /**
+   * Sends testimonial message with receipt image for a completed VPS purchase or Install Service.
+   */
+  static async sendVpsPurchaseTestimonial(
+    api: Api,
+    data: VpsTestimonialData
+  ): Promise<boolean> {
+    try {
+      const config = await this.getConfig();
+
+      if (!config.testimonialEnabled || !config.testimonialChannel || config.testimonialChannel.trim() === "") {
+        return false;
+      }
+
+      const targetChannel = config.testimonialChannel.trim();
+      const botUsername = await this.getBotUsername(api);
+
+      const formattedBuyer = formatBuyerHtml(data.buyer);
+      const formattedDate = formatDateWIB(data.date || new Date());
+      const safePlanName = escapeHtml(data.planName || "VPS Plan");
+      const safeOs = escapeHtml(data.os || "-");
+      const isPurchase = data.service === "purchase";
+
+      const title = isPurchase
+        ? "🌟 <b>TESTIMONI PEMBELIAN VPS BERHASIL</b> 🌟"
+        : "🌟 <b>TESTIMONI JASA INSTALL VPS BERHASIL</b> 🌟";
+
+      const serviceLabel = isPurchase ? "VPS DigitalOcean" : "Jasa Install OS";
+      const regionLine = data.region ? `📍 <b>Region:</b> <code>${escapeHtml(data.region)}</code>\n` : "";
+      const osLine = data.os ? `💿 <b>Sistem Operasi:</b> <code>${safeOs}</code>\n` : "";
+
+      const text =
+        `${title}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👤 <b>Pembeli:</b> ${formattedBuyer}\n` +
+        `🏷️ <b>Layanan:</b> <b>${escapeHtml(serviceLabel)}</b>\n` +
+        `🖥️ <b>Paket Spek:</b> <b>${safePlanName}</b>\n` +
+        regionLine +
+        osLine +
+        `💰 <b>Total Transaksi:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
+        `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method || "Saldo / QRIS")}</code>\n` +
+        `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
+        `📅 <b>Waktu:</b> ${formattedDate}\n` +
+        `⚡ <b>Status:</b> ✅ <b>Lunas &amp; Sedang Dikonfigurasi Otomatis</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `<i>✨ Layanan otomatis diproses oleh sistem bot. Terima kasih atas kepercayaannya! 🙏</i>`;
+
+      const keyboard = new InlineKeyboard();
+      if (botUsername) {
+        keyboard.url("🖥️ Sewa VPS di Bot", `https://t.me/${botUsername}?start=vps`);
+      }
+
+      // ── Generate Receipt Card Image ────────────────────────────────────────
+      let receiptBuffer: Buffer | null = null;
+      try {
+        receiptBuffer = await ReceiptService.generateReceiptBuffer({
+          orderId: data.orderId,
+          method: data.method || "Saldo / QRIS",
+          product: data.os ? `${data.planName || "VPS"} (${data.os})` : (data.planName || "VPS"),
+          category: isPurchase ? "DigitalOcean VPS" : "Jasa Install VPS",
+          date: formattedDate,
+          totalIdr: data.totalPrice,
+          status: "PAID",
+          buyerName: formatBuyerPlain(data.buyer),
+          brandTitle: botUsername ? `@${botUsername}` : undefined,
+        });
+      } catch (genErr) {
+        console.warn(`[Testimonial] Gagal render gambar struk VPS:`, genErr);
+      }
+
+      if (receiptBuffer) {
+        try {
+          await api.sendPhoto(targetChannel, new InputFile(receiptBuffer, `struk-${data.orderId}.png`), {
+            caption: text,
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          });
+          console.log(`[Testimonial] ✅ Testimoni + Struk VPS terkirim ke channel ${targetChannel} (Order: ${data.orderId})`);
+          return true;
+        } catch (photoErr) {
+          console.warn(`[Testimonial] sendPhoto VPS gagal, mencoba fallback:`, photoErr);
+        }
+      }
+
+      await api.sendMessage(targetChannel, text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+
+      console.log(`[Testimonial] ✅ Testimoni teks VPS berhasil dikirim ke channel ${targetChannel} (Order: ${data.orderId})`);
+      return true;
+    } catch (err: any) {
+      const errMsg = err?.message || String(err);
+      console.warn(`[Testimonial] ⚠️ Gagal mengirim testimoni VPS:`, errMsg);
+      return false;
     }
   }
 }

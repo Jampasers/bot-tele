@@ -278,6 +278,49 @@ export interface WarrantyClaimResolvedLogData {
   date?: Date | undefined;
 }
 
+export interface VpsOrderLogData {
+  orderId: string;
+  service: "purchase" | "install";
+  planName: string;
+  sizeSlug?: string | undefined;
+  region?: string | undefined;
+  os: string;
+  vcpus?: number | undefined;
+  memory?: number | undefined;
+  disk?: number | undefined;
+  installChrome?: boolean | undefined;
+  sourceMode?: "digitalocean" | "direct" | undefined;
+  publicIp?: string | undefined;
+  totalPrice: number;
+  method: "SALDO" | "QRIS" | string;
+  buyer: LogUserInfo;
+  remainingBalance?: number | undefined;
+  date?: Date | undefined;
+}
+
+export interface VpsSuccessLogData {
+  orderId: string;
+  service: "purchase" | "install";
+  planName: string;
+  sizeSlug?: string | undefined;
+  region?: string | undefined;
+  os: string;
+  publicIp?: string | undefined;
+  evidence?: string | undefined;
+  buyer: LogUserInfo;
+  date?: Date | undefined;
+}
+
+export interface VpsCancelledLogData {
+  orderId: string;
+  service: "purchase" | "install";
+  planName?: string | undefined;
+  reason?: string | undefined;
+  refundAmount?: number | undefined;
+  buyer: LogUserInfo;
+  date?: Date | undefined;
+}
+
 // ============================================================================
 //  Cache & Helpers
 // ============================================================================
@@ -286,8 +329,9 @@ const configCache = new TenantMap<string, { config: IBotConfig; cachedAt: number
 
 const CACHE_TTL_MS = 10_000; // 10 seconds
 
-function escapeHtml(text: string): string {
-  return text
+function escapeHtml(text?: string | null): string {
+  if (!text) return "";
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
@@ -1347,6 +1391,145 @@ export class ActivityLogService {
       `⚡ <b>Status:</b> ✅ <b>Berhasil Diteruskan Otomatis</b>\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `<i>✨ Email OTP dari IMAP listener telah berhasil diproses & diforward.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 24. VPS / Jasa Install Order Log ──────────────────────────────────────
+
+  static async logVpsOrder(
+    api: Api | undefined,
+    data: VpsOrderLogData
+  ): Promise<boolean> {
+    const formattedBuyer = formatUserHtml(data.buyer);
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    let serviceTitle = "🖥️ <b>[AUDIT: PEMBELIAN VPS DIGITALOCEAN]</b>";
+    let serviceLabel = "🖥️ VPS DigitalOcean (Akun Toko)";
+    if (data.service === "install") {
+      serviceTitle = "🛠️ <b>[AUDIT: ORDER JASA INSTALL VPS]</b>";
+      serviceLabel =
+        data.sourceMode === "direct"
+          ? "🛠️ Jasa Install OS (VPS Buyer Direct SSH)"
+          : "🛠️ Jasa Install OS (Akun DO Buyer)";
+    }
+
+    const specParts: string[] = [];
+    if (typeof data.vcpus === "number" && data.vcpus > 0) specParts.push(`${data.vcpus} vCPU`);
+    if (typeof data.memory === "number" && data.memory > 0) specParts.push(`${data.memory} MB RAM`);
+    if (typeof data.disk === "number" && data.disk > 0) specParts.push(`${data.disk} GB SSD`);
+    const specLine = specParts.length > 0 ? `⚙️ <b>Spesifikasi:</b> ${specParts.join(" · ")}\n` : "";
+
+    const regionLine = data.region ? `📍 <b>Region / Lokasi:</b> <code>${escapeHtml(data.region)}</code>\n` : "";
+    const chromeLine = data.installChrome ? " (+ Google Chrome)" : "";
+    const osLine = data.os ? `💿 <b>Sistem Operasi:</b> <code>${escapeHtml(data.os)}</code>${chromeLine}\n` : "";
+    const ipLine = data.publicIp ? `🌐 <b>IP Target:</b> <code>${escapeHtml(data.publicIp)}</code>\n` : "";
+    const remainingLine =
+      typeof data.remainingBalance === "number"
+        ? `💳 <b>Sisa Saldo Akun:</b> ${formatPrice(data.remainingBalance)}\n`
+        : "";
+
+    const text =
+      `${serviceTitle}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pembeli:</b> ${formattedBuyer}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.buyer.telegramId}</code>\n` +
+      `🏷️ <b>Layanan:</b> <b>${escapeHtml(serviceLabel)}</b>\n` +
+      `📦 <b>Paket / Spek:</b> <b>${escapeHtml(data.planName)}</b>\n` +
+      specLine +
+      regionLine +
+      osLine +
+      ipLine +
+      `💰 <b>Total Biaya:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
+      `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method)}</code>\n` +
+      remainingLine +
+      `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status:</b> ✅ <b>Lunas &amp; Masuk Antrean Proses</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Pesanan berhasil dibayar dan otomatis dijadwalkan ke worker provisioning.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 25. VPS / Jasa Install Success Log ────────────────────────────────────
+
+  static async logVpsSuccess(
+    api: Api | undefined,
+    data: VpsSuccessLogData
+  ): Promise<boolean> {
+    const formattedBuyer = formatUserHtml(data.buyer);
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    const title =
+      data.service === "purchase"
+        ? "🖥️ <b>[AUDIT: VPS SELESAI &amp; SIAP DIGUNAKAN]</b>"
+        : "🛠️ <b>[AUDIT: JASA INSTALL VPS SELESAI]</b>";
+
+    const serviceLabel =
+      data.service === "purchase"
+        ? "VPS DigitalOcean"
+        : "Jasa Install OS Windows / Linux";
+
+    const ipLine = data.publicIp ? `🌐 <b>IP Publik:</b> <code>${escapeHtml(data.publicIp)}</code>\n` : "";
+    const evidenceLine = data.evidence ? `📝 <b>Hasil Pengecekan:</b> <i>${escapeHtml(data.evidence)}</i>\n` : "";
+
+    const osLine = data.os ? `💿 <b>OS:</b> <code>${escapeHtml(data.os)}</code>\n` : "";
+    const text =
+      `${title}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pembeli:</b> ${formattedBuyer}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.buyer.telegramId}</code>\n` +
+      `🏷️ <b>Layanan:</b> <b>${escapeHtml(serviceLabel)}</b>\n` +
+      `📦 <b>Paket:</b> <b>${escapeHtml(data.planName)}</b>\n` +
+      osLine +
+      ipLine +
+      evidenceLine +
+      `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
+      `📅 <b>Waktu Selesai:</b> ${dateStr}\n` +
+      `⚡ <b>Status:</b> ✅ <b>READY (Kredensial Siap Diakses)</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>✨ Layanan VPS telah selesai dipersiapkan dan siap digunakan oleh pembeli.</i>`;
+
+    return this.sendToLogChannel(api, text);
+  }
+
+  // ── 26. VPS / Jasa Install Cancelled & Refund Log ──────────────────────────
+
+  static async logVpsCancelled(
+    api: Api | undefined,
+    data: VpsCancelledLogData
+  ): Promise<boolean> {
+    const formattedBuyer = formatUserHtml(data.buyer);
+    const dateStr = formatDateWIB(data.date || new Date());
+
+    let reasonText = "Dibatalkan oleh Pengguna / Sistem";
+    if (data.reason === "cancelled_before_create") reasonText = "Dibatalkan sebelum pembuatan droplet";
+    else if (data.reason === "create_rejected") reasonText = "Pembuatan droplet ditolak oleh provider";
+    else if (data.reason === "validation_failed") reasonText = "Validasi spek/region tidak terpenuhi";
+    else if (data.reason === "capacity_unavailable") reasonText = "Kapasitas akun toko tidak tersedia";
+    else if (data.reason) reasonText = data.reason;
+
+    const planLine = data.planName ? `📦 <b>Paket:</b> <b>${escapeHtml(data.planName)}</b>\n` : "";
+    const refundLine =
+      typeof data.refundAmount === "number" && data.refundAmount > 0
+        ? `💰 <b>Refund Saldo:</b> <b>${formatPrice(data.refundAmount)}</b> (Dikembalikan ke akun)\n`
+        : "";
+
+    const text =
+      `🚫 <b>[AUDIT: PESANAN VPS DIBATALKAN &amp; REFUND]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `👤 <b>Pembeli:</b> ${formattedBuyer}\n` +
+      `🆔 <b>Telegram ID:</b> <code>${data.buyer.telegramId}</code>\n` +
+      `🏷️ <b>Layanan:</b> <code>${data.service === "purchase" ? "VPS DigitalOcean" : "Jasa Install"}</code>\n` +
+      planLine +
+      refundLine +
+      `⚠️ <b>Alasan:</b> ${escapeHtml(reasonText)}\n` +
+      `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
+      `📅 <b>Waktu:</b> ${dateStr}\n` +
+      `⚡ <b>Status:</b> ❌ <b>CANCELED / REFUNDED</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>ℹ️ Transaksi VPS dibatalkan dan saldo pembeli telah dikembalikan secara aman.</i>`;
 
     return this.sendToLogChannel(api, text);
   }

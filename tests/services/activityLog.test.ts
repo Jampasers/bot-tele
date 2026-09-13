@@ -387,3 +387,105 @@ test("handles Telegram API errors without throwing exceptions", () => runWithTen
 
   assert.equal(result, false);
 }));
+
+test("logVpsOrder formats VPS purchase and Jasa Install correctly", () => runWithTenant(platformContext(), async () => {
+  const { mockApi, sentMessages } = createMockApi();
+
+  // Test 1: VPS Purchase
+  await ActivityLogService.logVpsOrder(mockApi, {
+    orderId: "vps-order-uuid-1",
+    service: "purchase",
+    planName: "Basic Droplet",
+    sizeSlug: "s-1vcpu-1gb",
+    region: "sgp1",
+    os: "win-2019",
+    vcpus: 1,
+    memory: 1024,
+    disk: 25,
+    installChrome: true,
+    totalPrice: 45000,
+    method: "SALDO",
+    buyer: {
+      telegramId: 987654,
+      firstName: "Anto",
+      username: "antovps",
+    },
+    remainingBalance: 15000,
+  });
+
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0]?.text.includes("[AUDIT: PEMBELIAN VPS DIGITALOCEAN]"));
+  assert.ok(sentMessages[0]?.text.includes("Basic Droplet"));
+  assert.ok(sentMessages[0]?.text.includes("sgp1"));
+  assert.ok(sentMessages[0]?.text.includes("win-2019"));
+  assert.ok(sentMessages[0]?.text.includes("Google Chrome"));
+  assert.ok(sentMessages[0]?.text.includes("45.000"));
+  assert.ok(sentMessages[0]?.text.includes("SALDO"));
+  assert.ok(sentMessages[0]?.text.includes("vps-order-uuid-1"));
+
+  // Test 2: Jasa Install Direct
+  await ActivityLogService.logVpsOrder(mockApi, {
+    orderId: "vps-order-uuid-2",
+    service: "install",
+    planName: "Install Windows",
+    os: "win-2022",
+    sourceMode: "direct",
+    publicIp: "123.45.67.89",
+    totalPrice: 35000,
+    method: "QRIS",
+    buyer: {
+      telegramId: 112233,
+      firstName: "Buyer Direct",
+    },
+  });
+
+  assert.equal(sentMessages.length, 2);
+  assert.ok(sentMessages[1]?.text.includes("[AUDIT: ORDER JASA INSTALL VPS]"));
+  assert.ok(sentMessages[1]?.text.includes("VPS Buyer Direct SSH"));
+  assert.ok(sentMessages[1]?.text.includes("123.45.67.89"));
+  assert.ok(sentMessages[1]?.text.includes("35.000"));
+  assert.ok(sentMessages[1]?.text.includes("QRIS"));
+}));
+
+test("logVpsSuccess formats ready notification correctly", () => runWithTenant(platformContext(), async () => {
+  const { mockApi, sentMessages } = createMockApi();
+
+  await ActivityLogService.logVpsSuccess(mockApi, {
+    orderId: "vps-order-uuid-1",
+    service: "purchase",
+    planName: "Basic Droplet",
+    os: "win-2019",
+    publicIp: "159.89.12.34",
+    evidence: "Port RDP aktif & siap digunakan.",
+    buyer: {
+      telegramId: 987654,
+      firstName: "Anto",
+    },
+  });
+
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0]?.text.includes("[AUDIT: VPS SELESAI &amp; SIAP DIGUNAKAN]"));
+  assert.ok(sentMessages[0]?.text.includes("159.89.12.34"));
+  assert.ok(sentMessages[0]?.text.includes("Port RDP aktif"));
+}));
+
+test("logVpsCancelled formats refund notification correctly", () => runWithTenant(platformContext(), async () => {
+  const { mockApi, sentMessages } = createMockApi();
+
+  await ActivityLogService.logVpsCancelled(mockApi, {
+    orderId: "vps-order-uuid-1",
+    service: "purchase",
+    planName: "Basic Droplet",
+    reason: "cancelled_before_create",
+    refundAmount: 45000,
+    buyer: {
+      telegramId: 987654,
+      firstName: "Anto",
+    },
+  });
+
+  assert.equal(sentMessages.length, 1);
+  assert.ok(sentMessages[0]?.text.includes("[AUDIT: PESANAN VPS DIBATALKAN &amp; REFUND]"));
+  assert.ok(sentMessages[0]?.text.includes("45.000"));
+  assert.ok(sentMessages[0]?.text.includes("Dibatalkan sebelum pembuatan droplet"));
+}));

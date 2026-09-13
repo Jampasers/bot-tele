@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DigitalOceanClient, DigitalOceanError, type FetchLike } from "../../src/vps/digitalOcean.js";
-import { buildUserData, generatePassword, getOs, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
+import { buildUserData, generatePassword, getOs, getWallpaperJpegBase64, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
     extractInstallerLogUrl, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "../../src/vps/installer.js";
 
 const account = (uuid = "user-one", team = "shared-team") => ({ account: { uuid, team: { uuid: team, name: "Shop" }, status: "active", status_message: "", droplet_limit: 2 } });
@@ -148,9 +148,23 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bats="\$bats windows-fix-rdp\.bat"'''/);
     assert.match(calls[0]?.stdin ?? "", /chrome_bat_code = r'''[\s\S]*?bats="\$bats windows-install-chrome\.bat"'''/,
         "generated patch_trans.py must use a delimiter that cannot be escaped by the batch closing quote");
+    assert.ok(calls[0]?.stdin?.includes("EOF_WALLPAPER_B64"));
+    assert.ok(calls[0]?.stdin?.includes("wallpaper.jpg"));
+    assert.ok(calls[0]?.stdin?.includes("wallpaper_copy_code = r'''"));
+    assert.ok(calls[0]?.stdin?.includes("SetDankaWallpaper"));
     assert.ok(!calls[1]?.stdin?.includes("windows-install-chrome.bat"));
     assert.equal(results[0]?.logUrl, "http://203.0.113.10/aB1cD2eF"); assert.equal(results[1]?.logUrl, "http://203.0.113.11/aB1cD2eF");
     assert.ok(!JSON.stringify(results).includes(fakePassword)); assert.ok(!JSON.stringify(results).includes("ExampleWindows"));
+});
+
+test("getWallpaperJpegBase64 encodes Wallpaper.png to valid base64 JPEG", () => {
+    const b64 = getWallpaperJpegBase64();
+    assert.ok(typeof b64 === "string");
+    assert.ok(b64.length > 100_000);
+    const buf = Buffer.from(b64, "base64");
+    assert.equal(buf[0], 0xff);
+    assert.equal(buf[1], 0xd8);
+    assert.equal(buf[2], 0xff);
 });
 
 test("Linux is never passed to Windows installer and uncertain remote job is not relaunched", async () => {

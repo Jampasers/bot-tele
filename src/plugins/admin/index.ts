@@ -1195,6 +1195,7 @@ async function buildStatsRevenueText(
     `<i>Hanya order yang selesai/terkirim yang dihitung.</i>\n\n` +
     `• Pendapatan Digital: <b>${formatIDR(stats.digitalRevenue)}</b> (<code>${stats.digitalOrders} order</code>)\n` +
     `• Pendapatan OTP SMS: <b>${formatIDR(stats.smsRevenue)}</b> (<code>${stats.smsOrders} order</code>)\n` +
+    `• Pendapatan VPS & Install: <b>${formatIDR(stats.vpsRevenue || 0)}</b> (<code>${stats.vpsOrders || 0} order</code>)\n` +
     `━━━━━━━━━━━━━━━━━━━━\n` +
     `• <b>Total Pendapatan: ${formatIDR(stats.totalRevenue)}</b>\n` +
     `• Total Order: <b>${stats.totalOrders}</b>\n\n` +
@@ -1223,6 +1224,9 @@ async function buildStatsOverviewText(): Promise<string> {
     `📱 <b>Layanan OTP SMS:</b>\n` +
     `• Belanja Hari Ini: <b>${formatIDR(stats.smsTodayRevenue)}</b> (<code>${stats.smsTodayCompletedCount} OTP sukses</code>)\n` +
     `• Total Belanja OTP: <b>${formatIDR(stats.smsTotalRevenue)}</b> (<code>${stats.smsCompletedOrders} / ${stats.smsTotalOrders} sukses</code>)\n\n` +
+    `🖥️ <b>Layanan VPS & Install:</b>\n` +
+    `• Omset Hari Ini: <b>${formatIDR(stats.vpsTodayRevenue || 0)}</b> (<code>${stats.vpsTodayOrders || 0} order</code>)\n` +
+    `• Total Omset: <b>${formatIDR(stats.vpsTotalRevenue || 0)}</b> (<code>${stats.vpsTotalOrders || 0} order</code>)\n\n` +
     `<i>🕒 Diperbarui: ${time} WIB</i>`
   );
 }
