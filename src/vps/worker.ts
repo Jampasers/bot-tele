@@ -34,6 +34,19 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       stage: "needs_token", evidence: "Kirim ulang token akun/team yang sama untuk melanjutkan VPS ini." });
     return client;
   };
+  const monitorWindows = async (enforceTimeout: boolean, knownPassword?: string) => {
+    if (!order.publicIp) return;
+    const windowsPassword = knownPassword ?? deps.password();
+    const inspection = await deps.inspectWindows({ ip: order.publicIp, windowsPassword, ...(order.installerLogUrl ? { logUrl: order.installerLogUrl } : {}) }, deps.signal);
+    const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
+    await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
+    if (successes >= 3) {
+      await stage("ready", { resumeStage: null, evidence: "RDP terjangkau pada 3 pemeriksaan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi; silakan uji melalui Remote Desktop." });
+      deps.clearToken();
+    } else if (enforceTimeout && deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) {
+      await save({ stage: "review", resumeStage: "monitoring", evidence: "Batas pemantauan Windows tercapai. Status instalasi belum pasti; VPS yang sama tetap diperiksa, tanpa create/refund otomatis." });
+    }
+  };
   if (deps.signal.aborted || order.paymentStatus !== "paid") return;
 
   if (["requested", "submitting", "running"].includes(order.rebootState)) {
@@ -68,13 +81,16 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       if (found.length === 1) await stage("droplet", { dropletId: found[0]!.id, publicIp: found[0]!.publicIp ?? null, resumeStage: null, evidence: "Droplet existing ditemukan; melanjutkan pesanan yang sama." });
       return;
     }
-    if (order.resumeStage !== "monitoring" && order.resumeStage !== "ssh" && order.resumeStage !== "droplet") return;
+    if (order.resumeStage === "monitoring") {
+      // Keep recovery observation in review so ordinary polling does not emit a
+      // review -> monitoring notification on every retry cycle.
+      await monitorWindows(false);
+      return;
+    }
+    if (order.resumeStage !== "ssh" && order.resumeStage !== "droplet") return;
     // These steps only observe the existing VPS and cannot allocate another droplet.
     const resumeStage = order.resumeStage as IVpsOrder["stage"];
-    await save({
-      stage: resumeStage,
-      ...(resumeStage === "monitoring" ? { stageStartedAt: new Date(deps.now()), rdpSuccesses: 0 } : {}),
-    });
+    await save({ stage: resumeStage });
   }
   if (order.stage === "queued") {
     if (order.createAttemptedAt) { await stage("creating"); return; }
@@ -159,11 +175,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     return;
   }
   if (order.stage === "monitoring") {
-    const inspection = await deps.inspectWindows({ ip: order.publicIp, windowsPassword: password, ...(order.installerLogUrl ? { logUrl: order.installerLogUrl } : {}) }, deps.signal);
-    const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
-    await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
-    if (successes >= 3) { await stage("ready", { evidence: "RDP terjangkau pada 3 pemeriksaan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi; silakan uji melalui Remote Desktop." }); deps.clearToken(); }
-    else if (deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) await save({ stage: "review", resumeStage: "monitoring", evidence: "Batas pemantauan Windows tercapai. Status instalasi belum pasti; VPS yang sama tetap diperiksa, tanpa create/refund otomatis." });
+    await monitorWindows(true, password);
   }
 }
 

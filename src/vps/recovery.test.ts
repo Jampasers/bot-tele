@@ -63,20 +63,27 @@ test("missing prepared marker after OS disk replacement goes to observation, not
     await advanceVpsOrder(order, dependencies({ scheduleInstallerReboot: async () => "failed" }));
     assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "monitoring");
     await advanceVpsOrder(order, dependencies({ inspectWindows: async () => ({ rdpOpen: true, loginVerified: false, logState: "unavailable", detail: "RDP only" }) }));
-    assert.equal(order.stage, "monitoring"); assert.equal(order.rdpSuccesses, 1);
+    assert.equal(order.stage, "review"); assert.equal(order.rdpSuccesses, 1);
 });
 
-test("review recovery resets the monitoring timeout before checking Windows again", async () => {
+test("review monitoring observes quietly and becomes ready without bouncing stages", async () => {
     const old = new Date("2026-09-12T15:51:00.000Z");
     const now = new Date("2026-09-13T00:40:00.000Z");
     const order = orderFixture({ stage: "review", resumeStage: "monitoring", stageStartedAt: old, updatedAt: old });
-    await advanceVpsOrder(order, dependencies({
+    const deps = dependencies({
         now: () => now.getTime(),
         inspectWindows: async () => ({ rdpOpen: true, loginVerified: false, logState: "unavailable", detail: "RDP only" }),
-    }));
-    assert.equal(order.stage, "monitoring");
+    });
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "review");
     assert.equal(order.rdpSuccesses, 1);
-    assert.equal(order.stageStartedAt.getTime(), now.getTime());
+    assert.equal(order.stageStartedAt.getTime(), old.getTime());
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "review");
+    assert.equal(order.rdpSuccesses, 2);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ready");
+    assert.equal(order.resumeStage, null);
 });
 
 test("buyer token loss during ambiguous create review preserves creating recovery target", async () => {
