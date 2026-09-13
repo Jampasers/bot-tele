@@ -6,8 +6,13 @@ export interface VpsUiPlan {
   serviceType: VpsServiceType;
   sizeSlug: string;
   regions: string[];
-  osPrices: { os: string; label: string; price: number }[];
+  osPrices: { os: string; label: string; price: number | null; family?: "linux" | "windows" }[];
   priceMatrix?: { region: string; os: string; price: number }[];
+  catalogManaged?: boolean;
+  sizeLabel?: string;
+  regionLabels?: Record<string, string>;
+  providerPrice?: string;
+  transfer?: string;
   enabled: boolean;
 }
 export interface VpsUiOrder {
@@ -74,6 +79,5 @@ export interface VpsUiDependencies {
   checkCredential(actor: string, id: string): Promise<VpsUiCredential>;
   checkAllCredentials(actor: string): Promise<void>;
   updateCredential(actor: string, id: string, input: { enabled?: boolean; priority?: number }): Promise<void>;
-  savePlan(actor: string, input: Omit<VpsUiPlan, "id">): Promise<VpsUiPlan>;
   updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string; region?: string }): Promise<void>;
 }

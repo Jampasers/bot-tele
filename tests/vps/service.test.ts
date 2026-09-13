@@ -4,6 +4,9 @@ import { randomUUID } from "node:crypto";
 import { BuyerTokenVault, buyerTokens } from "../../src/vps/security.js";
 import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
+import { VpsCatalog } from "../../src/models/VpsCatalog.js";
+import { defaultVpsCatalog } from "../../src/vps/catalog.js";
+import { catalogPlans } from "../../src/vps/catalogPlans.js";
 import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
 import { getOs } from "../../src/vps/installer.js";
 import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
@@ -23,6 +26,7 @@ function query<T>(read: () => T) {
   return q;
 }
 function env(t: TestContext): void {
+  t.mock.method(VpsCatalog, "findById", () => query(() => defaultVpsCatalog()));
   const before = { enabled: process.env.VPS_ENABLED, key: process.env.CREDENTIAL_ENCRYPTION_KEY };
   process.env.VPS_ENABLED = "true"; process.env.CREDENTIAL_ENCRYPTION_KEY = "ab".repeat(32);
   t.after(() => { for (const [name, value] of [["VPS_ENABLED", before.enabled], ["CREDENTIAL_ENCRYPTION_KEY", before.key]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } buyerTokens.clear(); });
@@ -150,6 +154,52 @@ test("VPS schemas expose no buyer token persistence field; backup exports encryp
   assert.equal(VpsOrder.schema.path("passwordEncrypted").options.select, false);
   assert.equal(VpsOrder.schema.path("snapshot").options.immutable, true);
   assert.equal(BACKUP_COLLECTIONS.find(c => c.name === "vpsorders")?.select, "+passwordEncrypted +sourcePasswordEncrypted");
+  assert.deepEqual(BACKUP_COLLECTIONS.find(c => c.name === "vpscatalogs")?.filter, { _id: "platform" });
   assert.ok(BACKUP_COLLECTIONS.find(c => c.name === "users")?.select?.includes("appliedVpsPaymentEffectIds"));
   await platform(() => assert.rejects(executeRollback([{ name: "vpsorders", count: 1, docs: [order] }]), /offline/));
+});
+
+test("service menu derives all specs from catalog and discards arbitrary old named plans", async t => {
+  env(t);
+  t.mock.method(VpsPlan, "find", (filter: Record<string, unknown>) => {
+    assert.equal(filter.catalogManaged, true);
+    return query(() => [{ _id: "old-id", name: "Old custom package", enabled: true, priceMatrix: [] }]);
+  });
+  const plans = await platform(() => vpsService.listPlans("install"));
+  assert.equal(plans.length, 7);
+  assert.ok(plans.every(plan => plan.regions.length === 16 && plan.osPrices.length === 18));
+  assert.ok(plans.every(plan => plan.name !== "Old custom package"));
+});
+
+test("catalog checkout without an exact configured price cannot create order or contact DigitalOcean", async t => {
+  env(t);
+  const plan = catalogPlans(defaultVpsCatalog(), "install")[0]!;
+  t.mock.method(VpsOrder, "findOne", () => query(() => null));
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...plan, _id: plan.id })));
+  let writes = 0, provider = 0;
+  t.mock.method(VpsOrder, "create", async () => { writes++; throw new Error("Unexpected order write"); });
+  t.mock.method(DigitalOceanClient.prototype, "account", async () => { provider++; throw new Error("Unexpected provider call"); });
+  await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(),
+    serviceType: "install", planId: plan.id, os: "windows2022", region: "sgp1" }), /harga/));
+  assert.equal(writes, 0); assert.equal(provider, 0);
+});
+
+test("admin combination price validates catalog membership before any write and targets an atomic matrix update", async t => {
+  env(t);
+  const old = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
+  t.after(() => { if (old === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = old; });
+  const plan = catalogPlans(defaultVpsCatalog(), "install")[0]!;
+  const writes: { filter: unknown; update: unknown; options: unknown }[] = [];
+  t.mock.method(VpsPlan, "updateOne", async (filter, update, options) => { writes.push({ filter, update, options }); return { matchedCount: 1, modifiedCount: 1 }; });
+  await platform(async () => {
+    await assert.rejects(vpsService.updatePlan("999", plan.id, { region: "sgp1", os: "windows2022", price: 12345 }), /admin/);
+    await assert.rejects(vpsService.updatePlan("101", plan.id, { region: "invalid", os: "windows2022", price: 12345 }), /katalog/);
+    await assert.rejects(vpsService.updatePlan("101", plan.id, { region: "sgp1", os: "windows2022", price: 0 }), /Harga/);
+    assert.equal(writes.length, 0);
+    await vpsService.updatePlan("101", plan.id, { region: "sgp1", os: "windows2022", price: 12345 });
+  });
+  assert.equal(writes.length, 2);
+  assert.ok(Array.isArray(writes[1]!.update));
+  assert.deepEqual(writes[1]!.filter, { _id: plan.id, tenantId: "platform" });
+  assert.deepEqual(writes[1]!.options, { updatePipeline: true });
 });

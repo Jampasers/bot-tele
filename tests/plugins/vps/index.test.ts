@@ -8,6 +8,8 @@ import { createVpsPlugin, vpsOrderText } from "../../../src/plugins/vps/index.js
 import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vpsadmin/index.js";
 import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
 import type { VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
+import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
+import { catalogPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
@@ -327,39 +329,72 @@ test("nonadmin callbacks cannot inspect platform DigitalOcean credentials", asyn
   assert.match(replies(calls), /Hanya admin/);
 });
 
-test("admin plan wizard stores the selected service and Windows-version price", async t => {
+test("admin prices a single service/spec/region/OS from the full catalog without creating a named package", async t => {
   const old = process.env["ADMIN_ID"];
   process.env["ADMIN_ID"] = "42";
   t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
-  let saved: Omit<VpsUiPlan, "id"> | undefined;
-  const { bot, calls } = await harness({ savePlan: async (actor, input) => { assert.equal(actor, "42"); saved = input; return { id: PLAN.id, ...input }; }, listPlans: async () => saved ? [{ id: PLAN.id, ...saved }] : [] }, { admin: true });
-  await bot.handleUpdate(update(1, "vpa_new_install", true));
-  await bot.handleUpdate(update(2, "RAM 2 GB"));
-  await bot.handleUpdate(update(3, "s-1vcpu-2gb"));
-  await bot.handleUpdate(update(4, "sgp1,fra1"));
-  await bot.handleUpdate(update(5, callback(calls, "vpa_newos_"), true));
-  await bot.handleUpdate(update(6, "43210"));
-  assert.deepEqual(saved, { name: PLAN.name, serviceType: "install", sizeSlug: PLAN.sizeSlug, regions: PLAN.regions, osPrices: PLAN.osPrices, enabled: true });
+  const plans = catalogPlans(defaultVpsCatalog(), "install");
+  const plan = plans[0]!;
+  const sgpIndex = plan.regions.indexOf("sgp1"), winIndex = plan.osPrices.findIndex(os => os.os === "windows2022");
+  let saved: Parameters<VpsUiDependencies["updatePlan"]>[2] | undefined;
+  const { bot, calls } = await harness({ listPlans: async () => plans, updatePlan: async (actor, id, input) => {
+    assert.equal(actor, "42"); assert.equal(id, plan.id); saved = input;
+    plan.priceMatrix!.push({ region: input.region!, os: input.os!, price: input.price! });
+  } }, { admin: true });
+  await bot.handleUpdate(update(1, "vpa_plans_0", true));
+  await bot.handleUpdate(update(2, `vpa_plan_${plan.id}`, true));
+  await bot.handleUpdate(update(3, `vpa_os_${plan.id}_${sgpIndex}_10`, true));
+  assert.match(replies(calls), /Pilih OS/);
+  assert.match(JSON.stringify(calls), /Windows Server 2022/);
+  await bot.handleUpdate(update(4, `vpa_set_${plan.id}_${sgpIndex}_${winIndex}`, true));
+  await bot.handleUpdate(update(5, "43210"));
+  assert.deepEqual(saved, { region: "sgp1", os: "windows2022", price: 43210 });
+  assert.equal(planPrice(plan, "sgp1", "windows2022"), 43210);
+  assert.equal(planPrice(plan, "fra1", "windows2022"), undefined);
+  for (const call of calls) {
+    const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+    assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
+  }
 });
 
-test("admin plan wizard supports button selection for size and region", async t => {
+test("admin adds a custom size one field at a time and legacy add-package buttons lead to catalog", async t => {
   const old = process.env["ADMIN_ID"];
   process.env["ADMIN_ID"] = "42";
   t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
-  let saved: Omit<VpsUiPlan, "id"> | undefined;
-  const { bot, calls } = await harness({ savePlan: async (actor, input) => { assert.equal(actor, "42"); saved = input; return { id: PLAN.id, ...input }; }, listPlans: async () => saved ? [{ id: PLAN.id, ...saved }] : [] }, { admin: true });
-  await bot.handleUpdate(update(1, "vpa_new_purchase", true));
-  await bot.handleUpdate(update(2, "SG 2GB Win"));
-  await bot.handleUpdate(update(3, callback(calls, "vpa_newsz_"), true));
-  await bot.handleUpdate(update(4, callback(calls, "vpa_newreg_"), true));
-  await bot.handleUpdate(update(5, callback(calls, "vpa_newos_"), true));
-  await bot.handleUpdate(update(6, "50000"));
-  assert.ok(saved);
-  assert.equal(saved.name, "SG 2GB Win");
-  assert.equal(saved.serviceType, "purchase");
-  assert.ok(saved.sizeSlug.startsWith("s-"));
-  assert.ok(saved.regions.length > 0);
-  assert.equal(saved.osPrices[0]?.price, 50000);
+  let saved: Parameters<NonNullable<VpsUiDependencies["addCatalogEntry"]>>[1] | undefined;
+  const { bot, calls } = await harness({
+    listCatalog: async () => ({ regions: [], sizes: [], os: [] }),
+    addCatalogEntry: async (actor, input) => { assert.equal(actor, "42"); saved = input; },
+  }, { admin: true });
+  await bot.handleUpdate(update(1, "vpa_addplan", true));
+  assert.match(JSON.stringify(calls), /vpa_addsize/);
+  await bot.handleUpdate(update(2, "vpa_addsize", true));
+  for (const [index, text] of ["s-custom", "12", "24 GB", "500 GB", "8 TB", "$120/month"].entries()) await bot.handleUpdate(update(index + 3, text));
+  assert.deepEqual(saved, { kind: "size", value: ["s-custom", "12", "24 GB", "500 GB", "8 TB", "$120/month"] });
+});
+
+test("direct install lists all seven catalog sizes, all regions and each Windows version; unset price cannot checkout", async () => {
+  const plans = catalogPlans(defaultVpsCatalog(), "install");
+  let checkouts = 0;
+  const { bot, calls } = await harness({ listPlans: async () => plans, checkout: async () => { checkouts++; return ORDER; } });
+  await bot.handleUpdate(update(1, "vps_install_direct", true));
+  await bot.handleUpdate(update(2, "192.0.2.10"));
+  await bot.handleUpdate(update(3, "root"));
+  await bot.handleUpdate(update(4, "synthetic-source-password"));
+  for (const plan of plans) assert.ok(JSON.stringify(calls).includes(plan.sizeLabel!));
+  await bot.handleUpdate(update(5, callback(calls, "vps_plan_"), true));
+  assert.match(JSON.stringify(calls), /Richmond, USA \(ric1\)/);
+  assert.match(JSON.stringify(calls), /Memphis/);
+  await bot.handleUpdate(update(6, callback(calls, "vps_region_"), true));
+  const last = calls.at(-1)!;
+  assert.match(JSON.stringify(last), /Windows Server 2012 R2/);
+  assert.match(JSON.stringify(last), /Windows Server 2022/);
+  assert.doesNotMatch(JSON.stringify(last), /Ubuntu/);
+  assert.match(JSON.stringify(last), /Harga belum diatur/);
+  await bot.handleUpdate(update(7, callback(calls, "vps_os_"), true));
+  await bot.handleUpdate(update(8, callback(calls, "vps_chrome_"), true));
+  assert.equal(checkouts, 0);
+  assert.match(replies(calls), /Belum ada tagihan/);
 });
 
 test("unreadable account metrics remain unknown and status text does not invent RDP login success", () => {

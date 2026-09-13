@@ -1,6 +1,5 @@
-import { VpsCatalog, type IVpsCatalog } from "../models/VpsCatalog.js";
+import { VpsCatalog } from "../models/VpsCatalog.js";
 import { registerOs } from "./installer.js";
-import mongoose from "mongoose";
 
 export const DEFAULT_REGIONS = [
   ["nyc1", "New York 1", "USA"], ["nyc2", "New York 2", "USA"], ["nyc3", "New York 3", "USA"], ["ams3", "Amsterdam", "Netherlands"],
@@ -19,16 +18,24 @@ export const DEFAULT_OS = [
   ["debian13", "Debian 13", "debian-13-x64", "linux"], ["almalinux8", "AlmaLinux 8", "almalinux-8-x64", "linux"], ["almalinux9", "AlmaLinux 9", "almalinux-9-x64", "linux"], ["almalinux10", "AlmaLinux 10", "almalinux-10-x64", "linux"],
   ["rocky8", "Rocky Linux 8", "rockylinux-8-x64", "linux"], ["rocky9", "Rocky Linux 9", "rockylinux-9-x64", "linux"], ["rocky10", "Rocky Linux 10", "rockylinux-10-x64", "linux"],
   ["centos9", "CentOS Stream 9", "centos-stream-9-x64", "linux"], ["centos10", "CentOS Stream 10", "centos-stream-10-x64", "linux"], ["fedora43", "Fedora 43", "fedora-43-x64", "linux"], ["fedora44", "Fedora 44", "fedora-44-x64", "linux"],
-  ["windows2016", "Windows Server 2016", "ubuntu-24-04-x64", "windows"], ["windows2019", "Windows Server 2019", "ubuntu-24-04-x64", "windows"], ["windows2022", "Windows Server 2022", "ubuntu-24-04-x64", "windows"],
+  ["windows2012r2", "Windows Server 2012 R2", "ubuntu-24-04-x64", "windows"], ["windows2016", "Windows Server 2016", "ubuntu-24-04-x64", "windows"], ["windows2019", "Windows Server 2019", "ubuntu-24-04-x64", "windows"], ["windows2022", "Windows Server 2022", "ubuntu-24-04-x64", "windows"],
 ] as const;
 
-export async function getVpsCatalog(): Promise<IVpsCatalog> {
-  if (mongoose.connection.readyState !== 1) {
-    for (const [key, name, slug, family] of DEFAULT_OS) registerOs({ key, name, family, image: family === "linux" ? slug : "ubuntu-24-04-x64", ...(family === "windows" ? { windowsImageName: `${name} ServerStandard` } : {}) });
-    return { _id: "platform", regions: DEFAULT_REGIONS.map(([slug, name, country]) => ({ slug, name, country })), sizes: DEFAULT_SIZES.map(([key, slug, cpu, ram, disk, transfer, price]) => ({ slug, cpu, ram, disk, transfer, price })), os: DEFAULT_OS.map(([key, name, slug, family]) => ({ key, name, slug, family, installerImage: family === "linux" ? slug : "ubuntu-24-04-x64", ...(family === "windows" ? { windowsImageName: `${name} ServerStandard` } : {}) })) } as unknown as IVpsCatalog;
-  }
-  let catalog = await VpsCatalog.findById("platform");
-  if (!catalog) catalog = await VpsCatalog.create({ _id: "platform", regions: DEFAULT_REGIONS.map(([slug, name, country]) => ({ slug, name, country })), sizes: DEFAULT_SIZES.map(([key, slug, cpu, ram, disk, transfer, price]) => ({ slug, cpu, ram, disk, transfer, price })), os: DEFAULT_OS.map(([key, name, slug, family]) => ({ key, name, slug, family, installerImage: family === "linux" ? slug : "ubuntu-24-04-x64", ...(family === "windows" ? { windowsImageName: `${name} ServerStandard` } : {}) })) });
+export interface VpsCatalogData {
+  _id: string;
+  regions: { slug: string; name: string; country: string }[];
+  sizes: { slug: string; cpu: number; ram: string; disk: string; transfer: string; price: string }[];
+  os: { key: string; name: string; slug: string; family: "linux" | "windows"; installerImage?: string | null; windowsImageName?: string | null }[];
+}
+export function defaultVpsCatalog(): VpsCatalogData {
+  return { _id: "platform", regions: DEFAULT_REGIONS.map(([slug, name, country]) => ({ slug, name, country })),
+    sizes: DEFAULT_SIZES.map(([, slug, cpu, ram, disk, transfer, price]) => ({ slug, cpu, ram, disk, transfer, price })),
+    os: DEFAULT_OS.map(([key, name, slug, family]) => ({ key, name, slug, family, installerImage: slug,
+      windowsImageName: family === "windows" ? `${name} ServerStandard` : null })) };
+}
+
+export async function getVpsCatalog(): Promise<VpsCatalogData> {
+  const catalog = await VpsCatalog.findById("platform").lean() ?? defaultVpsCatalog();
   for (const entry of catalog.os) registerOs({ key: entry.key, name: entry.name, family: entry.family, image: entry.installerImage ?? "", ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });
   return catalog;
 }
