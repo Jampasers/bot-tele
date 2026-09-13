@@ -181,7 +181,11 @@ export class DigitalOceanClient {
         const region = regions.find((r) => r.slug === selection.region && r.available);
         const size = sizes.find((s) => s.slug === selection.size && s.available && s.regions.includes(selection.region));
         const image = images.find((i) => i.slug === os.image && i.regions.includes(selection.region));
-        if (!region || !size || !image || size.disk < image.minDiskSize || (region.sizes.length > 0 && !region.sizes.includes(size.slug))) throw new DigitalOceanError("validation");
+        if (!region || !size || !image || size.disk < image.minDiskSize || (region.sizes.length > 0 && !region.sizes.includes(size.slug))) {
+            const reason = !region ? `region_not_found(${selection.region})` : !size ? `size_not_found(${selection.size})` : !image ? `image_not_found(${os.image})` : size.disk < image.minDiskSize ? `disk_too_small(${size.disk}<${image.minDiskSize})` : `size_not_in_region(${selection.size})`;
+            console.warn("[VPS_DO_VALIDATION_DETAIL]", reason, "os_family:", os.family, "image_slug:", os.image);
+            throw new DigitalOceanError("validation");
+        }
         return { os, region, size, image };
     }
     async createDroplet(input: CreateDropletInput, signal?: AbortSignal): Promise<DoDroplet> {

@@ -36,6 +36,9 @@ export function defaultVpsCatalog(): VpsCatalogData {
 
 export async function getVpsCatalog(): Promise<VpsCatalogData> {
   const catalog = await VpsCatalog.findById("platform").lean() ?? defaultVpsCatalog();
-  for (const entry of catalog.os) registerOs({ key: entry.key, name: entry.name, family: entry.family, image: entry.installerImage ?? "", ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });
+  for (const entry of catalog.os) {
+    const image = entry.installerImage || (entry.family === "windows" ? "ubuntu-24-04-x64" : entry.slug);
+    registerOs({ key: entry.key, name: entry.name, family: entry.family, image, ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });
+  }
   return catalog;
 }
