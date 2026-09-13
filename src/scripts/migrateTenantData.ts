@@ -5,6 +5,17 @@ import { TENANT_MODELS, PLATFORM_MODELS } from "../tenant/models.js";
 import { LEGACY_TENANT_FILTER, INVALID_TENANT_FILTER, assertTenantMigrationReady } from "../tenant/migration.js";
 import { PLATFORM_TENANT_ID } from "../tenant/context.js";
 
+function setNestedExpression(target: Record<string, unknown>, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let current = target;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (!next || typeof next !== "object" || Array.isArray(next)) current[part] = {};
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts.at(-1)!] = value;
+}
+
 /** Dry-run by default. Stop all bot instances and take an external backup before --apply. */
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
@@ -33,7 +44,11 @@ async function main(): Promise<void> {
     for (const [keys, options] of model.schema.indexes()) {
       if (!options.unique) continue;
       const groupKey: Record<string, unknown> = {};
-      for (const field of Object.keys(keys)) groupKey[field] = field === "tenantId" && tenantOwned ? { $ifNull: ["$tenantId", PLATFORM_TENANT_ID] } : `$${field}`;
+      for (const field of Object.keys(keys)) {
+        setNestedExpression(groupKey, field, field === "tenantId" && tenantOwned
+          ? { $ifNull: ["$tenantId", PLATFORM_TENANT_ID] }
+          : `$${field}`);
+      }
       const duplicates = await collection.aggregate([
         ...(options.partialFilterExpression ? [{ $match: options.partialFilterExpression }] : []),
         { $group: { _id: groupKey, count: { $sum: 1 } } },
