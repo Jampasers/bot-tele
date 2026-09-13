@@ -142,6 +142,7 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.equal(calls[0]?.command, "bash -s");
     assert.ok(calls[0]?.stdin?.includes('if ! mkdir "$state"')); assert.ok(calls[0]?.stdin?.includes('touch "$state/prepared"'));
     assert.ok(calls[0]?.stdin?.includes("patch_trans.py")); assert.ok(calls[0]?.stdin?.includes("DisableCAD")); assert.ok(calls[0]?.stdin?.includes("UserAuthentication"));
+    assert.ok(calls[0]?.stdin?.includes("DisableAntiSpyware")); assert.ok(calls[0]?.stdin?.includes("NoAutoUpdate")); assert.ok(calls[0]?.stdin?.includes("wuauserv")); assert.ok(calls[0]?.stdin?.includes("SysMain"));
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
     assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bats="\$bats windows-fix-rdp\.bat"'''/);

@@ -241,6 +241,78 @@ rem Pastikan service TermService berjalan otomatis
 sc config TermService start= auto
 net start TermService
 
+rem ========================================================
+rem OPTIMASI & DEBLOAT WINDOWS VPS (HEMAT RAM & RESOURCE)
+rem ========================================================
+
+rem 1. Nonaktifkan Windows Defender / Antivirus & SmartScreen
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Set-MpPreference -DisableRealtimeMonitoring \$true -DisableBehaviorMonitoring \$true -DisableIOAVProtection \$true -DisableScriptScanning \$true" >nul 2>&1
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender" /v DisableAntiVirus /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection" /v DisableBehaviorMonitoring /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection" /v DisableOnAccessProtection /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection" /v DisableScanOnRealtimeEnable /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\Real-Time Protection" /v DisableIOAVProtection /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\System" /v EnableSmartScreen /t REG_DWORD /d 0 /f
+reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer" /v SmartScreenEnabled /t REG_SZ /d "Off" /f
+sc config WinDefend start= disabled >nul 2>&1
+sc stop WinDefend >nul 2>&1
+sc config Sense start= disabled >nul 2>&1
+sc stop Sense >nul 2>&1
+sc config WdNisSvc start= disabled >nul 2>&1
+sc stop WdNisSvc >nul 2>&1
+
+rem 2. Nonaktifkan Windows Update & Background Update Orchestrator
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU" /v NoAutoUpdate /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate\\AU" /v AUOptions /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate" /v DisableWindowsUpdateAccess /t REG_DWORD /d 1 /f
+sc config wuauserv start= disabled >nul 2>&1
+net stop wuauserv >nul 2>&1
+sc config bits start= disabled >nul 2>&1
+net stop bits >nul 2>&1
+sc config dosvc start= disabled >nul 2>&1
+net stop dosvc >nul 2>&1
+sc config UsoSvc start= disabled >nul 2>&1
+net stop UsoSvc >nul 2>&1
+sc config WaaSMedicSvc start= disabled >nul 2>&1
+net stop WaaSMedicSvc >nul 2>&1
+
+rem 3. Nonaktifkan Telemetry & Diagnostik Microsoft
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f
+reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f
+sc config DiagTrack start= disabled >nul 2>&1
+net stop DiagTrack >nul 2>&1
+sc config dmwappushservice start= disabled >nul 2>&1
+net stop dmwappushservice >nul 2>&1
+sc config WerSvc start= disabled >nul 2>&1
+net stop WerSvc >nul 2>&1
+
+rem 4. Nonaktifkan SysMain (Superfetch) untuk hemat RAM di VPS
+sc config SysMain start= disabled >nul 2>&1
+net stop SysMain >nul 2>&1
+
+rem 5. Nonaktifkan Windows Search Indexer (mencegah disk IO 100%% & CPU spike)
+sc config WSearch start= disabled >nul 2>&1
+net stop WSearch >nul 2>&1
+
+rem 6. Nonaktifkan popup Server Manager saat login
+reg add "HKLM\\SOFTWARE\\Microsoft\\ServerManager" /v DoNotOpenServerManagerAtLogon /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Server\\ServerManager" /v DoNotOpenServerManagerAtLogon /t REG_DWORD /d 1 /f
+
+rem 7. Nonaktifkan Consumer Bloatware, Bing Search & Cortana
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent" /v DisableWindowsConsumerFeatures /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent" /v DisableSoftLanding /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search" /v AllowCortana /t REG_DWORD /d 0 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search" /v DisableWebSearch /t REG_DWORD /d 1 /f
+reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search" /v ConnectedSearchUseWeb /t REG_DWORD /d 0 /f
+
+rem 8. Nonaktifkan Xbox & Gaming Services
+sc config XblAuthManager start= disabled >nul 2>&1
+sc config XblGameSave start= disabled >nul 2>&1
+sc config XboxNetApiSvc start= disabled >nul 2>&1
+sc config XboxGipSvc start= disabled >nul 2>&1
+
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
