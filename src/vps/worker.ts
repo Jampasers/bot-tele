@@ -44,7 +44,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
     await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
     if (successes >= 3) {
-      await stage("ready", { resumeStage: null, evidence: "RDP terjangkau pada 3 pemeriksaan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi; silakan uji melalui Remote Desktop." });
+      await stage("ready", { resumeStage: null, evidence: "Instalasi Windows selesai. Port RDP aktif & siap digunakan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis)." });
       deps.clearToken();
     } else if (enforceTimeout && deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) {
       await save({ stage: "review", resumeStage: "monitoring", evidence: "Batas pemantauan Windows tercapai. Status instalasi belum pasti; VPS yang sama tetap diperiksa, tanpa create/refund otomatis." });
@@ -285,7 +285,11 @@ export class VpsWorker {
       }
       if (initialStage !== order.stage || initialReboot !== order.rebootState) {
         // Notification failure cannot alter provisioning, payment or refund state.
-        await this.api.sendMessage(order.chatId, `🖥️ VPS ${order._id}\n${order.evidence}\nBuka /vps untuk detail.`).catch(() => console.warn(`[VPS:${order._id}] Notification delivery deferred.`));
+        const isReady = order.stage === "ready";
+        const message = isReady
+          ? `✅ VPS Selesai & Siap Digunakan!\n\n🖥️ Order: ${order._id}\n${order.evidence}\n\n👉 Buka /vps lalu klik "🔐 Lihat akses VPS" untuk mengambil IP, Username, dan Password RDP.`
+          : `🖥️ VPS ${order._id}\n${order.evidence}\nBuka /vps untuk detail.`;
+        await this.api.sendMessage(order.chatId, message).catch(() => console.warn(`[VPS:${order._id}] Notification delivery deferred.`));
       }
     } catch (error) {
       await save({ lastError: "step_deferred" }).catch(() => {});

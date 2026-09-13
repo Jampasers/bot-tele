@@ -151,18 +151,35 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     if (os?.family !== "windows" || !os.windowsImageName) throw new InstallerError("validation");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
-chrome_bat_code = r'''    cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
+chrome_bat_code = r'''    cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+$ProgressPreference = 'SilentlyContinue'
+$url = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
+$out = "$env:TEMP\\google-chrome-enterprise.msi"
+
+for ($i = 0; $i -lt 30; $i++) {
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($url, $out)
+        if ((Test-Path $out) -and ((Get-Item $out).Length -gt 10485760)) { break }
+    } catch {
+        Start-Sleep -Seconds 5
+    }
+}
+
+if (Test-Path $out) {
+    Start-Process msiexec.exe -ArgumentList "/i \`"$out\`" /qn /norestart" -Wait
+    Start-Sleep -Seconds 2
+    Remove-Item -Force $out -ErrorAction SilentlyContinue
+}
+EOF_CHROME_PS1
+    cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
-setlocal
-set "msi=%TEMP%\\google-chrome-enterprise.msi"
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi' -OutFile '%msi%'"
-if errorlevel 1 exit /b 1
-msiexec.exe /i "%msi%" /qn /norestart
-set "code=%ERRORLEVEL%"
-del /q "%msi%" >nul 2>&1
-if "%code%"=="3010" exit /b 0
-exit /b %code%
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1"
+del "%SystemDrive%\\windows-install-chrome.ps1" >nul 2>&1
+del "%~f0" >nul 2>&1
 EOF_CHROME_INSTALL
+    unix2dos "$os_dir/windows-install-chrome.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
     bats="$bats windows-install-chrome.bat"'''
 ` : "";
