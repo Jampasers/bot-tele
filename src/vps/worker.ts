@@ -133,7 +133,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     return;
   }
   if (order.stage === "installing") {
-    const result = await deps.launchWindows({ ip: order.publicIp, password, windowsPassword: password, os: order.snapshot.os, orderId: order._id }, deps.signal);
+    const result = await deps.launchWindows({ ip: order.publicIp, password, windowsPassword: password, os: order.snapshot.os, orderId: order._id, installChrome: order.snapshot.installChrome === true }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
     if (result.state === "prepared") await stage("rebooting", { evidence: "Installer Windows disiapkan. Menjadwalkan reboot instalasi." });
     else if (result.state === "failed" || deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) {

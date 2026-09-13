@@ -20,6 +20,7 @@ export interface VpsUiOrder {
   sizeSlug: string;
   os: string;
   region: string;
+  installChrome?: boolean;
   vcpus?: number;
   memory?: number;
   disk?: number;
@@ -54,7 +55,7 @@ export interface VpsUiDependencies {
   listPlans(serviceType?: VpsServiceType, includeDisabled?: boolean): Promise<VpsUiPlan[]>;
   acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }>;
   clearBuyerToken(actor: string, orderId: string): void;
-  checkout(input: { actorTelegramId: string; chatId: string; requestId: string; serviceType: VpsServiceType; planId: string; os: string; region: string; buyerSessionId?: string }): Promise<VpsUiOrder>;
+  checkout(input: { actorTelegramId: string; chatId: string; requestId: string; serviceType: VpsServiceType; planId: string; os: string; region: string; installChrome?: boolean; buyerSessionId?: string }): Promise<VpsUiOrder>;
   listOwned(actor: string, options: { purchaseOnly: boolean; offset: number; limit: number }): Promise<VpsUiOrder[]>;
   getOwned(actor: string, orderId: string): Promise<VpsUiOrder | null>;
   credentials(actor: string, orderId: string): Promise<{ ip: string; username: string; password: string; evidence: string }>;

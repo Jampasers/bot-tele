@@ -21,7 +21,7 @@ export async function ownedOrder(actor: string, orderId: string, includeSecret =
 export function orderDto(order: IVpsOrder): VpsUiOrder {
   return { _id: order._id, serviceType: order.service, paymentStatus: order.paymentStatus, paymentMethod: order.paymentMethod, stage: order.stage,
     price: order.snapshot.price, planName: order.snapshot.planName, sizeSlug: order.snapshot.size, os: order.snapshot.os,
-    region: order.snapshot.region, ip: order.publicIp, dropletId: order.dropletId, needsToken: order.stage === "needs_token",
+    region: order.snapshot.region, installChrome: order.snapshot.installChrome === true, ip: order.publicIp, dropletId: order.dropletId, needsToken: order.stage === "needs_token",
     evidence: order.evidence, createdAt: order.createdAt, vcpus: order.snapshot.vcpus, memory: order.snapshot.memory, disk: order.snapshot.disk,
     installerLogUrl: order.installerLogUrl };
 }
@@ -49,8 +49,10 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
   const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType, enabled: true }).lean();
+  const os = getOs(input.os);
   const price = plan?.osPrices.find(o => o.os === input.os)?.price;
-  if (!plan || !price || !plan.regions.includes(input.region) || !getOs(input.os)) throw new Error("Paket atau harga tidak tersedia.");
+  if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket atau harga tidak tersedia.");
+  if (input.installChrome === true && os.family !== "windows") throw new Error("Chrome hanya tersedia untuk Windows.");
   let accountId: string | null = null;
   let client: DigitalOceanClient | undefined;
   if (input.serviceType === "install") {
@@ -78,7 +80,7 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
       service: input.serviceType, accountId, createName: `bt-vps-${input.requestId}`,
       passwordEncrypted: encryptSecret(password, `platform:vps:password:${input.requestId}`),
       snapshot: { planId: plan._id, planName: plan.name, size: plan.sizeSlug, region: input.region, os: input.os, image: selected.os.image,
-        price, vcpus: selected.size.vcpus, memory: selected.size.memory, disk: selected.size.disk },
+        price, vcpus: selected.size.vcpus, memory: selected.size.memory, disk: selected.size.disk, installChrome: input.installChrome === true },
     });
     if (input.serviceType === "install" && input.buyerSessionId && input.buyerSessionId !== input.requestId) {
       const token = buyerTokens.get(input.actorTelegramId, input.buyerSessionId);

@@ -4,6 +4,7 @@ import type { Plugin } from "../../types/Plugin.js";
 import { vpsService } from "../../vps/service.js";
 import type { VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
 import { clearVpsInput, setVpsInput } from "./input.js";
+import { getOs } from "../../vps/installer.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 
 interface Draft {
@@ -14,6 +15,7 @@ interface Draft {
   accountId?: string;
   plan?: VpsUiPlan;
   os?: string;
+  installChrome?: boolean;
   region?: string;
   order?: VpsUiOrder;
   checkout?: Promise<VpsUiOrder>;
@@ -37,6 +39,7 @@ export function vpsOrderText(order: VpsUiOrder): string {
   return `🖥️ ${serviceLabel(order.serviceType)}\n\nOrder: ${order._id}\nPaket: ${order.planName}\nSpek: ${order.sizeSlug}\nOS: ${order.os}\nRegion: ${order.region}\nHarga checkout: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP publik: ${order.ip || "belum tersedia"}`
     + (order.vcpus !== undefined && order.memory !== undefined && order.disk !== undefined ? `\nCPU: ${order.vcpus} vCPU · RAM: ${order.memory} MB · Disk: ${order.disk} GB` : "")
     + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "")
+    + (order.installChrome ? "\nChrome: + Chrome (gratis)" : "")
     + (order.needsToken || order.stage === "needs_token" ? "\n\nToken sementara tidak tersedia. Kirim ulang token akun/team yang sama untuk melanjutkan order ini." : "")
     + (order.serviceType === "install" ? `\n\n${feeNotice}` : "");
 }
@@ -128,7 +131,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
     const actor = actorOf(ctx);
     if (!draft.order) {
-      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}) });
+      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}) });
       try { draft.order = await draft.checkout; }
       finally { delete draft.checkout; }
     }
@@ -196,8 +199,36 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
               await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
               return;
             }
-            await checkout(ctx, draft);
+            if (getOs(os.os)?.family === "windows") {
+              const keyboard = new InlineKeyboard()
+                .text("Lanjut tanpa Chrome", `vps_chrome_${draft.id}_no`).row()
+                .text("+ Chrome (Gratis)", `vps_chrome_${draft.id}_yes`).row()
+                .text("🔙 Ganti OS", `vps_backos_${draft.id}`).text("Batal", "vps_home");
+              await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n📍 Lokasi: ${formatRegion(draft.region)}\n\nTambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, keyboard);
+            } else {
+              draft.installChrome = false;
+              await checkout(ctx, draft);
+            }
           }
+          return;
+        }
+        const backOs = /^vps_backos_([a-f0-9-]{36})$/.exec(data);
+        if (backOs) {
+          const draft = currentDraft(actor, backOs[1]!);
+          if (!draft.plan || !draft.region) throw new Error("Unknown selection");
+          delete draft.os; delete draft.installChrome;
+          const keyboard = new InlineKeyboard();
+          draft.plan.osPrices.forEach((os, i) => keyboard.text(`${os.label} · ${vpsPrice(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+          keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
+          await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(draft.region)}\n\nPilih Sistem Operasi (OS):`, keyboard);
+          return;
+        }
+        const chrome = /^vps_chrome_([a-f0-9-]{36})_(yes|no)$/.exec(data);
+        if (chrome) {
+          const draft = currentDraft(actor, chrome[1]!);
+          if (!draft.plan || !draft.os || !draft.region || getOs(draft.os)?.family !== "windows") throw new Error("Invalid Chrome selection");
+          draft.installChrome = chrome[2] === "yes";
+          await checkout(ctx, draft);
           return;
         }
         const list = /^vps_(my|history)_(\d{1,6})$/.exec(data);

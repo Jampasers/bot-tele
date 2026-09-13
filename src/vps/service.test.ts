@@ -70,18 +70,18 @@ test("checkout stores immutable price/spec snapshot and encrypted per-VPS passwo
   env(t);
   let saved: IVpsOrder | null = null;
   const id = randomUUID();
-  const plan = { _id: randomUUID(), name: "Setup", serviceType: "install", enabled: true, sizeSlug: "s-1vcpu-2gb", regions: ["sgp1"], osPrices: [{ os: "ubuntu24", label: "Ubuntu", price: 25000 }] };
+  const plan = { _id: randomUUID(), name: "Setup", serviceType: "install", enabled: true, sizeSlug: "s-1vcpu-2gb", regions: ["sgp1"], osPrices: [{ os: "windows2022", label: "Windows", price: 25000 }] };
   t.mock.method(VpsOrder, "findOne", (filter: { _id: string; buyerId?: string }) => query(() => saved && saved._id === filter._id && (!filter.buyerId || saved.buyerId === filter.buyerId) ? saved : null));
   t.mock.method(VpsPlan, "findOne", () => query(() => plan));
   t.mock.method(VpsOrder, "create", async (input: Record<string, unknown>) => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
   let validations = 0;
   t.mock.method(DigitalOceanClient.prototype, "account", async () => ({ identity: "team:buyer", uuid: "buyer", status: "active", statusMessage: "", dropletLimit: 2 }));
-  t.mock.method(DigitalOceanClient.prototype, "validateSelection", async () => { validations++; return { os: getOs("ubuntu24")!, size: { slug: "s-1vcpu-2gb", available: true, memory: 2048, vcpus: 1, disk: 50, regions: ["sgp1"], priceMonthly: 0 }, region: { slug: "sgp1", name: "Singapore", available: true, sizes: [] }, image: { id: 1, slug: "ubuntu-24-04-x64", name: "Ubuntu", regions: ["sgp1"], minDiskSize: 1 } }; });
+  t.mock.method(DigitalOceanClient.prototype, "validateSelection", async () => { validations++; return { os: getOs("windows2022")!, size: { slug: "s-1vcpu-2gb", available: true, memory: 2048, vcpus: 1, disk: 50, regions: ["sgp1"], priceMonthly: 0 }, region: { slug: "sgp1", name: "Singapore", available: true, sizes: [] }, image: { id: 1, slug: "ubuntu-24-04-x64", name: "Ubuntu", regions: ["sgp1"], minDiskSize: 1 } }; });
   await platform(async () => {
     buyerTokens.put("101", id, "offline_buyer_token_123456789", "team:buyer");
-    const input = { actorTelegramId: "101", chatId: "101", requestId: id, serviceType: "install" as const, planId: plan._id, os: "ubuntu24", region: "sgp1", buyerSessionId: id };
+    const input = { actorTelegramId: "101", chatId: "101", requestId: id, serviceType: "install" as const, planId: plan._id, os: "windows2022", region: "sgp1", installChrome: true, buyerSessionId: id };
     const first = await vpsService.checkout(input);
-    assert.equal(first.price, 25000); assert.equal(first.memory, 2048);
+    assert.equal(first.price, 25000); assert.equal(first.memory, 2048); assert.equal(first.installChrome, true);
     plan.osPrices[0]!.price = 99999;
     const again = await vpsService.checkout(input);
     assert.equal(again.price, 25000); assert.equal(validations, 1);

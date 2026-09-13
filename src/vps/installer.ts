@@ -139,12 +139,28 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; windowsPassword: string; os: string; orderId: string; }
+export interface WindowsInstallInput { ip: string; password: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; }
 export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
     if (os?.family !== "windows" || !os.windowsImageName) throw new InstallerError("validation");
     const directory = stateDirectory(input.orderId);
+    const chromeBatPatch = input.installChrome === true ? `
+chrome_bat_code = """    cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
+@echo off
+setlocal
+set "msi=%TEMP%\\google-chrome-enterprise.msi"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi' -OutFile '%msi%'"
+if errorlevel 1 exit /b 1
+msiexec.exe /i "%msi%" /qn /norestart
+set "code=%ERRORLEVEL%"
+del /q "%msi%" >nul 2>&1
+if "%code%"=="3010" exit /b 0
+exit /b %code%
+EOF_CHROME_INSTALL
+    unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
+    bats="$bats windows-install-chrome.bat\\"""
+` : "";
     // mkdir is the durable remote claim. An uncertain attempt is inspected, never executed a second time.
     // Caller must persist INSTALLING before calling and must never return here after scheduling reboot.
     const script = `set -eu
@@ -208,11 +224,14 @@ EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
     bats="$bats windows-fix-rdp.bat\\""""
 
+${chromeBatPatch}
+
 for line in lines:
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
         new_lines.append(fix_bat_code)
+${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
 
 with open(trans_path, 'w', encoding='utf-8') as f:
     f.write('\\n'.join(new_lines) + '\\n')

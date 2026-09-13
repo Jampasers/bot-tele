@@ -3,7 +3,7 @@ import { Schema, model } from "mongoose";
 export interface IVpsOrder {
   _id: string; tenantId: string; buyerId: string; chatId: string;
   service: "purchase" | "install";
-  snapshot: { planId: string; planName: string; size: string; region: string; os: string; image: string; price: number; vcpus: number; memory: number; disk: number };
+  snapshot: { planId: string; planName: string; size: string; region: string; os: string; image: string; price: number; vcpus: number; memory: number; disk: number; installChrome?: boolean };
   paymentStatus: "unpaid" | "paying" | "paid" | "refunding" | "refunded" | "cancelled";
   paymentMethod: "balance" | "qris" | null; paymentPaidAt: Date | null;
   paymentInvoice?: { reference: string; merchantId: string; amount: number; createdAt: Date; expiresAt: Date; matchedTransactionId?: string; paidAt?: Date };
@@ -23,7 +23,7 @@ const invoice = new Schema({ reference: String, merchantId: String, amount: Numb
 const schema = new Schema<IVpsOrder>({
   _id: { type: String, required: true }, tenantId: { type: String, required: true, enum: ["platform"] },
   buyerId: { type: String, required: true }, chatId: { type: String, required: true }, service: { type: String, required: true, enum: ["purchase", "install"] },
-  snapshot: { type: new Schema({ planId: String, planName: String, size: String, region: String, os: String, image: String, price: { type: Number, min: 1, required: true }, vcpus: Number, memory: Number, disk: Number }, { _id: false }), required: true, immutable: true },
+  snapshot: { type: new Schema({ planId: String, planName: String, size: String, region: String, os: String, image: String, price: { type: Number, min: 1, required: true }, vcpus: Number, memory: Number, disk: Number, installChrome: { type: Boolean, default: false } }, { _id: false }), required: true, immutable: true },
   paymentStatus: { type: String, enum: ["unpaid", "paying", "paid", "refunding", "refunded", "cancelled"], default: "unpaid" },
   paymentMethod: { type: String, enum: ["balance", "qris", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
   paymentInvoiceLeaseUntil: { type: Date, default: null }, refundReason: { type: String, default: null }, refundedAt: { type: Date, default: null },

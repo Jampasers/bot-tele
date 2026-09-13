@@ -131,7 +131,7 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     const ssh: SshExecutor = async (input) => { calls.push(input); await Promise.resolve(); return { code: 0,
         output: `${input.password}\nExampleWindows987!xyz\nhttp://IP:80/aB1cD2eF\n__VPS_PREPARED__\n` }; };
     const inputs = [
-        { ip: "203.0.113.10", password: fakePassword, windowsPassword: "ExampleWindows987!xyz", os: "windows2019", orderId: "order-one" },
+        { ip: "203.0.113.10", password: fakePassword, windowsPassword: "ExampleWindows987!xyz", os: "windows2019", orderId: "order-one", installChrome: true },
         { ip: "203.0.113.11", password: "OtherPassword123!xyz", windowsPassword: "AnotherWindows123!xyz", os: "windows2022", orderId: "order-two" },
     ];
     const results = await Promise.all(inputs.map((input) => launchWindows(input, undefined, { ssh })));
@@ -143,6 +143,8 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.ok(calls[0]?.stdin?.includes('if ! mkdir "$state"')); assert.ok(calls[0]?.stdin?.includes('touch "$state/prepared"'));
     assert.ok(calls[0]?.stdin?.includes("patch_trans.py")); assert.ok(calls[0]?.stdin?.includes("DisableCAD")); assert.ok(calls[0]?.stdin?.includes("UserAuthentication"));
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
+    assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
+    assert.ok(!calls[1]?.stdin?.includes("windows-install-chrome.bat"));
     assert.equal(results[0]?.logUrl, "http://203.0.113.10/aB1cD2eF"); assert.equal(results[1]?.logUrl, "http://203.0.113.11/aB1cD2eF");
     assert.ok(!JSON.stringify(results).includes(fakePassword)); assert.ok(!JSON.stringify(results).includes("ExampleWindows"));
 });

@@ -148,14 +148,29 @@ test("selection snapshots configured price and duplicate checkout uses the same 
   await bot.handleUpdate(update(4, callback(calls, "vps_region_"), true));
   assert.match(JSON.stringify(calls), /43\.210/);
   const os = callback(calls, "vps_os_");
-  const one = bot.handleUpdate(update(5, os, true));
-  const two = bot.handleUpdate(update(6, os, true));
+  await bot.handleUpdate(update(5, os, true));
+  const chrome = callback(calls, "vps_chrome_");
+  const one = bot.handleUpdate(update(6, chrome, true));
+  const two = bot.handleUpdate(update(7, chrome, true));
   await new Promise(resolve => setImmediate(resolve));
   release!();
   await Promise.all([one, two]);
   assert.equal(checkoutCalls, 1);
   assert.match(replies(calls), /Harga checkout: Rp\s*43\.210/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-private-token/);
+});
+
+test("Windows checkout can opt into the free Chrome installer", async () => {
+  let checkoutInput: Record<string, unknown> | undefined;
+  const { bot, calls } = await harness({ checkout: async input => { checkoutInput = input; return { ...ORDER, installChrome: true }; } });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(3, callback(calls, "vps_region_"), true));
+  await bot.handleUpdate(update(4, callback(calls, "vps_os_"), true));
+  const chrome = (calls.at(-1)?.payload["reply_markup"] as { inline_keyboard?: { callback_data?: string }[][] } | undefined)?.inline_keyboard?.flat().find(button => button.callback_data?.endsWith("_yes"))?.callback_data;
+  assert.ok(chrome);
+  await bot.handleUpdate(update(5, chrome, true));
+  assert.equal(checkoutInput?.installChrome, true);
 });
 
 test("draft callback from another buyer cannot checkout", async () => {
