@@ -7,7 +7,7 @@ import { buildCatalogKeyboard, buildCatalogText } from "../../../src/plugins/pan
 import { createVpsPlugin, vpsOrderText } from "../../../src/plugins/vps/index.js";
 import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vpsadmin/index.js";
 import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
-import type { VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
+import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
 import { catalogPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
@@ -464,3 +464,75 @@ test("unreadable account metrics remain unknown and status text does not invent 
   assert.match(vpsOrderText({ ...ORDER, stage: "monitoring", evidence: "Port RDP terbuka; login Windows belum diverifikasi." }), /login Windows belum diverifikasi/);
   assert.match(vpsCredentialText({ id: "test", label: "Test", priority: 0, enabled: true, tokenStatus: "ok", accountStatus: "active", available: 1 }), /Kesiapan: Siap dicoba/);
 });
+
+test("buyer DO install flow fetches availability and filters regions to only supported ones", async () => {
+  const plan: VpsUiPlan = {
+    id: "plan-filtered", name: "2 vCPU · 4 GB", serviceType: "install", sizeSlug: "s-2vcpu-4gb",
+    regions: ["nyc1", "sgp1", "atl1"],
+    regionLabels: { nyc1: "New York 1 (nyc1)", sgp1: "Singapore (sgp1)", atl1: "Atlanta (atl1)" },
+    osPrices: [{ os: "ubuntu24", label: "Ubuntu 24.04", price: 50000, family: "linux" }],
+    enabled: true,
+  };
+  const availability: AvailabilityMap = new Map([
+    ["s-2vcpu-4gb", new Set(["nyc1", "sgp1"])], // atl1 is NOT supported by buyer DO
+  ]);
+  let fetchedBuyer = false;
+  const { bot, calls } = await harness({
+    listPlans: async () => [plan],
+    acceptBuyerToken: async () => ({ accountId: "team-custom" }),
+    fetchBuyerAvailability: async () => { fetchedBuyer = true; return availability; },
+  });
+  await bot.handleUpdate(update(1, "vps_install_do", true));
+  await bot.handleUpdate(update(2, "synthetic-buyer-token-1234567890"));
+  assert.ok(fetchedBuyer, "should fetch buyer availability after token entry");
+  // Select plan
+  await bot.handleUpdate(update(3, callback(calls, "vps_plan_"), true));
+  const regionStep = calls.at(-1)!;
+  assert.match(JSON.stringify(regionStep), /New York 1 \(nyc1\)/);
+  assert.match(JSON.stringify(regionStep), /Singapore \(sgp1\)/);
+  assert.doesNotMatch(JSON.stringify(regionStep), /Atlanta \(atl1\)/);
+});
+
+test("buyer DO selection informs buyer when a spec has no supported regions in their account", async () => {
+  const plan: VpsUiPlan = {
+    id: "plan-unsupported", name: "8 vCPU · 16 GB", serviceType: "install", sizeSlug: "s-8vcpu-16gb",
+    regions: ["atl1", "ric1"],
+    osPrices: [{ os: "ubuntu24", label: "Ubuntu 24.04", price: 100000, family: "linux" }],
+    enabled: true,
+  };
+  const availability: AvailabilityMap = new Map(); // empty: no regions support this spec
+  const { bot, calls } = await harness({
+    listPlans: async () => [plan],
+    acceptBuyerToken: async () => ({ accountId: "team-small" }),
+    fetchBuyerAvailability: async () => availability,
+  });
+  await bot.handleUpdate(update(1, "vps_install_do", true));
+  await bot.handleUpdate(update(2, "synthetic-buyer-token-1234567890"));
+  await bot.handleUpdate(update(3, callback(calls, "vps_plan_"), true));
+  assert.match(replies(calls), /tidak tersedia di region mana pun untuk akun Anda/);
+  assert.match(JSON.stringify(calls.at(-1)), /vps_page_/);
+});
+
+test("purchase flow uses platform availability to filter regions", async () => {
+  const plan: VpsUiPlan = {
+    id: "plan-purchase", name: "2 vCPU · 4 GB", serviceType: "purchase", sizeSlug: "s-2vcpu-4gb",
+    regions: ["nyc1", "sgp1", "mem1"],
+    regionLabels: { nyc1: "New York 1 (nyc1)", sgp1: "Singapore (sgp1)", mem1: "Memphis (mem1)" },
+    osPrices: [{ os: "ubuntu24", label: "Ubuntu 24.04", price: 150000, family: "linux" }],
+    enabled: true,
+  };
+  const availability: AvailabilityMap = new Map([
+    ["s-2vcpu-4gb", new Set(["nyc1", "sgp1"])], // mem1 is NOT supported on platform account
+  ]);
+  const { bot, calls } = await harness({
+    listPlans: async () => [plan],
+    fetchPlatformAvailability: async () => availability,
+  });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+  const regionStep = calls.at(-1)!;
+  assert.match(JSON.stringify(regionStep), /New York 1 \(nyc1\)/);
+  assert.match(JSON.stringify(regionStep), /Singapore \(sgp1\)/);
+  assert.doesNotMatch(JSON.stringify(regionStep), /Memphis \(mem1\)/);
+});
+

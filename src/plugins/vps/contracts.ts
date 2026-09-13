@@ -1,3 +1,5 @@
+/** sizeSlug → Set of regionSlugs that support that size on a specific DO account. */
+export type AvailabilityMap = Map<string, Set<string>>;
 /** Sanitized UI contracts. Tokens and decrypted passwords never occur in order/list DTOs. */
 export type VpsServiceType = "purchase" | "install";
 export interface VpsUiPlan {
@@ -64,6 +66,17 @@ export interface VpsUiDependencies {
   listPlans(serviceType?: VpsServiceType, includeDisabled?: boolean): Promise<VpsUiPlan[]>;
   acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }>;
   clearBuyerToken(actor: string, orderId: string): void;
+  /**
+   * Fetch and cache which regions support each size slug on the buyer's DO account.
+   * Returns null if token is not available or the DO API call fails.
+   * Results are cached in the token vault for the session duration.
+   */
+  fetchBuyerAvailability?(actor: string, sessionId: string): Promise<AvailabilityMap | null>;
+  /**
+   * Fetch which regions support each size slug on the platform's active DO credential.
+   * Returns null if no active credential is configured or the DO API call fails.
+   */
+  fetchPlatformAvailability?(): Promise<AvailabilityMap | null>;
   checkout(input: { actorTelegramId: string; chatId: string; requestId: string; serviceType: VpsServiceType; planId: string; os: string; region: string; installChrome?: boolean; buyerSessionId?: string; direct?: { ip: string; username: string; password: string } }): Promise<VpsUiOrder>;
   listOwned(actor: string, options: { purchaseOnly: boolean; offset: number; limit: number }): Promise<VpsUiOrder[]>;
   getOwned(actor: string, orderId: string): Promise<VpsUiOrder | null>;
@@ -81,3 +94,4 @@ export interface VpsUiDependencies {
   updateCredential(actor: string, id: string, input: { enabled?: boolean; priority?: number }): Promise<void>;
   updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string; region?: string }): Promise<void>;
 }
+

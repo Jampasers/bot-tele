@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
 import { vpsService } from "../../vps/service.js";
-import type { VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
+import type { AvailabilityMap, VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
 import { clearVpsInput, setVpsInput } from "./input.js";
 import { getOs } from "../../vps/installer.js";
 import { planPrice } from "../../vps/catalogPlans.js";
@@ -22,7 +22,16 @@ interface Draft {
   order?: VpsUiOrder;
   checkout?: Promise<VpsUiOrder>;
   direct?: { ip: string; username: string; password: string };
+  availability?: AvailabilityMap;
 }
+
+function filterRegions(regions: string[], sizeSlug: string, availability?: AvailabilityMap): string[] {
+  if (!availability) return regions;
+  const supported = availability.get(sizeSlug);
+  if (!supported) return [];
+  return regions.filter(r => supported.has(r));
+}
+
 const baseHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
   .text("🛒 VPS DO", "vps_buy").text("🛠 Jasa install", "vps_install").row()
   .text("🖥️ VPS Saya", "vps_my_0").text("📋 Riwayat pesanan", "vps_history_0").row()
@@ -100,14 +109,17 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             timeout: "Request ke DigitalOcean melewati batas waktu. Coba lagi.",
             network: "Koneksi ke DigitalOcean terputus. Periksa jaringan dan coba lagi.",
             api: "Respons API DigitalOcean tidak dapat dibaca. Coba lagi.",
-            validation: "Pilihan VPS (region/spek/OS) tidak tersedia di DigitalOcean.",
+            validation: "Spek atau region yang dipilih tidak tersedia di DigitalOcean. Coba pilih region atau spek VPS yang berbeda.",
             cancelled: "Pemeriksaan DigitalOcean dihentikan.",
           };
           const code = `VPS_DO_${err.kind.toUpperCase()}`;
           console.warn(`[${code}]`, ref, err.kind);
+          const doKeyboard = err.kind === "validation"
+            ? new InlineKeyboard().text("🛒 Coba VPS DO lain", "vps_buy").text("🛠 Jasa install", "vps_install").row().text("🔙 Menu VPS", "vps_home")
+            : homeKeyboard();
           await ctx.reply(
             `${kindMap[err.kind] ?? "Layanan DigitalOcean tidak dapat diakses."}\n\nReferensi: ${ref} [${code}]`,
-            { reply_markup: homeKeyboard() },
+            { reply_markup: doKeyboard },
           ).catch(() => {});
         } else if (err instanceof Error && /^(Paket|Region|OS|Pilihan|Harga|Akun|Chrome|Koneksi|Input|Checkout|Token|Kirim ulang|Pemesanan VPS|VPS tidak)/.test(err.message)) {
           // Safe, user-facing error messages thrown explicitly from service/checkout logic.
@@ -161,7 +173,12 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const plans = direct ? listedPlans.filter(plan => pricedOs(plan, undefined, true).length > 0) : listedPlans;
     const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans };
     drafts.set(actor, draft);
-    if (serviceType === "purchase") { await choosePlan(ctx, draft); return; }
+    if (serviceType === "purchase") {
+      const avail = await deps.fetchPlatformAvailability?.().catch(() => null);
+      if (avail) draft.availability = avail;
+      await choosePlan(ctx, draft);
+      return;
+    }
     if (direct) {
       setVpsInput(actor, { secret: false, cancel: () => dropDraft(actor), receive: async (inputCtx, ip) => {
         draft.direct = { ip: ip.trim(), username: "", password: "" };
@@ -187,6 +204,8 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const current = currentDraft(actor, draft.id);
         current.accountId = (await deps.acceptBuyerToken(actor, current.id, token.trim())).accountId;
         if (drafts.get(actor) !== current) { deps.clearBuyerToken(actor, current.id); return; }
+        const avail = await deps.fetchBuyerAvailability?.(actor, current.id).catch(() => null);
+        if (avail) current.availability = avail;
         await choosePlan(inputCtx, current);
       },
     });
@@ -225,7 +244,23 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         draft.order = await draft.checkout;
         // Only clear password after a confirmed successful checkout, so retries still work.
         if (draft.direct) draft.direct.password = "";
-      } finally { delete draft.checkout; }
+      } catch (err) {
+        delete draft.checkout;
+        if (err instanceof DigitalOceanError && err.kind === "validation") {
+          // Surface region/size incompatibility with actionable buttons to fix selection.
+          const planName = draft.plan.sizeLabel ?? draft.plan.name;
+          const regionName = draft.plan.regionLabels?.[draft.region] ?? formatRegion(draft.region);
+          await vpsReply(ctx,
+            `❌ Spek atau region tidak tersedia di DigitalOcean.\n\n📦 Spek: ${planName}\n📍 Region: ${regionName}\n\nKombinasi ini tidak didukung oleh DigitalOcean. Silakan pilih region atau spek yang berbeda.`,
+            new InlineKeyboard()
+              .text("🗺 Ganti Region", `vps_backregion_${draft.id}`).row()
+              .text("📦 Ganti Spek", `vps_page_${draft.id}_0`).row()
+              .text("🔙 Menu VPS", "vps_home"),
+          );
+          return;
+        }
+        throw err;
+      }
     }
     await showOrder(ctx, draft.order._id);
   }
@@ -251,8 +286,18 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           const draft = currentDraft(actor, backRegion[1]!);
           if (!draft.plan) throw new Error("Unknown plan");
           delete draft.region; delete draft.os;
+          const regions = filterRegions(draft.plan.regions, draft.plan.sizeSlug, draft.availability);
+          if (!regions.length) {
+            await vpsReply(ctx, `❌ Spek ${sizeLabel(draft.plan)} tidak tersedia di region mana pun untuk akun Anda.\n\nSilakan pilih spek lain.`,
+              new InlineKeyboard().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home"));
+            return;
+          }
           const keyboard = new InlineKeyboard();
-          draft.plan.regions.forEach((region, i) => keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row());
+          draft.plan.regions.forEach((region, i) => {
+            if (regions.includes(region)) {
+              keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row();
+            }
+          });
           keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
           await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           return;
@@ -276,8 +321,18 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
                 .text("+ Chrome (Gratis)", `vps_chrome_${draft.id}_yes`).row().text("Batal", "vps_home"));
               return;
             }
+            const regions = filterRegions(plan.regions, plan.sizeSlug, draft.availability);
+            if (!regions.length) {
+              await vpsReply(ctx, `❌ Spek ${sizeLabel(plan)} tidak tersedia di region mana pun untuk akun Anda.\n\nSilakan pilih spek lain.`,
+                new InlineKeyboard().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home"));
+              return;
+            }
             const keyboard = new InlineKeyboard();
-            plan.regions.forEach((region, i) => keyboard.text(regionLabel(plan, region), `vps_region_${draft.id}_${i}`).row());
+            plan.regions.forEach((region, i) => {
+              if (regions.includes(region)) {
+                keyboard.text(regionLabel(plan, region), `vps_region_${draft.id}_${i}`).row();
+              }
+            });
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
             await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice && !draft.direct ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.direct ? "\n\nPilih lokasi VPS milik Anda." : draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else if (selection[1] === "region") {
@@ -298,8 +353,13 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             if (!os || !draft.plan) throw new Error("Unknown OS");
             draft.os = os.os;
             if (!draft.region) {
+              const regions = filterRegions(draft.plan.regions, draft.plan.sizeSlug, draft.availability);
               const keyboard = new InlineKeyboard();
-              draft.plan.regions.forEach((region, i) => keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row());
+              draft.plan.regions.forEach((region, i) => {
+                if (regions.includes(region)) {
+                  keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row();
+                }
+              });
               keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
               await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
               return;

@@ -11,7 +11,7 @@ import { catalogPlans, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
-import type { VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
+import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
 
 const validId = (id: string): boolean => /^[a-f0-9-]{36}$/.test(id);
 export async function ownedOrder(actor: string, orderId: string, includeSecret = false): Promise<IVpsOrder | null> {
@@ -127,6 +127,56 @@ async function cancel(actor: string, orderId: string): Promise<void> {
   if (cancelled.paymentStatus === "paid") await refundVpsOrder(orderId, "cancelled_before_create");
 }
 
+let platformAvailabilityCache: { map: AvailabilityMap; expiresAt: number } | null = null;
+
+async function fetchBuyerAvailability(actor: string, sessionId: string): Promise<AvailabilityMap | null> {
+  assertVpsEnabled();
+  const cached = buyerTokens.getAvailability(actor, sessionId);
+  if (cached) return cached;
+  const tokenEntry = buyerTokens.get(actor, sessionId);
+  if (!tokenEntry) return null;
+  try {
+    const client = new DigitalOceanClient(tokenEntry.token, { timeoutMs: 10_000 });
+    const sizes = await client.sizes();
+    const map: AvailabilityMap = new Map();
+    for (const s of sizes) {
+      if (s.available && s.regions?.length) {
+        map.set(s.slug, new Set(s.regions));
+      }
+    }
+    buyerTokens.putAvailability(actor, sessionId, map);
+    return map;
+  } catch (err) {
+    console.warn("[VPS_BUYER_AVAILABILITY_ERROR]", err);
+    return null;
+  }
+}
+
+async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
+  assertVpsEnabled();
+  if (platformAvailabilityCache && platformAvailabilityCache.expiresAt > Date.now()) {
+    return platformAvailabilityCache.map;
+  }
+  const credentials = await VpsCredential.find({ tenantId: "platform", enabled: true }).sort({ priority: 1 }).lean();
+  for (const c of credentials) {
+    try {
+      const candidate = await providerForCredential(c._id, c.accountId);
+      const sizes = await candidate.sizes();
+      const map: AvailabilityMap = new Map();
+      for (const s of sizes) {
+        if (s.available && s.regions?.length) {
+          map.set(s.slug, new Set(s.regions));
+        }
+      }
+      platformAvailabilityCache = { map, expiresAt: Date.now() + 5 * 60_000 };
+      return map;
+    } catch {
+      // try next credential
+    }
+  }
+  return null;
+}
+
 export const vpsService: VpsUiDependencies = {
   enabled: vpsEnabled,
   listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name, family: os.family })),
@@ -174,6 +224,8 @@ export const vpsService: VpsUiDependencies = {
   },
   acceptBuyerToken,
   clearBuyerToken: (actor, orderId) => buyerTokens.delete(actor, orderId),
+  fetchBuyerAvailability,
+  fetchPlatformAvailability,
   checkout,
   async listOwned(actor, options) {
     assertVpsPlatform();
