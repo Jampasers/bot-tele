@@ -21,10 +21,11 @@ interface Draft {
   checkout?: Promise<VpsUiOrder>;
   direct?: { ip: string; username: string; password: string };
 }
-const homeKeyboard = (): InlineKeyboard => new InlineKeyboard()
+const baseHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
   .text("🛒 Beli VPS", "vps_buy").text("🛠 Jasa setup/install", "vps_install").row()
   .text("🖥️ VPS Saya", "vps_my_0").text("📋 Riwayat pesanan", "vps_history_0").row()
   .text("🔙 Catalog", "menu_catalog");
+const homeKeyboard = (): InlineKeyboard => baseHomeKeyboard().row().text("Install Windows VPS sendiri", "vps_install_direct");
 const directHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
   .text("VPS DigitalOcean", "vps_buy").text("Jasa install DO", "vps_install").row()
   .text("Install Windows VPS sendiri", "vps_install_direct").row()
@@ -79,7 +80,6 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     };
   }
   async function showHome(ctx: Context): Promise<void> {
-    await ctx.reply("Pilih sumber VPS untuk jasa install Windows:", { reply_markup: new InlineKeyboard().text("Jasa install dari DO", "vps_install").row().text("Install di VPS sendiri", "vps_install_direct") });
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
     await vpsReply(ctx, `🖥️ VPS DigitalOcean\n\nBeli VPS memakai akun toko atau gunakan jasa setup/install pada akun DigitalOcean milikmu.\n\n${feeNotice}${deps.enabled() ? "" : "\n\nPemesanan baru sementara dinonaktifkan."}`, homeKeyboard());
