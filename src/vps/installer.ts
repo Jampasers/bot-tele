@@ -152,30 +152,102 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
 chrome_bat_code = r'''    cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]'Ssl3, Tls, Tls11, Tls12' -bor 3072 -bor 12288
 $ProgressPreference = 'SilentlyContinue'
-$url = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
-$out = "$env:TEMP\\google-chrome-enterprise.msi"
+$ErrorActionPreference = 'Continue'
 
+# 1. Tunggu koneksi internet & DNS dl.google.com siap (maks 60 detik)
 for ($i = 0; $i -lt 30; $i++) {
     try {
-        $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile($url, $out)
-        if ((Test-Path $out) -and ((Get-Item $out).Length -gt 10485760)) { break }
+        $ips = [System.Net.Dns]::GetHostAddresses('dl.google.com')
+        if ($ips -and $ips.Count -gt 0) { break }
+    } catch {}
+    Start-Sleep -Seconds 2
+}
+
+$urlMsi = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
+$urlExe = 'https://dl.google.com/dl/chrome/install/ChromeStandaloneSetup64.exe'
+$outMsi = Join-Path $env:TEMP 'google-chrome-enterprise.msi'
+$outExe = Join-Path $env:TEMP 'ChromeStandaloneSetup64.exe'
+
+$wc = New-Object System.Net.WebClient
+$wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
+
+# 2. Unduh Chrome Enterprise MSI (prioritas utama)
+$downloaded = $false
+for ($i = 0; $i -lt 20; $i++) {
+    try {
+        $wc.DownloadFile($urlMsi, $outMsi)
+        if ((Test-Path $outMsi) -and ((Get-Item $outMsi).Length -gt 10485760)) {
+            $downloaded = $true
+            break
+        }
     } catch {
         Start-Sleep -Seconds 5
     }
 }
 
-if (Test-Path $out) {
-    Start-Process msiexec.exe -ArgumentList "/i \`"$out\`" /qn /norestart" -Wait
+# 3. Fallback unduh Standalone EXE jika MSI gagal diunduh
+if (-not $downloaded) {
+    for ($i = 0; $i -lt 10; $i++) {
+        try {
+            $wc.DownloadFile($urlExe, $outExe)
+            if ((Test-Path $outExe) -and ((Get-Item $outExe).Length -gt 10485760)) {
+                $downloaded = $true
+                break
+            }
+        } catch {
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
+# 4. Instalasi Google Chrome
+if (Test-Path $outMsi) {
+    Start-Service msiserver -ErrorAction SilentlyContinue
+    $log = Join-Path $env:TEMP 'chrome-msi-install.log'
+    $proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -Wait -PassThru
     Start-Sleep -Seconds 2
-    Remove-Item -Force $out -ErrorAction SilentlyContinue
+    Remove-Item -Force $outMsi -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+        try {
+            $wc.DownloadFile($urlExe, $outExe)
+            if (Test-Path $outExe) {
+                Start-Process -FilePath $outExe -ArgumentList "/silent /install" -Wait
+                Remove-Item -Force $outExe -ErrorAction SilentlyContinue
+            }
+        } catch {}
+    }
+} elseif (Test-Path $outExe) {
+    Start-Process -FilePath $outExe -ArgumentList "/silent /install" -Wait
+    Start-Sleep -Seconds 2
+    Remove-Item -Force $outExe -ErrorAction SilentlyContinue
+}
+
+# 5. Pastikan shortcut desktop ada di Public Desktop untuk semua user
+$pf = [Environment]::GetFolderPath('ProgramFiles')
+$pfx = [Environment]::GetFolderPath('ProgramFilesX86')
+$chromePaths = @(
+    (Join-Path $pf 'Google\\Chrome\\Application\\chrome.exe'),
+    (Join-Path $pfx 'Google\\Chrome\\Application\\chrome.exe')
+)
+$chromeExe = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($chromeExe) {
+    $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+    $link = Join-Path $desktop 'Google Chrome.lnk'
+    if (-not (Test-Path $link)) {
+        try {
+            $wsh = New-Object -ComObject WScript.Shell
+            $sc = $wsh.CreateShortcut($link)
+            $sc.TargetPath = $chromeExe
+            $sc.Save()
+        } catch {}
+    }
 }
 EOF_CHROME_PS1
     cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1" >> "%SystemDrive%\\chrome-install.log" 2>&1
 del "%SystemDrive%\\windows-install-chrome.ps1" >nul 2>&1
 del "%~f0" >nul 2>&1
 EOF_CHROME_INSTALL
@@ -218,6 +290,7 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 
 new_lines = []
 bats_found = False
+gpo_found = False
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
@@ -321,15 +394,17 @@ EOF_RDP_FIX
 ${chromeBatPatch}
 
 for line in lines:
+    if not gpo_found and line.strip() == 'if $use_gpo; then':
+        gpo_found = True
+${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
         new_lines.append(fix_bat_code)
-${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
 
 with open(trans_path, 'w', encoding='utf-8') as f:
     f.write('\\n'.join(new_lines) + '\\n')
-print('[PATCH] trans.sh patched: bats=' + str(bats_found))
+print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', gpo=' + str(gpo_found))
 EOF_PATCH_PY
 
 python3 -c '
