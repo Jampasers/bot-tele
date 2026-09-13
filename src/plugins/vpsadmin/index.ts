@@ -2,13 +2,15 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
 import { isAdmin } from "../../core/admin.js";
 import { vpsService } from "../../vps/service.js";
-import type { VpsCredentialFilter, VpsServiceType, VpsUiCredential, VpsUiDependencies } from "../vps/contracts.js";
+import { planPrice } from "../../vps/catalogPlans.js";
+import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "../vps/contracts.js";
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
 
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
-  .text("💰 Paket & harga", "vpa_plans_0").text("➕ Tambah paket", "vpa_addplan").row()
+  .text("💰 Harga per spek / region / OS", "vpa_plans_0").row()
+  .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🔙 Admin", "adm_home");
 const known = (value: string | number | null | undefined): string => value === null || value === undefined || value === "" ? "belum diketahui" : String(value).slice(0, 400);
 export function vpsCredentialText(credential: VpsUiCredential): string {
@@ -25,37 +27,6 @@ function shortText(value: string, max = 80): string {
   const result = value.trim();
   if (!result || result.length > max || /[\r\n\x00-\x1f]/.test(result)) throw new Error("Invalid label");
   return result;
-}
-
-export const STANDARD_SIZES = [
-  { label: "1 vCPU · 1 GB RAM (25GB SSD)", slug: "s-1vcpu-1gb" },
-  { label: "1 vCPU · 2 GB RAM (50GB SSD)", slug: "s-1vcpu-2gb" },
-  { label: "2 vCPU · 2 GB RAM (60GB SSD)", slug: "s-2vcpu-2gb" },
-  { label: "2 vCPU · 4 GB RAM (80GB SSD)", slug: "s-2vcpu-4gb" },
-  { label: "4 vCPU · 8 GB RAM (160GB SSD)", slug: "s-4vcpu-8gb" },
-  { label: "8 vCPU · 16 GB RAM (320GB SSD)", slug: "s-8vcpu-16gb" },
-  { label: "1 vCPU · 512 MB RAM (10GB SSD)", slug: "s-1vcpu-512mb-10gb" },
-] as const;
-
-export const STANDARD_REGIONS = [
-  { label: "🇸🇬 Singapore (sgp1)", regions: ["sgp1"] },
-  { label: "🇩🇪 Frankfurt (fra1)", regions: ["fra1"] },
-  { label: "🇬🇧 London (lon1)", regions: ["lon1"] },
-  { label: "🇳🇱 Amsterdam (ams3)", regions: ["ams3"] },
-  { label: "🇺🇸 New York (nyc1, nyc3)", regions: ["nyc1", "nyc3"] },
-  { label: "🇺🇸 San Francisco (sfo3)", regions: ["sfo3"] },
-  { label: "🇮🇳 Bangalore (blr1)", regions: ["blr1"] },
-  { label: "🇦🇺 Sydney (syd1)", regions: ["syd1"] },
-  { label: "🇨🇦 Toronto (tor1)", regions: ["tor1"] },
-  { label: "🌐 Semua Populer (sgp1, fra1, lon1, ams3, nyc1, nyc3, sfo3)", regions: ["sgp1", "fra1", "lon1", "ams3", "nyc1", "nyc3", "sfo3"] },
-] as const;
-
-interface PendingPlan {
-  name: string;
-  serviceType: VpsServiceType;
-  sizeSlug?: string;
-  regions?: string[];
-  expiresAt: number;
 }
 
 export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
@@ -89,13 +60,30 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       .text(credential.enabled ? "Nonaktifkan" : "Aktifkan", `vpa_enable_${id}_${credential.enabled ? "0" : "1"}`).text("Prioritas", `vpa_priority_${id}`).row()
       .text("🔙 Token & akun", "vpa_tokens_all_0"));
   }
-  async function planDetail(ctx: Context, id: string): Promise<void> {
+  async function getPlan(id: string) {
     const plan = (await deps.listPlans(undefined, true)).find(item => item.id === id);
-    if (!plan) throw new Error("Plan unavailable");
+    if (!plan) throw new Error("Spec unavailable");
+    return plan;
+  }
+  async function planDetail(ctx: Context, id: string): Promise<void> {
+    const plan = await getPlan(id);
     const keyboard = new InlineKeyboard();
-    plan.osPrices.forEach((os, index) => keyboard.text(`Ubah harga ${os.label}`, `vpa_price_${id}_${index}`).row());
-    keyboard.text(plan.enabled ? "Nonaktifkan paket" : "Aktifkan paket", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Paket", "vpa_plans_0");
-    await vpsReply(ctx, `💰 ${plan.name}\n\nLayanan: ${plan.serviceType === "install" ? "Jasa setup/install" : "Beli VPS"}\nSpek: ${plan.sizeSlug}\nRegion: ${plan.regions.join(", ")}\nStatus: ${plan.enabled ? "aktif" : "nonaktif"}\n\n${plan.osPrices.map(os => `${os.label}: ${vpsPrice(os.price)}`).join("\n")}\n\nPerubahan harga hanya berlaku pada checkout baru.`, keyboard);
+    plan.regions.forEach((region, index) => keyboard.text(plan.regionLabels?.[region] ?? region, `vpa_os_${id}_${index}_0`).row());
+    keyboard.text(plan.enabled ? "Nonaktifkan spek" : "Aktifkan spek", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Spek & layanan", "vpa_plans_0");
+    await vpsReply(ctx, `💰 ${plan.serviceType === "install" ? "Jasa install" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\n\nPilih region untuk mengatur harga setiap OS. Harga belum diatur berarti kombinasi belum dapat dibayar.`, keyboard);
+  }
+  async function osPrices(ctx: Context, id: string, regionIndex: number, offset: number): Promise<void> {
+    const plan = await getPlan(id), region = plan.regions[regionIndex];
+    if (!region) throw new Error("Region unavailable");
+    const keyboard = new InlineKeyboard();
+    plan.osPrices.slice(offset, offset + 10).forEach((os, index) => {
+      const price = planPrice(plan, region, os.os);
+      keyboard.text(`${os.label} · ${price ? vpsPrice(price) : "Belum diatur"}`, `vpa_set_${id}_${regionIndex}_${offset + index}`).row();
+    });
+    if (offset) keyboard.text("← Sebelumnya", `vpa_os_${id}_${regionIndex}_${Math.max(0, offset - 10)}`);
+    if (offset + 10 < plan.osPrices.length) keyboard.text("Berikutnya →", `vpa_os_${id}_${regionIndex}_${offset + 10}`);
+    keyboard.row().text("🔙 Region", `vpa_plan_${id}`);
+    await vpsReply(ctx, `💰 ${plan.serviceType === "install" ? "Jasa install" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}\nRegion: ${plan.regionLabels?.[region] ?? region}\n\nPilih OS untuk mengisi harga Rupiah. Perubahan berlaku pada checkout baru.`, keyboard);
   }
   async function addToken(ctx: Context): Promise<void> {
     const actor = actorOf(ctx);
@@ -116,58 +104,32 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     await vpsReply(ctx, "➕ Tambah token toko\n\n(1/3) Kirim label akun/token (maksimal 80 karakter). Ketik /batal untuk membatalkan.", new InlineKeyboard().text("Batal", "vpa_home"));
   }
 
-  async function promptSize(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
-    const keyboard = new InlineKeyboard();
-    STANDARD_SIZES.forEach((size, index) => keyboard.text(size.label, `vpa_newsz_${index}`).row());
-    keyboard.text("Batal", "vpa_home");
-
-    input(actor, async (sizeCtx, sizeValue) => {
-      const sizeSlug = shortText(sizeValue, 64);
-      if (!/^[a-z0-9-]+$/.test(sizeSlug)) throw new Error("Invalid size");
-      pending.sizeSlug = sizeSlug;
-      await promptRegions(sizeCtx, actor, pending);
-    });
-
-    await vpsReply(ctx, `➕ Paket ${pending.serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(2/5) Pilih slug size DigitalOcean untuk "${pending.name}":\n\n(Atau kirim teks manual jika menggunakan size custom)`, keyboard);
+  async function catalogHome(ctx: Context): Promise<void> {
+    const catalog = await deps.listCatalog?.();
+    if (!catalog) throw new Error("Katalog belum tersedia");
+    await vpsReply(ctx, `🧩 Katalog VPS\n\nRegion: ${catalog.regions.length}\nSpek: ${catalog.sizes.length}\nOS: ${catalog.os.length}\n\nEntri baru langsung tersedia di menu pembeli. Atur harga kombinasinya melalui menu harga.`, new InlineKeyboard()
+      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row().text("🔙 Admin VPS", "vpa_home"));
   }
-
-  async function promptRegions(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
-    const keyboard = new InlineKeyboard();
-    STANDARD_REGIONS.forEach((reg, index) => keyboard.text(reg.label, `vpa_newreg_${index}`).row());
-    keyboard.text("Batal", "vpa_home");
-
-    input(actor, async (regionCtx, regionValue) => {
-      const regions = [...new Set(regionValue.trim().split(/[,\s]+/))];
-      if (!regions.length || regions.length > 30 || regions.some(region => !/^[a-z]{2,10}\d{1,2}$/.test(region))) throw new Error("Invalid regions");
-      pending.regions = regions;
-      await promptOs(regionCtx, actor, pending);
-    });
-
-    await vpsReply(ctx, `➕ Paket ${pending.serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(3/5) Pilih region yang ditawarkan untuk "${pending.name}" (${pending.sizeSlug}):\n\n(Atau kirim teks manual jika ingin kombinasi custom, contoh: sgp1,fra1)`, keyboard);
+  async function addCatalog(ctx: Context, kind: "region" | "size" | "os"): Promise<void> {
+    if (!deps.addCatalogEntry) throw new Error("Catalog unavailable");
+    const actor = actorOf(ctx), values: string[] = [];
+    const fields = kind === "region" ? ["slug region, contoh sgp1", "nama region, contoh Singapore", "negara, contoh Singapore"]
+      : kind === "size" ? ["slug DigitalOcean, contoh s-2vcpu-4gb", "jumlah CPU, contoh 2", "RAM, contoh 4 GB", "disk, contoh 80 GB", "transfer, contoh 4 TB", "label biaya DigitalOcean, contoh $24/month"]
+      : ["key OS, contoh ubuntu24", "nama OS", "slug image DigitalOcean (Windows: ubuntu-24-04-x64)", "family OS: linux atau windows", "nama image Windows installer, contoh Windows Server 2022 ServerStandard"];
+    async function prompt(target: Context, index: number): Promise<void> {
+      input(actor, async (replyCtx, value) => {
+        values.push(shortText(value, 100));
+        if (index + 1 < fields.length && !(kind === "os" && index === 3 && value.trim() === "linux")) {
+          await prompt(replyCtx, index + 1); return;
+        }
+        await deps.addCatalogEntry!(actor, { kind, value: values });
+        await replyCtx.reply("Entri katalog tersimpan. Atur harga kombinasinya melalui menu harga.");
+        await catalogHome(replyCtx);
+      });
+      await vpsReply(target, `➕ Tambah ${kind}\n\nKirim ${fields[index]}.\nKetik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vpa_catalog"));
+    }
+    await prompt(ctx, 0);
   }
-
-  async function promptOs(ctx: Context, actor: string, pending: PendingPlan): Promise<void> {
-    clearVpsInput(actor);
-    const osList = deps.listOs();
-    const keyboard = new InlineKeyboard();
-    osList.forEach((os, index) => keyboard.text(os.label, `vpa_newos_${index}`).row());
-    keyboard.text("Batal", "vpa_home");
-
-    await vpsReply(ctx, `(4/5) Pilih OS untuk "${pending.name}" (${pending.sizeSlug}, ${pending.regions?.join(", ")}):\n\nBuat paket terpisah untuk OS dengan harga berbeda.`, keyboard);
-  }
-
-  async function addPlan(ctx: Context, serviceType: VpsServiceType): Promise<void> {
-    const actor = actorOf(ctx);
-    clearVpsInput(actor);
-    input(actor, async (nameCtx, value) => {
-      const name = shortText(value);
-      const pending: PendingPlan = { name, serviceType, expiresAt: Date.now() + 10 * 60_000 };
-      pendingPlans.set(actor, pending);
-      await promptSize(nameCtx, actor, pending);
-    });
-    await vpsReply(ctx, `➕ Paket ${serviceType === "install" ? "jasa setup/install" : "VPS toko"}\n\n(1/5) Kirim nama paket. Ketik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vpa_home"));
-  }
-  const pendingPlans = new Map<string, PendingPlan>();
 
   return {
     name: "vpsadmin", version: "1.0.0", internalOnly: true,
@@ -178,7 +140,9 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const data = ctx.callbackQuery!.data!;
         const actor = actorOf(ctx);
         clearVpsInput(actor);
-        if (data === "vpa_home") { pendingPlans.delete(actor); await home(ctx); return; }
+        if (data === "vpa_home") { await home(ctx); return; }
+        if (data === "vpa_catalog") { await catalogHome(ctx); return; }
+        if (data === "vpa_addregion" || data === "vpa_addsize" || data === "vpa_addos") { await addCatalog(ctx, data === "vpa_addregion" ? "region" : data === "vpa_addsize" ? "size" : "os"); return; }
         if (data === "vpa_addtoken") { await addToken(ctx); return; }
         if (data === "vpa_checkall") {
           await ctx.reply("Pemeriksaan seluruh token dimulai dengan concurrency terbatas. Buka daftar token untuk melihat waktu dan hasil pemeriksaan.");
@@ -186,46 +150,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           await ctx.reply("Pemeriksaan seluruh token selesai.", { reply_markup: homeKeyboard() });
           return;
         }
-        if (data === "vpa_addplan") {
-          await vpsReply(ctx, "Pilih jenis layanan untuk harga paket:", new InlineKeyboard().text("Beli VPS", "vpa_new_purchase").text("Jasa install", "vpa_new_install").row().text("Batal", "vpa_home"));
-          return;
-        }
-        if (data === "vpa_new_purchase" || data === "vpa_new_install") { await addPlan(ctx, data === "vpa_new_install" ? "install" : "purchase"); return; }
-        const newSz = /^vpa_newsz_(\d{1,2})$/.exec(data);
-        if (newSz) {
-          const pending = pendingPlans.get(actor);
-          const size = STANDARD_SIZES[Number(newSz[1])];
-          if (!pending || !size || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
-          clearVpsInput(actor);
-          pending.sizeSlug = size.slug;
-          await promptRegions(ctx, actor, pending);
-          return;
-        }
-        const newReg = /^vpa_newreg_(\d{1,2})$/.exec(data);
-        if (newReg) {
-          const pending = pendingPlans.get(actor);
-          const reg = STANDARD_REGIONS[Number(newReg[1])];
-          if (!pending || !reg || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
-          clearVpsInput(actor);
-          pending.regions = [...reg.regions];
-          await promptOs(ctx, actor, pending);
-          return;
-        }
-        const newOs = /^vpa_newos_(\d{1,3})$/.exec(data);
-        if (newOs) {
-          const pending = pendingPlans.get(actor);
-          const os = deps.listOs()[Number(newOs[1])];
-          if (!pending || !pending.sizeSlug || !pending.regions || !os || pending.expiresAt <= Date.now()) throw new Error("Expired wizard");
-          pendingPlans.delete(actor);
-          input(actor, async (priceCtx, value) => {
-            const price = numeric(value, 1, 100_000_000);
-            const plan = await deps.savePlan(actor, { name: pending.name, serviceType: pending.serviceType, sizeSlug: pending.sizeSlug!, regions: pending.regions!, osPrices: [{ os: os.id, label: os.label, price }], enabled: true });
-            await priceCtx.reply("Paket dan harga tersimpan di database.");
-            await planDetail(priceCtx, plan.id);
-          });
-          await vpsReply(ctx, `(5/5) ${pending.name}\nSpek: ${pending.sizeSlug}\nRegion: ${pending.regions.join(", ")}\nOS: ${os.label}\n\nKirim ${pending.serviceType === "install" ? "biaya jasa" : "harga jual"} dalam Rupiah (angka bulat).`, new InlineKeyboard().text("Batal", "vpa_home"));
-          return;
-        }
+        if (data === "vpa_addplan" || data.startsWith("vpa_new")) { await catalogHome(ctx); return; }
         const list = /^vpa_tokens_(all|active|warning|locked|available|problem)_(\d{1,6})$/.exec(data);
         if (list) {
           const filter = list[1] as VpsCredentialFilter;
@@ -246,11 +171,11 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           const allPlans = await deps.listPlans(undefined, true);
           const page = allPlans.slice(offset, offset + 10);
           const keyboard = new InlineKeyboard();
-          page.forEach(plan => keyboard.text(`${plan.enabled ? "🟢" : "⚪"} ${plan.name} · ${plan.serviceType}`, `vpa_plan_${plan.id}`).row());
+          page.forEach(plan => keyboard.text(`${plan.enabled ? "🟢" : "⚪"} ${plan.serviceType === "install" ? "Install" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}`, `vpa_plan_${plan.id}`).row());
           if (offset) keyboard.text("← Sebelumnya", `vpa_plans_${Math.max(0, offset - 10)}`);
           if (offset + 10 < allPlans.length) keyboard.text("Berikutnya →", `vpa_plans_${offset + 10}`);
-          keyboard.row().text("➕ Tambah paket", "vpa_addplan").text("🔙 Admin VPS", "vpa_home");
-          await vpsReply(ctx, "💰 Paket & harga VPS\n\nHarga jual VPS dan biaya jasa install disimpan terpisah. Pilih paket untuk mengubah harga atau status.", keyboard);
+          keyboard.row().text("🧩 Katalog", "vpa_catalog").text("🔙 Admin VPS", "vpa_home");
+          await vpsReply(ctx, "💰 Paket & harga VPS\n\nSemua spek katalog sudah tersedia. Pilih layanan/spek, lalu region dan OS untuk mengisi harga.", keyboard);
           return;
         }
         const item = /^vpa_(credential|check|priority|plan)_([A-Za-z0-9-]{1,40})$/.exec(data);
@@ -274,14 +199,18 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           else { await deps.updatePlan(actor, id, { enabled }); await planDetail(ctx, id); }
           return;
         }
-        const price = /^vpa_price_([A-Za-z0-9-]{1,40})_(\d{1,3})$/.exec(data);
+        const pricePage = /^vpa_os_([A-Za-z0-9-]{1,40})_(\d{1,3})_(\d{1,3})$/.exec(data);
+        if (pricePage) { await osPrices(ctx, pricePage[1]!, Number(pricePage[2]), Number(pricePage[3])); return; }
+        const price = /^vpa_set_([A-Za-z0-9-]{1,40})_(\d{1,3})_(\d{1,3})$/.exec(data);
         if (price) {
-          const id = price[1]!;
-          const plan = (await deps.listPlans(undefined, true)).find(item => item.id === id);
-          const os = plan?.osPrices[Number(price[2])];
-          if (!plan || !os) throw new Error("Plan unavailable");
-          input(actor, async (priceCtx, value) => { await deps.updatePlan(actor, id, { price: numeric(value, 1, 100_000_000), os: os.os }); await planDetail(priceCtx, id); });
-          await vpsReply(ctx, `Kirim harga baru untuk ${plan.name} / ${os.label} dalam Rupiah. Pesanan existing tetap memakai snapshot checkout.`, new InlineKeyboard().text("Batal", "vpa_home"));
+          const plan = await getPlan(price[1]!), region = plan.regions[Number(price[2])], os = plan.osPrices[Number(price[3])];
+          if (!region || !os) throw new Error("Combination unavailable");
+          input(actor, async (priceCtx, value) => {
+            await deps.updatePlan(actor, plan.id, { region, os: os.os, price: numeric(value, 1, 100_000_000) });
+            await priceCtx.reply("Harga kombinasi tersimpan.");
+            await osPrices(priceCtx, plan.id, Number(price[2]), Math.floor(Number(price[3]) / 10) * 10);
+          });
+          await vpsReply(ctx, `Kirim harga Rupiah untuk ${plan.serviceType === "install" ? "Jasa install" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\nRegion: ${region}\nOS: ${os.label}\n\nAngka bulat 1–100000000. Order sebelumnya tetap memakai harga checkout.`, new InlineKeyboard().text("Batal", `vpa_plan_${plan.id}`));
           return;
         }
         await home(ctx);

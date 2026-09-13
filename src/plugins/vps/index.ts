@@ -5,6 +5,7 @@ import { vpsService } from "../../vps/service.js";
 import type { VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
 import { clearVpsInput, setVpsInput } from "./input.js";
 import { getOs } from "../../vps/installer.js";
+import { planPrice } from "../../vps/catalogPlans.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 
 interface Draft {
@@ -22,12 +23,19 @@ interface Draft {
   direct?: { ip: string; username: string; password: string };
 }
 const baseHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
-  .text("🛒 Beli VPS", "vps_buy").text("🛠 Jasa setup/install", "vps_install").row()
+  .text("🛒 VPS DO", "vps_buy").text("🛠 Jasa install", "vps_install").row()
   .text("🖥️ VPS Saya", "vps_my_0").text("📋 Riwayat pesanan", "vps_history_0").row()
   .text("🔙 Catalog", "menu_catalog");
 const homeKeyboard = (): InlineKeyboard => baseHomeKeyboard();
-const serviceLabel = (service: VpsServiceType): string => service === "install" ? "Jasa setup/install" : "Beli VPS";
-const feeNotice = "Pembayaran ke toko hanya biaya jasa setup/install. Biaya DigitalOcean ditagihkan ke akun buyer dan menjadi tanggungan buyer.";
+const serviceLabel = (service: VpsServiceType): string => service === "install" ? "Jasa install" : "VPS DO";
+const feeNotice = "Pembayaran ke toko hanya biaya jasa install. Biaya DigitalOcean ditagihkan ke akun buyer dan menjadi tanggungan buyer.";
+function pricedOs(plan: VpsUiPlan, region?: string, windowsOnly = false): VpsUiPlan["osPrices"] {
+  return plan.osPrices.filter(os => !windowsOnly || (os.family ?? getOs(os.os)?.family) === "windows")
+    .map(os => ({ ...os, price: region ? planPrice(plan, region, os.os) ?? null : os.price }));
+}
+const priceLabel = (price: number | null): string => price === null ? "Harga belum diatur" : vpsPrice(price);
+const regionLabel = (plan: VpsUiPlan, region: string): string => plan.regionLabels?.[region] ?? formatRegion(region);
+const sizeLabel = (plan: VpsUiPlan): string => plan.sizeLabel ?? `${plan.name} · ${formatSize(plan.sizeSlug)}`;
 
 function validInstallerLogUrl(order: VpsUiOrder): string | null {
   if (!order.installerLogUrl || !order.ip) return null;
@@ -85,7 +93,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
     const keyboard = new InlineKeyboard();
-    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${plan.name} · ${formatSize(plan.sizeSlug)}`, `vps_plan_${draft.id}_${index + offset}`).row());
+    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(sizeLabel(plan), `vps_plan_${draft.id}_${index + offset}`).row());
     if (offset) keyboard.text("← Sebelumnya", `vps_page_${draft.id}_${Math.max(0, offset - 10)}`);
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
@@ -110,7 +118,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     dropDraft(actor);
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
     const listedPlans = await deps.listPlans(serviceType);
-    const plans = direct ? listedPlans.filter(plan => plan.osPrices.some(os => getOs(os.os)?.family === "windows")) : listedPlans;
+    const plans = direct ? listedPlans.filter(plan => pricedOs(plan, undefined, true).length > 0) : listedPlans;
     const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans };
     drafts.set(actor, draft);
     if (serviceType === "purchase") { await choosePlan(ctx, draft); return; }
@@ -165,6 +173,11 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function checkout(ctx: Context, draft: Draft): Promise<void> {
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
+    if (!planPrice(draft.plan, draft.region, draft.os)) {
+      await vpsReply(ctx, "Harga untuk kombinasi spek, region, dan OS ini belum diatur admin. Belum ada tagihan yang dibuat.",
+        new InlineKeyboard().text("Ganti OS", `vps_backos_${draft.id}`).text("Kembali", "vps_home"));
+      return;
+    }
     const actor = actorOf(ctx);
     if (!draft.order) {
       draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: { ...draft.direct } } : {}) });
@@ -196,7 +209,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (!draft.plan) throw new Error("Unknown plan");
           delete draft.region; delete draft.os;
           const keyboard = new InlineKeyboard();
-          draft.plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+          draft.plan.regions.forEach((region, i) => keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row());
           keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
           await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           return;
@@ -210,7 +223,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             if (!plan) throw new Error("Unknown plan");
             draft.plan = plan;
             delete draft.region; delete draft.os;
-            if (draft.direct) {
+            if (draft.direct && !plan.catalogManaged) {
               draft.region = plan.regions[0] ?? "external";
               const windows = plan.osPrices.find(os => getOs(os.os)?.family === "windows");
               if (!windows) throw new Error("Paket install belum memiliki harga Windows.");
@@ -221,9 +234,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
               return;
             }
             const keyboard = new InlineKeyboard();
-            plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+            plan.regions.forEach((region, i) => keyboard.text(regionLabel(plan, region), `vps_region_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${plan.name} · ${formatSize(plan.sizeSlug)}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice && !draft.direct ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.direct ? "\n\nPilih lokasi VPS milik Anda." : draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
@@ -234,21 +247,21 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             }
             delete draft.os;
             const keyboard = new InlineKeyboard();
-            draft.plan.osPrices.forEach((os, i) => keyboard.text(`${os.label} · ${vpsPrice(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+            pricedOs(draft.plan, region, Boolean(draft.direct)).forEach((os, i) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(region)}\n\n(Langkah 3/3) Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n(Langkah 3/3) Pilih Sistem Operasi (OS):${draft.direct ? "\n\nBiaya hanya untuk jasa install Windows pada VPS Anda." : draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else {
-            const os = draft.plan?.osPrices[index];
+            const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.direct))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
             draft.os = os.os;
             if (!draft.region) {
               const keyboard = new InlineKeyboard();
-              draft.plan.regions.forEach((region, i) => keyboard.text(formatRegion(region), `vps_region_${draft.id}_${i}`).row());
+              draft.plan.regions.forEach((region, i) => keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row());
               keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
               await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
               return;
             }
-            if (getOs(os.os)?.family === "windows") {
+            if ((os.family ?? getOs(os.os)?.family) === "windows") {
               const keyboard = new InlineKeyboard()
                 .text("Lanjut tanpa Chrome", `vps_chrome_${draft.id}_no`).row()
                 .text("+ Chrome (Gratis)", `vps_chrome_${draft.id}_yes`).row()
@@ -267,7 +280,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (!draft.plan || !draft.region) throw new Error("Unknown selection");
           delete draft.os; delete draft.installChrome;
           const keyboard = new InlineKeyboard();
-          draft.plan.osPrices.forEach((os, i) => keyboard.text(`${os.label} · ${vpsPrice(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+          pricedOs(draft.plan, draft.region, Boolean(draft.direct)).forEach((os, i) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
           keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
           await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(draft.region)}\n\nPilih Sistem Operasi (OS):`, keyboard);
           return;
@@ -275,7 +288,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const chrome = /^vps_chrome_([a-f0-9-]{36})_(yes|no)$/.exec(data);
         if (chrome) {
           const draft = currentDraft(actor, chrome[1]!);
-          if (!draft.plan || !draft.os || !draft.region || getOs(draft.os)?.family !== "windows") throw new Error("Invalid Chrome selection");
+          if (!draft.plan || !draft.os || !draft.region || (draft.plan.osPrices.find(os => os.os === draft.os)?.family ?? getOs(draft.os)?.family) !== "windows") throw new Error("Invalid Chrome selection");
           draft.installChrome = chrome[2] === "yes";
           await checkout(ctx, draft);
           return;

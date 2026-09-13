@@ -28,6 +28,7 @@ import { getAdminIds } from "../core/admin.js";
 import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { VpsCredential, VpsAccount } from "../models/VpsCredential.js";
 import { VpsPlan } from "../models/VpsPlan.js";
+import { VpsCatalog } from "../models/VpsCatalog.js";
 import { VpsOrder } from "../models/VpsOrder.js";
 import { PaymentSettlementClaim } from "../models/PaymentLedger.js";
 
@@ -63,6 +64,7 @@ export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "vpscredentials", model: VpsCredential, select: "+tokenEncrypted", platformOnly: true, exportOnly: true },
   { name: "vpsaccounts", model: VpsAccount, platformOnly: true, exportOnly: true },
   { name: "vpsplans", model: VpsPlan, platformOnly: true, exportOnly: true },
+  { name: "vpscatalogs", model: VpsCatalog, filter: { _id: "platform" }, platformOnly: true, exportOnly: true },
   { name: "vpsorders", model: VpsOrder, select: "+passwordEncrypted +sourcePasswordEncrypted", platformOnly: true, exportOnly: true },
   { name: "vpspaymentclaims", model: PaymentSettlementClaim, filter: { tenantId: PLATFORM_TENANT_ID, kind: "vps" }, platformOnly: true, exportOnly: true },
 ] as const;

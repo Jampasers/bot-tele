@@ -24,7 +24,9 @@ export const OS_CATALOG: Readonly<Record<string, VpsOs>> = Object.freeze({
     windows2012r2: windows("windows2012r2", "2012 R2"), windows2016: windows("windows2016", "2016"),
     windows2019: windows("windows2019", "2019"), windows2022: windows("windows2022", "2022"),
 });
-export function getOs(key: string): VpsOs | undefined { return Object.hasOwn(OS_CATALOG, key) ? OS_CATALOG[key] : undefined; }
+const runtimeOs = new Map<string, VpsOs>();
+export function registerOs(os: VpsOs): void { if (/^[a-z0-9][a-z0-9_-]{1,31}$/.test(os.key)) runtimeOs.set(os.key, os); }
+export function getOs(key: string): VpsOs | undefined { return runtimeOs.get(key) ?? (Object.hasOwn(OS_CATALOG, key) ? OS_CATALOG[key] : undefined); }
 export const INSTALLER_COMMIT = "6a0a2c9b3c678728fe63bc8bbb0ab82c86717830";
 
 export class InstallerError extends Error {
