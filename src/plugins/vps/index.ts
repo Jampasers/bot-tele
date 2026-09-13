@@ -250,7 +250,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           return;
         } else if (action[1] === "access") {
           const access = await deps.credentials(actor, orderId);
-          await ctx.reply(`🔐 Akses VPS\nIP: ${access.ip}\nUsername: ${access.username}\nPassword: ${access.password}\n\n${access.evidence}`, { protect_content: true });
+          await ctx.reply(`🔐 Akses VPS\nIP: ${access.ip}\nUsername: ${access.username}\nPassword: ${access.password}\n\n${access.evidence}`);
           return;
         } else if (action[1] === "reboot") {
           const order = await deps.getOwned(actor, orderId);

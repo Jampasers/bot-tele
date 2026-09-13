@@ -190,7 +190,7 @@ test("paid precreate cancellation is confirmed before the service refund transit
   assert.equal(cancelled, 1);
 });
 
-test("token recovery addresses the same owned order and private access responses are protected", async () => {
+test("token recovery addresses the same owned order and private access responses remain copyable", async () => {
   const seen: string[] = [];
   const { bot, calls } = await harness({ acceptBuyerToken: async (actor, orderId) => { seen.push(actor, orderId); return { accountId: "same-team" }; }, credentials: async () => ({ ip: "192.0.2.1", username: "administrator", password: "synthetic-password", evidence: "Port RDP terbuka; login Windows belum diverifikasi." }) });
   await bot.handleUpdate(update(1, `vps_token_${ORDER_ID}`, true));
@@ -198,7 +198,7 @@ test("token recovery addresses the same owned order and private access responses
   assert.deepEqual(seen, ["42", ORDER_ID]);
   await bot.handleUpdate(update(3, `vps_access_${ORDER_ID}`, true));
   const access = calls.find(call => String(call.payload["text"]).includes("synthetic-password"));
-  assert.equal(access?.payload["protect_content"], true);
+  assert.notEqual(access?.payload["protect_content"], true);
   assert.match(String(access?.payload["text"]), /login Windows belum diverifikasi/);
 });
 
