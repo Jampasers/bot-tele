@@ -49,7 +49,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
     await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
     if (successes >= 3) {
-      await stage("ready", { resumeStage: null, evidence: "Instalasi Windows selesai. Port RDP aktif & siap digunakan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis)." });
+      await stage("ready", { resumeStage: null, reservationActive: false, evidence: "Instalasi Windows selesai. Port RDP aktif & siap digunakan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis)." });
       deps.clearToken();
     } else if (enforceTimeout && deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) {
       await save({ stage: "review", resumeStage: "monitoring", evidence: "Batas pemantauan Windows tercapai. Status instalasi belum pasti; VPS yang sama tetap diperiksa, tanpa create/refund otomatis." });
@@ -127,7 +127,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     try {
       const created = await client.createDroplet({ name: order.createName, region: order.snapshot.region, size: order.snapshot.size,
         image: order.snapshot.image, userData: buildUserData(deps.password()) }, deps.signal);
-      await stage("droplet", { dropletId: created.id, publicIp: created.publicIp ?? null, evidence: "Droplet tercatat. Menunggu status aktif dan IP publik." });
+      await stage("droplet", { dropletId: created.id, publicIp: created.publicIp ?? null, reservationActive: false, evidence: "Droplet tercatat. Menunggu status aktif dan IP publik." });
     } catch (error) {
       if (error instanceof DigitalOceanError && !error.uncertain) {
         await stage("failed", { createAttemptedAt: null, reservationActive: false, lastError: "create_rejected", evidence: "DigitalOcean menolak create secara definitif. Refund dijadwalkan." }); deps.clearToken();
@@ -138,7 +138,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   if (order.stage === "creating") {
     const client = await api(); if (!client) return;
     const found = (await client.listDroplets(deps.signal)).filter(d => d.name === order.createName);
-    if (found.length === 1) await stage("droplet", { dropletId: found[0]!.id, publicIp: found[0]!.publicIp ?? null, evidence: "Droplet existing ditemukan." });
+    if (found.length === 1) await stage("droplet", { dropletId: found[0]!.id, publicIp: found[0]!.publicIp ?? null, reservationActive: false, evidence: "Droplet existing ditemukan." });
     else await stage("review", { resumeStage: "creating", lastError: "create_uncertain", evidence: "Create belum dapat dipastikan. Perlu pemeriksaan; tidak membuat droplet tambahan." });
     return;
   }
@@ -157,7 +157,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   const sourceUsername = order.service === "install" && order.sourceUsername ? (deps.sourceUsername?.() ?? order.sourceUsername) : "root";
   if (order.stage === "ssh") {
     if (await deps.testSsh({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal)) {
-      if (getOs(order.snapshot.os)?.family === "linux") { await stage("ready", { evidence: "Login SSH root berhasil diverifikasi." }); deps.clearToken(); }
+      if (getOs(order.snapshot.os)?.family === "linux") { await stage("ready", { reservationActive: false, evidence: "Login SSH root berhasil diverifikasi." }); deps.clearToken(); }
       else await stage("installing", { evidence: "SSH Linux berhasil; menyiapkan installer Windows." });
     } else if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
     return;

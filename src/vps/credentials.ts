@@ -85,11 +85,20 @@ export async function checkAllCredentials(actor: string): Promise<void> {
   await Promise.allSettled(batch);
 }
 
+export const ACTIVE_VPS_STAGES = [
+  "queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "needs_token", "review",
+] as const;
+
+export const ACTIVE_VPS_REBOOTS = [
+  "requested", "submitting", "running", "review",
+] as const;
+
 /** Permanently remove an encrypted platform token only after it is disabled.
  * The shared account lease fences this deletion against capacity reservation,
  * while durable order/ticket checks protect provisioning already in progress. */
 export async function deleteCredential(actor: string, id: string): Promise<VpsCredentialDeleteResult> {
   assertVpsAdmin(actor);
+  assertVpsPlatform();
   const credential = await VpsCredential.findOne({ _id: id, tenantId: "platform" }).select("_id accountId enabled").lean();
   if (!credential) return { status: "not_found" };
   if (credential.enabled) return { status: "enabled" };
@@ -101,21 +110,53 @@ export async function deleteCredential(actor: string, id: string): Promise<VpsCr
     _id: credential.accountId,
     $or: [{ lockUntil: null }, { lockUntil: { $lt: new Date() } }],
   }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { returnDocument: "after" });
-  if (!lease) return { status: "in_use" };
+  if (!lease) return { status: "in_use", reason: "Akun DigitalOcean sedang dikunci oleh proses background lain." };
 
   try {
-    const [activeOrder, reservation] = await Promise.all([
-      VpsOrder.exists({
-        tenantId: "platform", credentialId: id,
+    // Check if any order provisioned with this credential is still actively processing or rebooting
+    const activeOrder = await VpsOrder.findOne({
+      tenantId: "platform", credentialId: id,
+      $or: [
+        { stage: { $in: ACTIVE_VPS_STAGES } },
+        { rebootState: { $in: ACTIVE_VPS_REBOOTS } },
+      ],
+    }).select("_id stage rebootState").lean();
+
+    if (activeOrder) {
+      const isRebooting = activeOrder.rebootState && (ACTIVE_VPS_REBOOTS as readonly string[]).includes(activeOrder.rebootState);
+      const stageDesc = isRebooting ? `reboot (${activeOrder.rebootState})` : `tahap ${activeOrder.stage}`;
+      return { status: "in_use", orderId: activeOrder._id, stage: stageDesc };
+    }
+
+    // Inspect capacity reservation tickets on the account for this credential
+    const account = await VpsAccount.findOne({ _id: credential.accountId }).lean();
+    const tickets = account?.reservations?.filter(r => r.credentialId === id) ?? [];
+    if (tickets.length > 0) {
+      const ticketOrderIds = tickets.map(t => t.orderId);
+      const activeTicketOrder = await VpsOrder.findOne({
+        _id: { $in: ticketOrderIds }, tenantId: "platform",
         $or: [
-          { reservationActive: true },
-          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "needs_token", "review"] } },
-          { rebootState: { $in: ["requested", "submitting", "running", "review"] } },
+          { stage: { $in: ACTIVE_VPS_STAGES } },
+          { rebootState: { $in: ACTIVE_VPS_REBOOTS } },
         ],
-      }),
-      VpsAccount.exists({ _id: credential.accountId, "reservations.credentialId": id }),
-    ]);
-    if (activeOrder || reservation) return { status: "in_use" };
+      }).select("_id stage rebootState").lean();
+
+      if (activeTicketOrder) {
+        return { status: "in_use", orderId: activeTicketOrder._id, stage: `reservasi aktif (${activeTicketOrder.stage})` };
+      }
+
+      // If no active orders own these tickets, the tickets are stale (from finished/cancelled/failed orders)
+      await VpsAccount.updateOne(
+        { _id: credential.accountId, lockOwner: leaseId },
+        { $pull: { reservations: { credentialId: id } } }
+      );
+    }
+
+    // Clean up any residual reservationActive on terminal orders for this credential
+    await VpsOrder.updateMany(
+      { tenantId: "platform", credentialId: id, stage: { $in: ["ready", "failed", "cancelled"] }, reservationActive: true },
+      { $set: { reservationActive: false } }
+    );
 
     const deleted = await VpsCredential.deleteOne({ _id: id, tenantId: "platform", enabled: false });
     if (deleted.deletedCount === 1) return { status: "deleted" };

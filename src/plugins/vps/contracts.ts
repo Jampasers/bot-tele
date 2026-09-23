@@ -43,7 +43,8 @@ export interface VpsUiOrder {
 export type VpsCredentialFilter = "all" | "active" | "warning" | "locked" | "available" | "problem";
 export type VpsCredentialDeleteResult =
   | { status: "deleted" }
-  | { status: "enabled" | "in_use" | "not_found" };
+  | { status: "enabled" | "not_found" }
+  | { status: "in_use"; reason?: string; orderId?: string; stage?: string };
 export interface VpsUiCredential {
   id: string;
   label: string;

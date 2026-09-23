@@ -327,7 +327,15 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           } else if (result.status === "enabled") {
             await vpsReply(ctx, "Token kembali aktif atau belum dinonaktifkan, sehingga tidak dihapus.", new InlineKeyboard().text("Buka detail token", `vpa_credential_${id}`).row().text("🔙 Token & akun", "vpa_tokens_all_0"));
           } else if (result.status === "in_use") {
-            await vpsReply(ctx, "Token masih dipakai oleh proses order, reboot, atau reservasi aktif sehingga belum boleh dihapus. Selesaikan atau tinjau proses tersebut lalu coba lagi.", new InlineKeyboard().text("Buka detail token", `vpa_credential_${id}`).row().text("🔙 Token & akun", "vpa_tokens_all_0"));
+            const detailText = result.orderId
+              ? `Token masih dipakai oleh pesanan aktif #${result.orderId.slice(0, 8)} (${result.stage || "sedang berjalan"}).`
+              : (result.reason || "Token masih dipakai oleh proses order, reboot, atau reservasi aktif.");
+            const keyboard = new InlineKeyboard();
+            if (result.orderId) {
+              keyboard.text(`🔎 Lihat Order #${result.orderId.slice(0, 8)}`, `vpa_orderdetail_${result.orderId}`).row();
+            }
+            keyboard.text("Buka detail token", `vpa_credential_${id}`).row().text("🔙 Token & akun", "vpa_tokens_all_0");
+            await vpsReply(ctx, `⚠️ ${detailText}\n\nSelesaikan atau batalkan pesanan tersebut lalu coba lagi.`, keyboard);
           } else {
             await vpsReply(ctx, "Token sudah tidak tersedia; tidak ada data rahasia yang dihapus lagi.", new InlineKeyboard().text("🔙 Token & akun", "vpa_tokens_all_0"));
           }

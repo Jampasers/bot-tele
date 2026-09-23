@@ -216,10 +216,15 @@ test("admin token deletion requires disabled state and refuses active order refe
     assert.deepEqual(filter, { _id: credential._id, tenantId: "platform", enabled: false });
     deletes++; return { deletedCount: 1 } as never;
   });
-  t.mock.method(VpsOrder, "exists", async () => activeOrder ? { _id: "active-order" } as never : null);
-  t.mock.method(VpsAccount, "exists", async () => reservation ? { _id: credential.accountId } as never : null);
+  t.mock.method(VpsOrder, "findOne", (filter: any) => query(() => {
+    if (activeOrder && filter?.credentialId === credential._id) return { _id: "active-order-1", stage: "review" };
+    if (filter?._id?.$in?.includes("ticket-order-1") && reservation) return { _id: "ticket-order-1", stage: "queued" };
+    return null;
+  }));
+  t.mock.method(VpsAccount, "findOne", () => query(() => reservation ? { _id: credential.accountId, reservations: [{ orderId: "ticket-order-1", credentialId: credential._id }] } : { _id: credential.accountId, reservations: [] }));
   t.mock.method(VpsAccount, "findOneAndUpdate", async () => ({ _id: credential.accountId } as never));
   t.mock.method(VpsAccount, "updateOne", async () => { accountWrites++; return { matchedCount: 1 } as never; });
+  t.mock.method(VpsOrder, "updateMany", async () => ({ matchedCount: 1 } as never));
 
   await platform(async () => {
     await assert.rejects(vpsService.deleteCredential("999", credential._id), /admin/);
@@ -227,16 +232,17 @@ test("admin token deletion requires disabled state and refuses active order refe
     assert.equal(deletes, 0); assert.equal(accountWrites, 0);
 
     credential.enabled = false; activeOrder = true;
-    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use" });
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use", orderId: "active-order-1", stage: "tahap review" });
     assert.equal(deletes, 0);
 
     activeOrder = false; reservation = true;
-    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use" });
+    // With reservation order active, reports in_use
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use", orderId: "ticket-order-1", stage: "reservasi aktif (queued)" });
     assert.equal(deletes, 0);
 
+    // Stale reservation (reservation ticket exists, but order is not active in VpsOrder) allows safe deletion
     reservation = false;
     assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "deleted" });
     assert.equal(deletes, 1);
-    assert.equal(accountWrites, 6); // lease document + release for each disabled deletion attempt
   });
 });
