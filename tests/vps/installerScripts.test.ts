@@ -6,6 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { PNG } from "pngjs";
 import { launchWindows } from "../../src/vps/installer.js";
+import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 function interpreter(candidates: string[], args: string[], expected: RegExp): string | undefined {
     return candidates.find(command => {
@@ -65,7 +66,8 @@ async function installerPatch(directory: string, installChrome: boolean, wallpap
     let script = "";
     const result = await launchWindows({
         ip: "192.0.2.10", password: "SyntheticSource123!", windowsPassword: "SyntheticWindows123!",
-        os: "windows2019", orderId: "script-regression-test", installChrome, wallpaperPath,
+        os: "windows2019", orderId: "script-regression-test", bootMode: "efi",
+        imageUrl: resolveWindowsDdImage("windows2019", "efi", {}), installChrome, wallpaperPath,
     }, undefined, { ssh: async input => { script = input.stdin ?? ""; return { code: 0, output: "__VPS_PREPARED__" }; } });
     assert.equal(result.state, "prepared");
     const patch = script.match(/cat << 'EOF_PATCH_PY' > \/root\/patch_trans\.py\r?\n([\s\S]*?)\r?\nEOF_PATCH_PY/)?.[1];
@@ -96,11 +98,14 @@ async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpape
 for (const installChrome of [false, true]) {
     test(`generated setup runs network before wallpaper${installChrome ? " and Chrome" : ""}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, true);
-        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat",
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat",
             ...(installChrome ? ["windows-install-chrome.bat"] : [])]);
         const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
         assert.match(batch, /fDenyTSConnections/);
+        assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
         assert.doesNotMatch(batch, /SetDankaWallpaper|Add-Type/);
+        const passwordBatch = readFileSync(path.join(directory, "os", "windows-set-admin-password.bat"), "utf8");
+        assert.match(passwordBatch, /echo ready>"%SystemRoot%\\bot-tele-password-ready"/);
         assert.equal(readFileSync(path.join(directory, "win-dir.txt"), "utf8").trim(), "Windows", "wallpaper copy must preserve the upstream relative Windows directory");
         assert.ok(existsSync(path.join(directory, "os", "Windows", "wallpaper.jpg")));
         assert.equal(existsSync(path.join(directory, "os", "windows-install-chrome.bat")), installChrome);
@@ -108,7 +113,7 @@ for (const installChrome of [false, true]) {
 
     test(`missing wallpaper preserves network setup and Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, false);
-        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", ...(installChrome ? ["windows-install-chrome.bat"] : [])]);
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", ...(installChrome ? ["windows-install-chrome.bat"] : [])]);
         assert.equal(existsSync(path.join(directory, "os", "windows-set-wallpaper.bat")), false);
         assert.equal(existsSync(path.join(directory, "os", "danka-wallpaper.ps1")), false);
     });
@@ -197,4 +202,26 @@ Write-Output '__POWERSHELL_PARSE_OK__'
     });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /__POWERSHELL_PARSE_OK__/);
+});
+
+test("generated administrator password hook is encoded and parses without execution", {
+    skip: scriptSkip || (!powershell && "Windows PowerShell is required for the native parser check"),
+}, async t => {
+    const { directory } = await emitWindowsFiles(t, false, false);
+    const passwordScript = readFileSync(path.join(directory, "os", "windows-set-admin-password.ps1"), "utf8");
+    assert.doesNotMatch(passwordScript, /SyntheticWindows123!/);
+    assert.match(passwordScript, /FromBase64String/);
+    assert.match(passwordScript, /SID -like '\*-500'/);
+    const parser = `$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'os/windows-set-admin-password.ps1'), [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) { $parseErrors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+Write-Output '__PASSWORD_POWERSHELL_PARSE_OK__'
+`;
+    writeFileSync(path.join(directory, "parse-password-only.ps1"), parser);
+    const result = spawnSync(powershell!, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "parse-password-only.ps1"], {
+        cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /__PASSWORD_POWERSHELL_PARSE_OK__/);
 });

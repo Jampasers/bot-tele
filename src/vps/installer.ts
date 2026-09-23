@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { Client } from "ssh2";
+import { InstallerError } from "./installerError.js";
+import { validateWindowsImageUrl, type WindowsBootMode } from "./windowsImages.js";
+
+export { InstallerError } from "./installerError.js";
 
 export interface VpsOs { key: string; name: string; family: "linux" | "windows"; image: string; windowsImageName?: string; }
 const linux = (key: string, name: string, image: string): VpsOs => ({ key, name, image, family: "linux" });
@@ -34,14 +38,6 @@ export function registerOs(os: VpsOs): void { if (/^[a-z0-9][a-z0-9_-]{1,31}$/.t
 export function getOs(key: string): VpsOs | undefined { return runtimeOs.get(key) ?? (Object.hasOwn(OS_CATALOG, key) ? OS_CATALOG[key] : undefined); }
 export const INSTALLER_COMMIT = "6a0a2c9b3c678728fe63bc8bbb0ab82c86717830";
 
-export class InstallerError extends Error {
-    constructor(public readonly kind: "timeout" | "cancelled" | "authentication" | "ssh" | "validation", public readonly uncertain = false) {
-        super(kind === "authentication" ? "Login SSH belum berhasil." : kind === "timeout" ? "Pemeriksaan SSH melewati batas waktu."
-            : kind === "cancelled" ? "Pemeriksaan installer dihentikan." : kind === "validation" ? "Konfigurasi installer tidak valid."
-            : "Koneksi SSH installer belum dapat dipastikan.");
-        this.name = "InstallerError";
-    }
-}
 export function generatePassword(): string {
     const sets = ["ABCDEFGHJKLMNPQRSTUVWXYZ", "abcdefghijkmnpqrstuvwxyz", "23456789", "!@#%+_-="];
     const alphabet = sets.join(""); const chars = sets.map((set) => set[randomInt(set.length)]!);
@@ -170,6 +166,42 @@ export async function testSsh(input: { ip: string; password: string; username?: 
     } catch (error) { if (signal?.aborted) throw new InstallerError("cancelled"); if (error instanceof InstallerError && error.kind === "validation") throw error; return false; }
 }
 
+export function parseWindowsBootMode(output: string): WindowsBootMode {
+    const virtualization = output.match(/^\*\*VPS_VIRTUALIZATION\*\*:(lxc|openvz)\r?$/m)?.[1];
+    if (virtualization) throw new InstallerError("validation", false, "unsupported_virtualization");
+    const bootMode = output.match(/^\*\*VPS_BOOT_MODE\*\*:(efi|bios)\r?$/m)?.[1];
+    if (bootMode !== "bios" && bootMode !== "efi") throw new InstallerError("validation", false, "boot_detection");
+    return bootMode;
+}
+
+/** Read-only Linux probe. It must run and be persisted before reinstall preparation. */
+export async function detectWindowsBootMode(
+    input: { ip: string; password: string; username?: string },
+    signal?: AbortSignal,
+    deps: InstallerDependencies = {},
+): Promise<WindowsBootMode> {
+    const command = `set -eu
+if [ -d /sys/firmware/efi ]; then boot_mode=efi; else boot_mode=bios; fi
+virtualization=unknown
+if command -v systemd-detect-virt >/dev/null 2>&1; then
+  virtualization=$(systemd-detect-virt 2>/dev/null || true)
+  virtualization=$(printf '%s' "$virtualization" | head -n 1 | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_.-')
+  [ -n "$virtualization" ] || virtualization=unknown
+fi
+if [ "$virtualization" = unknown ] && [ -d /proc/vz ]; then
+  virtualization=openvz
+elif [ "$virtualization" = unknown ] && [ -r /proc/1/environ ] && grep -aq 'container=lxc' /proc/1/environ; then
+  virtualization=lxc
+fi
+printf '**VPS_BOOT_MODE**:%s\n' "$boot_mode"
+printf '**VPS_VIRTUALIZATION**:%s\n' "$virtualization"
+`;
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root",
+        command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s", stdin: command, timeoutMs: 20_000 }, signal);
+    if (result.code !== 0) throw new InstallerError("ssh");
+    return parseWindowsBootMode(result.output);
+}
+
 /** Only fixed machine markers/validated URLs are returned; installer text may contain passwords. */
 export function redactInstallerOutput(value: string, secrets: readonly string[]): string {
     let result = value;
@@ -188,11 +220,13 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; installChrome?: boolean; wallpaperPath?: string; }
-export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; }
+export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; bootMode: WindowsBootMode; imageUrl: string; installChrome?: boolean; wallpaperPath?: string; }
+export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; bootMode: WindowsBootMode; imageUrl: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
-    if (os?.family !== "windows" || !os.windowsImageName) throw new InstallerError("validation");
+    if (os?.family !== "windows" || (input.bootMode !== "bios" && input.bootMode !== "efi")) throw new InstallerError("validation");
+    const imageUrl = validateWindowsImageUrl(input.imageUrl);
+    const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
 chrome_bat_code = r'''    cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
@@ -326,6 +360,14 @@ for i in $(seq 1 30); do
     break
   fi
 done
+set +e
+curl --silent --show-error --location --fail --connect-timeout 15 --max-time 30 --range 0-0 --max-filesize 1048576 ${quote(imageUrl)} --output /dev/null
+image_check_rc=$?
+set -e
+if [ "$image_check_rc" -ne 0 ] && [ "$image_check_rc" -ne 63 ]; then
+  echo __VPS_IMAGE_UNREACHABLE__
+  exit 1
+fi
 COMMIT=${quote(INSTALLER_COMMIT)}
 curl --connect-timeout 20 --max-time 180 -fLo /root/reinstall.sh "https://raw.githubusercontent.com/bin456789/reinstall/$COMMIT/reinstall.sh"
 sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh
@@ -356,8 +398,44 @@ wallpaper_copy_code = r'''    _wp_dir=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && 
             cp -f "$_wp_dir/wallpaper.jpg" "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
         fi
     fi'''
+password_bat_code = r'''    cat << 'EOF_PASSWORD_PS1' > "$os_dir/windows-set-admin-password.ps1"
+$ErrorActionPreference = 'Stop'
+$passwordBytes = [Convert]::FromBase64String('${passwordBase64}')
+try {
+    $password = [Text.Encoding]::UTF8.GetString($passwordBytes)
+    $administrator = Get-WmiObject Win32_UserAccount -Filter "LocalAccount=True" | Where-Object { $_.SID -like '*-500' } | Select-Object -First 1
+    if (-not $administrator) { throw 'Built-in administrator account was not found' }
+    $account = [ADSI]("WinNT://" + $env:COMPUTERNAME + "/" + $administrator.Name + ",user")
+    $account.SetPassword($password)
+    $flags = [int]$account.Get('UserFlags')
+    $account.Put('UserFlags', (($flags -band (-bnot 2)) -bor 65536))
+    $account.SetInfo()
+} finally {
+    if ($passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
+    $password = $null
+}
+EOF_PASSWORD_PS1
+    cat << 'EOF_PASSWORD_BAT' > "$os_dir/windows-set-admin-password.bat"
+@echo off
+del "%SystemRoot%\\bot-tele-password-ready" >nul 2>&1
+reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 1 /f >nul 2>&1
+netsh advfirewall firewall set rule group="remote desktop" new enable=No >nul 2>&1
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-set-admin-password.ps1" >> "%SystemDrive%\\windows-setup.log" 2>&1
+if errorlevel 1 exit /b 1
+echo ready>"%SystemRoot%\\bot-tele-password-ready"
+del "%SystemDrive%\\windows-set-admin-password.ps1" >nul 2>&1
+del "%~f0" >nul 2>&1
+EOF_PASSWORD_BAT
+    unix2dos "$os_dir/windows-set-admin-password.ps1" 2>/dev/null || true
+    unix2dos "$os_dir/windows-set-admin-password.bat" 2>/dev/null || true
+    bats="$bats windows-set-admin-password.bat"'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
+if not exist "%SystemRoot%\\bot-tele-password-ready" (
+    reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 1 /f >nul 2>&1
+    netsh advfirewall firewall set rule group="remote desktop" new enable=No >nul 2>&1
+    exit /b 1
+)
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
@@ -451,6 +529,7 @@ sc config XblGameSave start= disabled >nul 2>&1
 sc config XboxNetApiSvc start= disabled >nul 2>&1
 sc config XboxGipSvc start= disabled >nul 2>&1
 
+del "%SystemRoot%\\bot-tele-password-ready" >nul 2>&1
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
@@ -522,6 +601,7 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
+        new_lines.append(password_bat_code)
         new_lines.append(fix_bat_code)
 
 if not bats_found or not gpo_found:
@@ -545,29 +625,29 @@ else:
     raise SystemExit("Target hook string not found in reinstall.sh")
 '
 
-bash /root/reinstall.sh windows \\
-  --image-name ${quote(os.windowsImageName)} \\
-  --lang en-us \\
+bash /root/reinstall.sh dd \\
+  --img ${quote(imageUrl)} \\
   --username administrator \\
   --rdp-port 3389 \\
-  --password ${quote(input.windowsPassword)} \\
-  --force-boot-mode bios </dev/null
+  --password ${quote(input.windowsPassword)} </dev/null
 touch "$state/prepared"
 trap - EXIT
 echo __VPS_PREPARED__
 `;
     const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root", command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s", stdin: script, timeoutMs: 15 * 60_000, mutation: true }, signal);
-    const sanitized = redactInstallerOutput(result.output, [input.password, input.windowsPassword]);
+    const sanitized = redactInstallerOutput(result.output, [input.password, input.windowsPassword, passwordBase64, imageUrl]);
     const logUrl = extractInstallerLogUrl(sanitized, input.ip);
     const state = result.code === 0 && sanitized.includes("__VPS_PREPARED__") ? "prepared"
         : result.code === 0 && sanitized.includes("__VPS_RUNNING__") ? "running" : "failed";
     if (state === "failed") {
         const lines = sanitized.trim().split("\n").filter(Boolean);
-        const errorDetail = lines.slice(-5).join(" | ").slice(0, 300);
+        const errorDetail = sanitized.includes("__VPS_IMAGE_UNREACHABLE__")
+            ? "Image Windows tidak dapat dijangkau dari VPS."
+            : lines.slice(-5).join(" | ").slice(0, 300);
         console.error(`[VPS:${input.orderId}] launchWindows failed (code: ${result.code}):\n${sanitized}`);
-        return { state, ...(logUrl ? { logUrl } : {}), errorDetail };
+        return { state, ...(logUrl ? { logUrl } : {}), errorDetail, bootMode: input.bootMode, imageUrl };
     }
-    return { state, ...(logUrl ? { logUrl } : {}) };
+    return { state, ...(logUrl ? { logUrl } : {}), bootMode: input.bootMode, imageUrl };
 }
 
 export async function scheduleInstallerReboot(input: { ip: string; password: string; username?: string; orderId: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<"scheduled" | "already_scheduled" | "failed"> {

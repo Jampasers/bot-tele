@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DigitalOceanClient, DigitalOceanError, type FetchLike } from "../../src/vps/digitalOcean.js";
-import { buildUserData, generatePassword, getOs, getWallpaperJpegBase64, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
+import { buildUserData, detectWindowsBootMode, generatePassword, getOs, getWallpaperJpegBase64, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
     extractInstallerLogUrl, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "../../src/vps/installer.js";
+import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 const account = (uuid = "user-one", team = "shared-team") => ({ account: { uuid, team: { uuid: team, name: "Shop" }, status: "active", status_message: "", droplet_limit: 2 } });
 const droplet = (id: number) => ({ id, name: `order-${id}`, status: "active", tags: [], networks: { v4: [
@@ -131,17 +132,21 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     const ssh: SshExecutor = async (input) => { calls.push(input); await Promise.resolve(); return { code: 0,
         output: `${input.password}\nExampleWindows987!xyz\nhttp://IP:80/aB1cD2eF\n__VPS_PREPARED__\n` }; };
     const inputs = [
-        { ip: "203.0.113.10", password: fakePassword, windowsPassword: "ExampleWindows987!xyz", os: "windows2019", orderId: "order-one", installChrome: true },
-        { ip: "203.0.113.11", password: "OtherPassword123!xyz", windowsPassword: "AnotherWindows123!xyz", os: "windows2022", orderId: "order-two" },
+        { ip: "203.0.113.10", password: fakePassword, windowsPassword: "ExampleWindows987!xyz", os: "windows2019", orderId: "order-one", bootMode: "efi" as const, imageUrl: resolveWindowsDdImage("windows2019", "efi", {}), installChrome: true },
+        { ip: "203.0.113.11", password: "OtherPassword123!xyz", windowsPassword: "AnotherWindows123!xyz", os: "windows2022", orderId: "order-two", bootMode: "bios" as const, imageUrl: resolveWindowsDdImage("windows2022", "bios", {}) },
     ];
     const results = await Promise.all(inputs.map((input) => launchWindows(input, undefined, { ssh })));
     assert.equal(calls[0]?.ip, inputs[0]?.ip); assert.equal(calls[1]?.ip, inputs[1]?.ip);
     assert.ok(calls[0]?.stdin?.includes("/order-one")); assert.ok(!calls[0]?.stdin?.includes("/order-two"));
-    assert.ok(calls[0]?.stdin?.includes("Windows Server 2019 ServerStandard")); assert.ok(calls[1]?.stdin?.includes("Windows Server 2022 ServerStandard"));
-    assert.ok(calls[0]?.stdin?.includes(INSTALLER_COMMIT)); assert.ok(calls[0]?.stdin?.includes("--force-boot-mode bios"));
+    assert.ok(calls[0]?.stdin?.includes("reinstall.sh dd")); assert.ok(calls[0]?.stdin?.includes("--img"));
+    assert.ok(calls[0]?.stdin?.includes("en_win2019_uefi.xz")); assert.ok(calls[1]?.stdin?.includes("en-us_win2022.xz"));
+    assert.ok(calls[0]?.stdin?.includes(INSTALLER_COMMIT)); assert.ok(!calls[0]?.stdin?.includes("--force-boot-mode"));
+    assert.ok((calls[0]?.stdin?.indexOf("--range 0-0") ?? -1) < (calls[0]?.stdin?.indexOf("reinstall.sh dd") ?? -1));
     assert.equal(calls[0]?.command, "bash -s");
     assert.ok(calls[0]?.stdin?.includes('if ! mkdir "$state"')); assert.ok(calls[0]?.stdin?.includes('touch "$state/prepared"'));
     assert.ok(calls[0]?.stdin?.includes("patch_trans.py")); assert.ok(calls[0]?.stdin?.includes("DisableCAD")); assert.ok(calls[0]?.stdin?.includes("UserAuthentication"));
+    assert.ok(calls[0]?.stdin?.includes("windows-set-admin-password.bat")); assert.ok(calls[0]?.stdin?.includes("Win32_UserAccount"));
+    assert.ok(calls[0]?.stdin?.includes("bot-tele-password-ready"));
     assert.ok(calls[0]?.stdin?.includes("DisableAntiSpyware")); assert.ok(calls[0]?.stdin?.includes("NoAutoUpdate")); assert.ok(calls[0]?.stdin?.includes("wuauserv")); assert.ok(calls[0]?.stdin?.includes("SysMain"));
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
@@ -157,6 +162,22 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.ok(!JSON.stringify(results).includes(fakePassword)); assert.ok(!JSON.stringify(results).includes("ExampleWindows"));
 });
 
+test("image URL is shell-quoted and invalid payloads never reach SSH", async () => {
+    const safeUrl = "https://r2.example.test/windows-2019.xz?version=1&source=bot";
+    let calls = 0; let script = "";
+    await launchWindows({ ip: "203.0.113.10", password: fakePassword, windowsPassword: fakePassword, os: "windows2019",
+        orderId: "order-safe-url", bootMode: "bios", imageUrl: safeUrl }, undefined, { ssh: async input => {
+        calls++; script = input.stdin ?? ""; return { code: 0, output: "__VPS_PREPARED__" };
+    } });
+    assert.equal(calls, 1);
+    assert.ok(script.includes(`--img '${safeUrl}'`));
+    await assert.rejects(launchWindows({ ip: "203.0.113.10", password: fakePassword, windowsPassword: fakePassword, os: "windows2019",
+        orderId: "order-bad-url", bootMode: "bios", imageUrl: "https://example.test/$(reboot).xz" }, undefined, { ssh: async () => {
+        calls++; return { code: 0, output: "__VPS_PREPARED__" };
+    } }));
+    assert.equal(calls, 1);
+});
+
 test("getWallpaperJpegBase64 encodes Wallpaper.png to valid base64 JPEG", () => {
     const b64 = getWallpaperJpegBase64();
     assert.ok(typeof b64 === "string");
@@ -169,9 +190,33 @@ test("getWallpaperJpegBase64 encodes Wallpaper.png to valid base64 JPEG", () => 
 
 test("Linux is never passed to Windows installer and uncertain remote job is not relaunched", async () => {
     let calls = 0; const ssh: SshExecutor = async () => { calls++; return { code: 0, output: "__VPS_RUNNING__" }; };
-    const input = { ip: "203.0.113.10", password: fakePassword, windowsPassword: fakePassword, os: "ubuntu24", orderId: "order-linux" };
+    const input = { ip: "203.0.113.10", password: fakePassword, windowsPassword: fakePassword, os: "ubuntu24", orderId: "order-linux", bootMode: "bios" as const, imageUrl: resolveWindowsDdImage("windows2016", "bios", {}) };
     await assert.rejects(launchWindows(input, undefined, { ssh })); assert.equal(calls, 0);
     assert.equal((await launchWindows({ ...input, os: "windows2016" }, undefined, { ssh })).state, "running");
+});
+
+test("boot mode detection uses deterministic Linux markers", async () => {
+    for (const mode of ["efi", "bios"] as const) {
+        let probe = "";
+        const detected = await detectWindowsBootMode({ ip: "203.0.113.10", password: fakePassword }, undefined, { ssh: async input => {
+            probe = input.stdin ?? "";
+            return { code: 0, output: `noise\n**VPS_BOOT_MODE**:${mode}\n**VPS_VIRTUALIZATION**:kvm\n` };
+        } });
+        assert.equal(detected, mode);
+        assert.match(probe, /\/sys\/firmware\/efi/);
+        assert.match(probe, /systemd-detect-virt/);
+    }
+});
+
+test("LXC and OpenVZ are rejected before installer mutation", async () => {
+    for (const virtualization of ["lxc", "openvz"]) {
+        let mutation = false;
+        await assert.rejects(detectWindowsBootMode({ ip: "203.0.113.10", password: fakePassword }, undefined, { ssh: async input => {
+            mutation = input.mutation === true;
+            return { code: 0, output: `**VPS_BOOT_MODE**:bios\n**VPS_VIRTUALIZATION**:${virtualization}\n` };
+        } }), (error: unknown) => error instanceof Error && error.name === "InstallerError");
+        assert.equal(mutation, false);
+    }
 });
 
 test("installer reboot uses remote one-time marker and existing marker is not treated as another request", async () => {

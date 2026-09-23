@@ -14,6 +14,7 @@ function orderFixture(patch: Partial<IVpsOrder> = {}): IVpsOrder {
         paymentStatus: "paid", paymentMethod: "balance", paymentPaidAt: now, paymentInvoiceLeaseUntil: null, refundReason: null, refundedAt: null,
         stage: "rebooting", resumeStage: null, credentialId: null, accountId: "team:one", dropletId: 42, publicIp: "203.0.113.10", createName: "bt-vps-order-one",
         createAttemptedAt: now, reservationActive: false, passwordEncrypted: "encrypted-fixture", lastError: null, evidence: "", installerLogUrl: null,
+        installerBootMode: "efi", installerImageUrl: "https://images.example.test/windows2022-efi.xz",
         stageStartedAt: now, rdpSuccesses: 0, lockOwner: "worker-one", lockUntil: new Date(now.getTime() + 120000), nextRunAt: now,
         rebootState: "idle", rebootActionId: null, rebootRequestedAt: null, createdAt: now, updatedAt: now, ...patch,
     };
@@ -23,6 +24,8 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
         save: async () => {}, client: async () => { throw new Error("API must not be used in this step"); },
         reserve: async () => { throw new Error("No new capacity may be reserved"); }, password: () => "MockPassword123!xyz",
         testSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
+        detectWindowsBootMode: async () => { throw new Error("Boot detection must not be repeated"); },
+        resolveWindowsDdImage: () => { throw new Error("Image selection must not be repeated"); },
         launchWindows: async () => { throw new Error("Installer preparation must not be repeated"); },
         scheduleInstallerReboot: async () => "scheduled", inspectWindows: async () => ({ rdpOpen: false, loginVerified: false, logState: "unavailable", detail: "Waiting" }),
         clearToken: () => {}, now: Date.now, signal: new AbortController().signal, ...patch,
@@ -40,7 +43,8 @@ test("reboot recovery keeps durable intent until scheduling is actually attempte
 
 test("direct buyer VPS skips DigitalOcean creation and installs Windows with supplied SSH access", async () => {
     const order = orderFixture({ stage: "queued", accountId: null, dropletId: null, createAttemptedAt: null,
-        sourceUsername: "ubuntu", sourcePasswordEncrypted: "encrypted-source", publicIp: "192.0.2.10" });
+        sourceUsername: "ubuntu", sourcePasswordEncrypted: "encrypted-source", publicIp: "192.0.2.10",
+        installerBootMode: null, installerImageUrl: null });
     let providerCalls = 0; let sshChecks = 0; let installs = 0;
     const deps = dependencies({
         client: async () => { providerCalls++; throw new Error("DigitalOcean must not be used"); },
@@ -50,11 +54,14 @@ test("direct buyer VPS skips DigitalOcean creation and installs Windows with sup
             assert.deepEqual(input, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
             return true;
         },
+        detectWindowsBootMode: async () => "efi",
+        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
         launchWindows: async input => {
             installs++;
             assert.equal(input.ip, "192.0.2.10"); assert.equal(input.username, "ubuntu");
             assert.equal(input.password, "synthetic-source-password"); assert.equal(input.windowsPassword, "MockPassword123!xyz");
-            return { state: "prepared" };
+            assert.equal(input.bootMode, "efi"); assert.match(input.imageUrl, /windows2022-efi/);
+            return { state: "prepared", bootMode: input.bootMode, imageUrl: input.imageUrl };
         },
     });
 
@@ -65,6 +72,52 @@ test("direct buyer VPS skips DigitalOcean creation and installs Windows with sup
     await advanceVpsOrder(order, deps);
     assert.equal(order.stage, "rebooting");
     assert.equal(providerCalls, 0); assert.equal(sshChecks, 1); assert.equal(installs, 1);
+});
+
+test("persisted Windows image selection skips detection and resolution on retry", async () => {
+    const order = orderFixture({ stage: "installing", installerBootMode: "efi", installerImageUrl: "https://images.example.test/persisted-efi.xz" });
+    let launches = 0;
+    await advanceVpsOrder(order, dependencies({
+        detectWindowsBootMode: async () => { throw new Error("must not detect again"); },
+        resolveWindowsDdImage: () => { throw new Error("must not resolve against changed environment"); },
+        launchWindows: async input => {
+            launches++;
+            assert.equal(input.bootMode, "efi");
+            assert.equal(input.imageUrl, "https://images.example.test/persisted-efi.xz");
+            return { state: "prepared", bootMode: input.bootMode, imageUrl: input.imageUrl };
+        },
+    }));
+    assert.equal(launches, 1);
+    assert.equal(order.stage, "rebooting");
+});
+
+test("installer cannot launch until detected mode and image are durably saved", async () => {
+    const order = orderFixture({ stage: "installing", installerBootMode: null, installerImageUrl: null });
+    let launches = 0;
+    await assert.rejects(advanceVpsOrder(order, dependencies({
+        detectWindowsBootMode: async () => "efi",
+        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
+        save: async patch => {
+            if (patch.installerBootMode || patch.installerImageUrl) throw new Error("simulated persistence outage");
+        },
+        launchWindows: async () => { launches++; throw new Error("must not launch"); },
+    })));
+    assert.equal(launches, 0);
+    assert.equal(order.installerBootMode, null);
+    assert.equal(order.installerImageUrl, null);
+});
+
+test("unsupported container virtualization fails before installer launch", async () => {
+    const order = orderFixture({ stage: "installing", installerBootMode: null, installerImageUrl: null });
+    let launches = 0;
+    await advanceVpsOrder(order, dependencies({
+        detectWindowsBootMode: async () => { throw new InstallerError("validation", false, "unsupported_virtualization"); },
+        launchWindows: async () => { launches++; throw new Error("must not launch"); },
+    }));
+    assert.equal(launches, 0);
+    assert.equal(order.stage, "failed");
+    assert.equal(order.lastError, "validation_failed");
+    assert.match(order.evidence, /LXC\/OpenVZ/);
 });
 
 test("crash after guarded scheduling retains rebooting; recovery observes marker without another reboot", async () => {

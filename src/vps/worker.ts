@@ -8,7 +8,8 @@ import { decryptSecret } from "../services/crypto.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ThrottledWarningLogger } from "../runtime/retryLogger.js";
 import { DigitalOceanClient, DigitalOceanError } from "./digitalOcean.js";
-import { buildUserData, getOs, inspectWindows, launchWindows, scheduleInstallerReboot, testSsh } from "./installer.js";
+import { buildUserData, detectWindowsBootMode, getOs, inspectWindows, InstallerError, launchWindows, scheduleInstallerReboot, testSsh } from "./installer.js";
+import { resolveWindowsDdImage } from "./windowsImages.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
 import { providerForCredential, releaseCapacityTicket, reserveStoreCapacity } from "./credentials.js";
 import { reconcileVpsPayments, refundVpsOrder } from "./payment.js";
@@ -21,6 +22,8 @@ export interface VpsStepDependencies {
   sourcePassword?(): string;
   sourceUsername?(): string;
   testSsh: typeof testSsh;
+  detectWindowsBootMode: typeof detectWindowsBootMode;
+  resolveWindowsDdImage: typeof resolveWindowsDdImage;
   launchWindows: typeof launchWindows;
   scheduleInstallerReboot: typeof scheduleInstallerReboot;
   inspectWindows: typeof inspectWindows;
@@ -160,9 +163,37 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     return;
   }
   if (order.stage === "installing") {
-    const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password, os: order.snapshot.os, orderId: order._id, installChrome: order.snapshot.installChrome === true }, deps.signal);
+    let bootMode = order.installerBootMode;
+    let imageUrl = order.installerImageUrl;
+    if ((bootMode && !imageUrl) || (!bootMode && imageUrl)) {
+      await stage("review", { resumeStage: "ssh", evidence: "Pilihan image installer tidak lengkap; instalasi dihentikan sebelum perubahan disk." });
+      return;
+    }
+    if (!bootMode || !imageUrl) {
+      try {
+        bootMode = await deps.detectWindowsBootMode({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal);
+      } catch (error) {
+        if (error instanceof InstallerError && error.reason === "unsupported_virtualization") {
+          await stage("failed", { lastError: "validation_failed", evidence: "Virtualisasi LXC/OpenVZ tidak mendukung instalasi Windows DD. Disk tidak diubah." });
+        } else {
+          await stage("review", { resumeStage: "ssh", evidence: "Boot mode VPS tidak dapat dideteksi dengan aman; instalasi belum dijalankan." });
+        }
+        return;
+      }
+      try {
+        imageUrl = deps.resolveWindowsDdImage(order.snapshot.os, bootMode);
+      } catch {
+        await stage("failed", { lastError: "validation_failed", evidence: "Konfigurasi image Windows tidak valid; instalasi belum dijalankan." });
+        return;
+      }
+      const bootLabel = bootMode === "efi" ? "UEFI" : "BIOS/Legacy";
+      await save({ installerBootMode: bootMode, installerImageUrl: imageUrl,
+        evidence: `SSH Linux berhasil. Boot mode terdeteksi: ${bootLabel}. Menyiapkan ${getOs(order.snapshot.os)?.name ?? "Windows"}.` });
+    }
+    const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password,
+      os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
-    if (result.state === "prepared") await stage("rebooting", { evidence: "Installer Windows disiapkan. Menjadwalkan reboot instalasi." });
+    if (result.state === "prepared") await stage("rebooting", { evidence: `Installer Windows ${bootMode === "efi" ? "UEFI" : "BIOS/Legacy"} disiapkan. Menjadwalkan reboot instalasi.` });
     else if (result.state === "failed" || deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) {
       const err = result.errorDetail ? ` (${result.errorDetail})` : "";
       await stage("review", { resumeStage: "installing", evidence: `Persiapan installer memerlukan pemeriksaan${err}. Droplet tetap sama dan tidak diinstal ulang otomatis.` });
@@ -278,7 +309,7 @@ export class VpsWorker {
         password: () => decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourceUsername: () => order.sourceUsername ?? "root",
-        testSsh, launchWindows, scheduleInstallerReboot, inspectWindows,
+        testSsh, detectWindowsBootMode, resolveWindowsDdImage, launchWindows, scheduleInstallerReboot, inspectWindows,
         clearToken: () => buyerTokens.delete(order.buyerId, order._id), now: Date.now, signal: stopStep.signal,
       });
       if (order.dropletId) await releaseCapacityTicket(order._id);

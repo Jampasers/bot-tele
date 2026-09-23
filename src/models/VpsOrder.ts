@@ -1,4 +1,5 @@
 import { Schema, model } from "mongoose";
+import type { WindowsBootMode } from "../vps/windowsImages.js";
 
 export interface IVpsOrder {
   _id: string; tenantId: string; buyerId: string; chatId: string;
@@ -14,7 +15,8 @@ export interface IVpsOrder {
   sourceUsername?: string | null; sourcePasswordEncrypted?: string | null;
   createAttemptedAt: Date | null; reservationActive: boolean;
   passwordEncrypted: string; lastError: string | null; evidence: string;
-  installerLogUrl: string | null; stageStartedAt: Date; rdpSuccesses: number;
+  installerLogUrl: string | null; installerBootMode: WindowsBootMode | null; installerImageUrl: string | null;
+  stageStartedAt: Date; rdpSuccesses: number;
   lockOwner: string | null; lockUntil: Date | null; nextRunAt: Date;
   rebootState: "idle" | "requested" | "submitting" | "running" | "completed" | "errored" | "review";
   rebootActionId: number | null; rebootRequestedAt: Date | null;
@@ -34,6 +36,7 @@ const schema = new Schema<IVpsOrder>({
   sourceUsername: { type: String, default: null }, sourcePasswordEncrypted: { type: String, default: null, select: false },
   createAttemptedAt: { type: Date, default: null }, reservationActive: { type: Boolean, default: false }, passwordEncrypted: { type: String, required: true, select: false },
   lastError: { type: String, default: null }, evidence: { type: String, default: "Belum diperiksa" }, installerLogUrl: { type: String, default: null },
+  installerBootMode: { type: String, enum: ["bios", "efi", null], default: null }, installerImageUrl: { type: String, default: null },
   stageStartedAt: { type: Date, default: Date.now }, rdpSuccesses: { type: Number, default: 0 }, lockOwner: { type: String, default: null }, lockUntil: { type: Date, default: null }, nextRunAt: { type: Date, default: Date.now },
   rebootState: { type: String, enum: ["idle", "requested", "submitting", "running", "completed", "errored", "review"], default: "idle" },
   rebootActionId: { type: Number, default: null }, rebootRequestedAt: { type: Date, default: null },
