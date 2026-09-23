@@ -3,6 +3,7 @@ import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { BuyerTokenVault, buyerTokens } from "../../src/vps/security.js";
 import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
@@ -202,4 +203,40 @@ test("admin combination price validates catalog membership before any write and 
   assert.ok(Array.isArray(writes[1]!.update));
   assert.deepEqual(writes[1]!.filter, { _id: plan.id, tenantId: "platform" });
   assert.deepEqual(writes[1]!.options, { updatePipeline: true });
+});
+
+test("admin token deletion requires disabled state and refuses active order references", async t => {
+  env(t);
+  const old = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
+  t.after(() => { if (old === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = old; });
+  const credential = { _id: randomUUID(), accountId: "team:store", enabled: true };
+  let activeOrder = false, reservation = false, deletes = 0, accountWrites = 0;
+  t.mock.method(VpsCredential, "findOne", () => query(() => credential));
+  t.mock.method(VpsCredential, "deleteOne", async (filter: { _id: string; tenantId: string; enabled: boolean }) => {
+    assert.deepEqual(filter, { _id: credential._id, tenantId: "platform", enabled: false });
+    deletes++; return { deletedCount: 1 } as never;
+  });
+  t.mock.method(VpsOrder, "exists", async () => activeOrder ? { _id: "active-order" } as never : null);
+  t.mock.method(VpsAccount, "exists", async () => reservation ? { _id: credential.accountId } as never : null);
+  t.mock.method(VpsAccount, "findOneAndUpdate", async () => ({ _id: credential.accountId } as never));
+  t.mock.method(VpsAccount, "updateOne", async () => { accountWrites++; return { matchedCount: 1 } as never; });
+
+  await platform(async () => {
+    await assert.rejects(vpsService.deleteCredential("999", credential._id), /admin/);
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "enabled" });
+    assert.equal(deletes, 0); assert.equal(accountWrites, 0);
+
+    credential.enabled = false; activeOrder = true;
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use" });
+    assert.equal(deletes, 0);
+
+    activeOrder = false; reservation = true;
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "in_use" });
+    assert.equal(deletes, 0);
+
+    reservation = false;
+    assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "deleted" });
+    assert.equal(deletes, 1);
+    assert.equal(accountWrites, 6); // lease document + release for each disabled deletion attempt
+  });
 });

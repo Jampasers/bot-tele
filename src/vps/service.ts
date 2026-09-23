@@ -9,7 +9,7 @@ import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
 import { defaultVpsCatalog, getVpsCatalog } from "./catalog.js";
 import { catalogPlans, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
-import { addCredential, checkAllCredentials, checkCredential, credentialDto, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
+import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
 
@@ -247,7 +247,7 @@ export const vpsService: VpsUiDependencies = {
   },
   async checkPayment(actor, orderId) { return checkVpsPayment(orderId, actor); },
   cancel, reboot: requestVpsReboot,
-  listCredentials, checkCredential, checkAllCredentials, addCredential,
+  listCredentials, checkCredential, checkAllCredentials, addCredential, deleteCredential,
   async getCredential(actor, id) { assertVpsAdmin(actor); const c = await VpsCredential.findOne({ _id: id, tenantId: "platform" }).lean(); return c ? credentialDto(c) : null; },
   async updateCredential(actor, id, input) {
     assertVpsAdmin(actor);

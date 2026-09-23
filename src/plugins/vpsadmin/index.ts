@@ -60,7 +60,25 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     if (!credential) throw new Error("Credential unavailable");
     await vpsReply(ctx, vpsCredentialText(credential), new InlineKeyboard().text("🔎 Cek token", `vpa_check_${id}`).row()
       .text(credential.enabled ? "Nonaktifkan" : "Aktifkan", `vpa_enable_${id}_${credential.enabled ? "0" : "1"}`).text("Prioritas", `vpa_priority_${id}`).row()
+      .text("🗑 Hapus token", `vpa_delete_${id}`).row()
       .text("🔙 Token & akun", "vpa_tokens_all_0"));
+  }
+
+  async function deleteCredentialPrompt(ctx: Context, id: string): Promise<void> {
+    const credential = await deps.getCredential(actorOf(ctx), id);
+    if (!credential) {
+      await vpsReply(ctx, "Token sudah tidak tersedia.", new InlineKeyboard().text("🔙 Token & akun", "vpa_tokens_all_0"));
+      return;
+    }
+    if (credential.enabled) {
+      await vpsReply(ctx, `⚠️ Hapus token DO\n\n${credential.label}\n\nNonaktifkan token terlebih dahulu agar tidak dipilih untuk order baru. Setelah itu buka kembali tombol hapus.`, new InlineKeyboard()
+        .text("Nonaktifkan token", `vpa_enable_${id}_0`).row()
+        .text("Batal", `vpa_credential_${id}`));
+      return;
+    }
+    await vpsReply(ctx, `⚠️ Konfirmasi hapus token DO\n\nLabel: ${credential.label}\nAkun/team: ${known(credential.accountId)}\n\nToken terenkripsi akan dihapus permanen dari database. Penghapusan ditolak bila token masih dipakai proses order atau reservasi aktif. Pesanan yang sudah selesai tidak dapat memakai token ini lagi untuk aksi provider seperti reboot.`, new InlineKeyboard()
+      .text("Ya, hapus permanen", `vpa_deleteconfirm_${id}`).row()
+      .text("Batal", `vpa_credential_${id}`));
   }
   async function getPlan(id: string) {
     const plan = (await deps.listPlans(undefined, true)).find(item => item.id === id);
@@ -297,6 +315,22 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           if (offset + 10 < allPlans.length) keyboard.text("Berikutnya →", `vpa_plans_${offset + 10}`);
           keyboard.row().text("🧩 Katalog", "vpa_catalog").text("🔙 Admin VPS", "vpa_home");
           await vpsReply(ctx, "💰 Paket & harga VPS\n\nSemua spek katalog sudah tersedia. Pilih layanan/spek, lalu region dan OS untuk mengisi harga.", keyboard);
+          return;
+        }
+        const deletion = /^vpa_(delete|deleteconfirm)_([A-Za-z0-9-]{1,40})$/.exec(data);
+        if (deletion) {
+          const id = deletion[2]!;
+          if (deletion[1] === "delete") { await deleteCredentialPrompt(ctx, id); return; }
+          const result = await deps.deleteCredential(actor, id);
+          if (result.status === "deleted") {
+            await vpsReply(ctx, "✅ Token DigitalOcean telah dihapus permanen.", new InlineKeyboard().text("🔙 Token & akun", "vpa_tokens_all_0"));
+          } else if (result.status === "enabled") {
+            await vpsReply(ctx, "Token kembali aktif atau belum dinonaktifkan, sehingga tidak dihapus.", new InlineKeyboard().text("Buka detail token", `vpa_credential_${id}`).row().text("🔙 Token & akun", "vpa_tokens_all_0"));
+          } else if (result.status === "in_use") {
+            await vpsReply(ctx, "Token masih dipakai oleh proses order, reboot, atau reservasi aktif sehingga belum boleh dihapus. Selesaikan atau tinjau proses tersebut lalu coba lagi.", new InlineKeyboard().text("Buka detail token", `vpa_credential_${id}`).row().text("🔙 Token & akun", "vpa_tokens_all_0"));
+          } else {
+            await vpsReply(ctx, "Token sudah tidak tersedia; tidak ada data rahasia yang dihapus lagi.", new InlineKeyboard().text("🔙 Token & akun", "vpa_tokens_all_0"));
+          }
           return;
         }
         const item = /^vpa_(credential|check|priority|plan)_([A-Za-z0-9-]{1,40})$/.exec(data);

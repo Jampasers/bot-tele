@@ -4,7 +4,7 @@ import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { assertVpsAdmin, assertVpsPlatform } from "./security.js";
-import type { VpsUiCredential, VpsCredentialFilter } from "../plugins/vps/contracts.js";
+import type { VpsUiCredential, VpsCredentialDeleteResult, VpsCredentialFilter } from "../plugins/vps/contracts.js";
 
 type Credential = IVpsCredential;
 export function credentialDto(c: Pick<Credential, "_id" | "label" | "priority" | "enabled" | "accountId" | "accountStatus" | "statusMessage" | "health" | "dropletLimit" | "used" | "reservations" | "checkedAt" | "lastCreateResult" | "lastCreateAt">): VpsUiCredential {
@@ -83,6 +83,46 @@ export async function checkAllCredentials(actor: string): Promise<void> {
   let batch: Promise<unknown>[] = [];
   for await (const c of cursor) { batch.push(checkCredential(actor, c._id)); if (batch.length === 3) { await Promise.allSettled(batch); batch = []; } }
   await Promise.allSettled(batch);
+}
+
+/** Permanently remove an encrypted platform token only after it is disabled.
+ * The shared account lease fences this deletion against capacity reservation,
+ * while durable order/ticket checks protect provisioning already in progress. */
+export async function deleteCredential(actor: string, id: string): Promise<VpsCredentialDeleteResult> {
+  assertVpsAdmin(actor);
+  const credential = await VpsCredential.findOne({ _id: id, tenantId: "platform" }).select("_id accountId enabled").lean();
+  if (!credential) return { status: "not_found" };
+  if (credential.enabled) return { status: "enabled" };
+
+  const leaseId = randomUUID();
+  await VpsAccount.updateOne({ _id: credential.accountId }, { $setOnInsert: { lockUntil: null, lockOwner: null } }, { upsert: true })
+    .catch(error => { if (error?.code !== 11000) throw error; });
+  const lease = await VpsAccount.findOneAndUpdate({
+    _id: credential.accountId,
+    $or: [{ lockUntil: null }, { lockUntil: { $lt: new Date() } }],
+  }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { returnDocument: "after" });
+  if (!lease) return { status: "in_use" };
+
+  try {
+    const [activeOrder, reservation] = await Promise.all([
+      VpsOrder.exists({
+        tenantId: "platform", credentialId: id,
+        $or: [
+          { reservationActive: true },
+          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "needs_token", "review"] } },
+          { rebootState: { $in: ["requested", "submitting", "running", "review"] } },
+        ],
+      }),
+      VpsAccount.exists({ _id: credential.accountId, "reservations.credentialId": id }),
+    ]);
+    if (activeOrder || reservation) return { status: "in_use" };
+
+    const deleted = await VpsCredential.deleteOne({ _id: id, tenantId: "platform", enabled: false });
+    if (deleted.deletedCount === 1) return { status: "deleted" };
+    return await VpsCredential.exists({ _id: id, tenantId: "platform" }) ? { status: "enabled" } : { status: "not_found" };
+  } finally {
+    await VpsAccount.updateOne({ _id: credential.accountId, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null } });
+  }
 }
 
 /** Serialize provider snapshots and reservations across processes and same-team tokens. */

@@ -377,6 +377,49 @@ test("admin token wizard never saves a token when message deletion fails", async
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-store-token/);
 });
 
+test("admin permanently deletes a disabled DO token only after explicit confirmation", async t => {
+  const old = process.env["ADMIN_ID"];
+  process.env["ADMIN_ID"] = "42";
+  t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
+  const credential = { id: "credential-1", label: "Team Lama", accountId: "team:legacy", enabled: true, priority: 9 };
+  let deletes = 0;
+  const { bot, calls } = await harness({
+    getCredential: async () => credential,
+    updateCredential: async (_actor, _id, input) => { if (input.enabled !== undefined) credential.enabled = input.enabled; },
+    deleteCredential: async (actor, id) => {
+      assert.equal(actor, "42"); assert.equal(id, credential.id); deletes++;
+      return { status: "deleted" };
+    },
+  }, { admin: true });
+
+  await bot.handleUpdate(update(1, `vpa_credential_${credential.id}`, true));
+  assert.match(JSON.stringify(calls), /vpa_delete_credential-1/);
+  await bot.handleUpdate(update(2, `vpa_delete_${credential.id}`, true));
+  assert.equal(deletes, 0);
+  assert.match(replies(calls), /Nonaktifkan token terlebih dahulu/);
+
+  await bot.handleUpdate(update(3, `vpa_enable_${credential.id}_0`, true));
+  await bot.handleUpdate(update(4, `vpa_delete_${credential.id}`, true));
+  assert.equal(deletes, 0);
+  assert.match(replies(calls), /Konfirmasi hapus token DO/);
+  assert.match(JSON.stringify(calls), /vpa_deleteconfirm_credential-1/);
+
+  await bot.handleUpdate(update(5, `vpa_deleteconfirm_${credential.id}`, true));
+  assert.equal(deletes, 1);
+  assert.match(replies(calls), /telah dihapus permanen/);
+});
+
+test("nonadmin cannot confirm deletion of a platform DO token", async t => {
+  const old = process.env["ADMIN_ID"];
+  process.env["ADMIN_ID"] = "42";
+  t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
+  let deletes = 0;
+  const { bot, calls } = await harness({ deleteCredential: async () => { deletes++; return { status: "deleted" }; } }, { admin: true });
+  await bot.handleUpdate(update(1, "vpa_deleteconfirm_credential-1", true, 77));
+  assert.equal(deletes, 0);
+  assert.match(replies(calls), /Hanya admin/);
+});
+
 test("nonadmin callbacks cannot inspect platform DigitalOcean credentials", async t => {
   const old = process.env["ADMIN_ID"];
   process.env["ADMIN_ID"] = "42";

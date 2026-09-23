@@ -41,6 +41,9 @@ export interface VpsUiOrder {
   createdAt?: Date | string;
 }
 export type VpsCredentialFilter = "all" | "active" | "warning" | "locked" | "available" | "problem";
+export type VpsCredentialDeleteResult =
+  | { status: "deleted" }
+  | { status: "enabled" | "in_use" | "not_found" };
 export interface VpsUiCredential {
   id: string;
   label: string;
@@ -92,6 +95,7 @@ export interface VpsUiDependencies {
   checkCredential(actor: string, id: string): Promise<VpsUiCredential>;
   checkAllCredentials(actor: string): Promise<void>;
   updateCredential(actor: string, id: string, input: { enabled?: boolean; priority?: number }): Promise<void>;
+  deleteCredential(actor: string, id: string): Promise<VpsCredentialDeleteResult>;
   updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string; region?: string }): Promise<void>;
 }
 
