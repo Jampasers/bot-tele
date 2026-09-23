@@ -254,6 +254,60 @@ export const vpsService: VpsUiDependencies = {
     if (input.priority !== undefined && (!Number.isInteger(input.priority) || input.priority < 0 || input.priority > 10000)) throw new Error("Prioritas tidak valid.");
     await VpsCredential.updateOne({ _id: id, tenantId: "platform" }, { $set: { ...(input.enabled === undefined ? {} : { enabled: input.enabled }), ...(input.priority === undefined ? {} : { priority: input.priority }) } });
   },
+  async adminCancelOrder(actor: string, orderId: string): Promise<{ status: "cancelled" | "refunded" }> {
+    assertVpsAdmin(actor);
+    assertVpsPlatform();
+    const order = await VpsOrder.findOne({ _id: orderId, tenantId: "platform" }).lean();
+    if (!order) throw new Error("Pesanan tidak ditemukan.");
+    if (order.stage === "cancelled") {
+      return { status: order.paymentStatus === "refunded" ? "refunded" : "cancelled" };
+    }
+    await VpsOrder.updateOne({ _id: orderId, tenantId: "platform" }, {
+      $set: {
+        stage: "cancelled",
+        createAttemptedAt: null,
+        reservationActive: false,
+        lastError: "admin_cancelled",
+        evidence: `Pesanan dibatalkan oleh Admin (${actor}).`,
+      },
+    });
+    await releaseCapacityTicket(orderId);
+    buyerTokens.delete(order.buyerId, orderId);
+    if (order.paymentStatus === "paid" && !order.dropletId) {
+      await refundVpsOrder(orderId, "cancelled_before_create");
+      return { status: "refunded" };
+    }
+    return { status: "cancelled" };
+  },
+  async adminResolveOrder(actor: string, orderId: string, resolution: "ready" | "failed"): Promise<void> {
+    assertVpsAdmin(actor);
+    assertVpsPlatform();
+    const order = await VpsOrder.findOne({ _id: orderId, tenantId: "platform" }).lean();
+    if (!order) throw new Error("Pesanan tidak ditemukan.");
+    if (resolution === "ready") {
+      await VpsOrder.updateOne({ _id: orderId, tenantId: "platform" }, {
+        $set: {
+          stage: "ready",
+          reservationActive: false,
+          evidence: `Pesanan ditandai selesai secara manual oleh Admin (${actor}).`,
+        },
+      });
+      await releaseCapacityTicket(orderId);
+    } else {
+      await VpsOrder.updateOne({ _id: orderId, tenantId: "platform" }, {
+        $set: {
+          stage: "failed",
+          reservationActive: false,
+          lastError: "admin_marked_failed",
+          evidence: `Pesanan ditandai gagal oleh Admin (${actor}).`,
+        },
+      });
+      await releaseCapacityTicket(orderId);
+      if (order.paymentStatus === "paid" && !order.dropletId && !order.createAttemptedAt) {
+        await refundVpsOrder(orderId, "validation_failed");
+      }
+    }
+  },
   async updatePlan(actor, id, input) {
     assertVpsAdmin(actor);
     if (input.price !== undefined && (!Number.isSafeInteger(input.price) || input.price < 1 || input.price > 100_000_000)) throw new Error("Harga tidak valid.");

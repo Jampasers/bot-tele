@@ -252,8 +252,12 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       `Waktu order: ${vpsDate(order.createdAt)}\n` +
       `Pembaruan: ${vpsDate(order.updatedAt)}`;
 
-    const keyboard = new InlineKeyboard()
-      .text("🔄 Perbarui Info", `vpa_orderdetail_${order._id}`).row()
+    const keyboard = new InlineKeyboard();
+    if (["review", "needs_token", "queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring"].includes(order.stage)) {
+      keyboard.text("🛑 Batalkan & Refund Order", `vpa_ordercancel_${order._id}`).row();
+      keyboard.text("✅ Tandai Selesai (Ready)", `vpa_orderready_${order._id}`).row();
+    }
+    keyboard.text("🔄 Perbarui Info", `vpa_orderdetail_${order._id}`).row()
       .text("🔙 Daftar Pesanan", "vpa_orders_all_0")
       .text("🔙 Admin VPS", "vpa_home");
 
@@ -280,6 +284,40 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           return;
         }
         if (data === "vpa_addplan" || data.startsWith("vpa_new")) { await catalogHome(ctx); return; }
+        const orderAction = /^vpa_order(cancel|ready)_([A-Za-z0-9-]{1,40})$/.exec(data);
+        if (orderAction) {
+          const action = orderAction[1];
+          const orderId = orderAction[2]!;
+          const order = await VpsOrder.findOne({ _id: orderId, tenantId: "platform" }).lean();
+          if (!order) { await vpsReply(ctx, "Pesanan tidak ditemukan.", new InlineKeyboard().text("🔙 Admin VPS", "vpa_home")); return; }
+          if (action === "cancel") {
+            await vpsReply(ctx, `⚠️ Batalkan Pesanan #${order._id.slice(0, 8)}\n\nLayanan: ${order.service}\nBuyer: ${order.buyerId}\nStatus Bayar: ${order.paymentStatus}\nTahap: ${order.stage}\n\nPembatalan akan menghentikan pesanan, melepas reservasi kapasitas, dan me-refund saldo pembeli (jika sudah lunas).`, new InlineKeyboard()
+              .text("Ya, Batalkan & Refund", `vpa_confirmcancel_${order._id}`).row()
+              .text("Batal", `vpa_orderdetail_${order._id}`));
+          } else {
+            await vpsReply(ctx, `⚠️ Tandai Pesanan Selesai (Ready)\n\nPesanan #${order._id.slice(0, 8)} akan ditandai selesai (Ready). Gunakan jika VPS sudah aktif atau diselesaikan manual di DigitalOcean.`, new InlineKeyboard()
+              .text("Ya, Tandai Selesai", `vpa_confirmready_${order._id}`).row()
+              .text("Batal", `vpa_orderdetail_${order._id}`));
+          }
+          return;
+        }
+        const confirmOrderAction = /^vpa_confirm(cancel|ready)_([A-Za-z0-9-]{1,40})$/.exec(data);
+        if (confirmOrderAction) {
+          const action = confirmOrderAction[1];
+          const orderId = confirmOrderAction[2]!;
+          if (action === "cancel") {
+            const res = await deps.adminCancelOrder?.(actor, orderId);
+            await vpsReply(ctx, `✅ Pesanan #${orderId.slice(0, 8)} berhasil dibatalkan${res?.status === "refunded" ? " dan saldo pembeli telah di-refund" : ""}.\n\nToken DO dan reservasi kapasitas telah dilepaskan.`, new InlineKeyboard()
+              .text("🔎 Lihat Detail Order", `vpa_orderdetail_${orderId}`).row()
+              .text("🔙 Daftar Pesanan", "vpa_orders_all_0").text("🔙 Token & Akun", "vpa_tokens_all_0"));
+          } else {
+            await deps.adminResolveOrder?.(actor, orderId, "ready");
+            await vpsReply(ctx, `✅ Pesanan #${orderId.slice(0, 8)} telah ditandai Selesai (Ready).\n\nToken DO kini bebas dari pesanan aktif.`, new InlineKeyboard()
+              .text("🔎 Lihat Detail Order", `vpa_orderdetail_${orderId}`).row()
+              .text("🔙 Daftar Pesanan", "vpa_orders_all_0").text("🔙 Token & Akun", "vpa_tokens_all_0"));
+          }
+          return;
+        }
         const orderListMatch = /^vpa_orders_(all|paid|ready|review|unpaid)_(\d{1,6})$/.exec(data);
         if (orderListMatch) {
           await ordersList(ctx, orderListMatch[1] as VpsOrderFilter, Number(orderListMatch[2]));
