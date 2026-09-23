@@ -15,7 +15,7 @@ import { RestockAlert } from "../../models/RestockAlert.js";
 import { validatePromo, applyPromo } from "../../services/promo.js";
 import { awardCommission } from "../../services/affiliate.js";
 import { WarrantyService } from "../../services/warranty.js";
-import { TotpService } from "../../services/totp.js";
+import { TotpService, type TotpStockReference } from "../../services/totp.js";
 
 // ============================================================================
 //  CONSTANTS & TIMINGS
@@ -81,6 +81,19 @@ function formatDate(date: Date): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatTotpAccountLines(stocks: readonly TotpStockReference[]): string {
+  if (stocks.length === 0) return "";
+  const label = stocks.length === 1 ? "Kode Akun" : "Kode Akun 2FA";
+  return `🔐 <b>${label}:</b> ${stocks.map((stock) => `<code>${stock.accountCode}</code>`).join(", ")}\n`;
+}
+
+function addTotpButtons(keyboard: InlineKeyboard, stocks: readonly TotpStockReference[]): void {
+  for (const stock of stocks) {
+    const suffix = stocks.length > 1 ? ` (${stock.accountCode})` : "";
+    keyboard.text(`🔐 Ambil Kode 2FA${suffix}`, `totp_refresh_${stock.stockId}`).row();
+  }
 }
 
 function getDeliveryTypeLabel(type?: DeliveryType): string {
@@ -648,6 +661,7 @@ function startDigitalQrisPolling(
             `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
             `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
             `<code>${result.itemContent}</code>\n\n` +
+            formatTotpAccountLines(result.totpStocks) +
             delivNote +
             `⚠️ <i>Harap simpan data di atas. Kamu juga bisa melihatnya kapan saja di menu Riwayat Pesanan.</i>`;
 
@@ -659,6 +673,7 @@ function startDigitalQrisPolling(
           );
 
           const kb = new InlineKeyboard();
+          addTotpButtons(kb, result.totpStocks);
           if (hasWarranty) {
             kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
           }
@@ -1017,7 +1032,9 @@ const digitalPlugin: Plugin = {
 
         deliverySection +=
           `📦 <b>${num}. ${typeIcon} ${itm.productName} (${itm.quantity}x)</b>\n` +
-          `🔑 <code>${itm.itemContent}</code>${delivNote}\n\n`;
+          `🔑 <code>${itm.itemContent}</code>\n` +
+          formatTotpAccountLines(itm.totpStocks) +
+          `${delivNote}\n\n`;
       }
 
       const successMsg =
@@ -1033,18 +1050,8 @@ const digitalPlugin: Plugin = {
         deliverySection +
         `⚠️ <i>Harap simpan data di atas. Data pesanan juga dapat diakses di menu Riwayat Pesanan kapan saja.</i>`;
 
-      let cartHas2Fa = false;
-      for (const itm of result.items) {
-        if (itm.itemContent && TotpService.extractSecret(itm.itemContent)) {
-          cartHas2Fa = true;
-          break;
-        }
-      }
-
       const kb = new InlineKeyboard();
-      if (cartHas2Fa) {
-        kb.text("🔐 Minta Kode OTP (2FA)", `dg_totp_ord_${result.order.orderId}`).row();
-      }
+      addTotpButtons(kb, result.items.flatMap((item) => item.totpStocks));
       kb.text("📜 Riwayat Pesanan", "dg_myorders")
         .row()
         .text("🛍️ Belanja Lagi", "product_digital");
@@ -1401,6 +1408,7 @@ const digitalPlugin: Plugin = {
               `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
               `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
               `<code>${result.itemContent}</code>\n\n` +
+              formatTotpAccountLines(result.totpStocks) +
               delivNote +
               `⚠️ <i>Harap simpan data di atas. Data pesanan juga dapat diakses melalui tombol di bawah.</i>`;
 
@@ -1411,12 +1419,8 @@ const digitalPlugin: Plugin = {
               new Date() < result.order.warrantyExpiresAt
             );
 
-            const has2Fa = Boolean(TotpService.extractSecret(result.itemContent));
-
             const kb = new InlineKeyboard();
-            if (has2Fa) {
-              kb.text("🔐 Minta Kode OTP (2FA)", `dg_totp_ord_${result.order.orderId}`).row();
-            }
+            addTotpButtons(kb, result.totpStocks);
             if (hasWarranty) {
               kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
             }
@@ -1761,6 +1765,7 @@ const digitalPlugin: Plugin = {
               `📅 <b>Waktu:</b> ${formatDate(result.order.createdAt)}\n\n` +
               `🔑 <b>DATA PRODUK / AKUN (${result.quantity} item):</b>\n` +
               `<code>${result.itemContent}</code>\n\n` +
+              formatTotpAccountLines(result.totpStocks) +
               delivNote +
               `⚠️ <i>Harap simpan data di atas.</i>`;
 
@@ -1772,6 +1777,7 @@ const digitalPlugin: Plugin = {
             );
 
             const kb = new InlineKeyboard();
+            addTotpButtons(kb, result.totpStocks);
             if (hasWarranty) {
               kb.text("🛡️ Klaim Garansi", `dg_claim_${result.order.orderId}`).row();
             }
@@ -1920,6 +1926,10 @@ const digitalPlugin: Plugin = {
 
         const kb = new InlineKeyboard();
         const claimableOrders: string[] = [];
+        const totpRefsByOrder = await TotpService.getReferencesForOrders(
+          orders.map((order) => order.orderId),
+          String(from.id)
+        );
 
         for (const ord of orders) {
           const qtyText = ord.quantity && ord.quantity > 1 ? ` (x${ord.quantity})` : "";
@@ -1944,12 +1954,8 @@ const digitalPlugin: Plugin = {
             }
           }
 
-          // Check if order contains a 2FA TOTP secret
-          const totpSecret = TotpService.extractSecret(ord.itemContent || ord.items?.[0]?.itemContent || "");
-          if (totpSecret) {
-            const pName = ord.productName || ord.items?.[0]?.productName || "Produk Digital";
-            kb.text(`🔐 OTP 2FA: ${pName.slice(0, 14)} (${ord.orderId.slice(-6)})`, `dg_totp_ord_${ord.orderId}`).row();
-          }
+          const totpRefs = totpRefsByOrder.get(ord.orderId) ?? [];
+          addTotpButtons(kb, totpRefs);
 
           const displayName = ord.productName || ord.items?.[0]?.productName || "Produk Digital";
           msg +=
@@ -1958,6 +1964,7 @@ const digitalPlugin: Plugin = {
             `📅 ${formatDate(ord.createdAt)}\n` +
             warrantyLine +
             `🔑 <code>${ord.itemContent || "—"}</code>\n` +
+            formatTotpAccountLines(totpRefs) +
             delivNote +
             `\n`;
         }
@@ -1972,52 +1979,6 @@ const digitalPlugin: Plugin = {
         });
       } catch (err) {
         console.error("[digital] dg_myorders error:", err);
-      }
-    });
-
-    // ── dg_totp_ord_<orderId> — Show live 2FA OTP for a purchased order ─────
-    bot.callbackQuery(/^dg_totp_ord_(.+)$/, async (ctx) => {
-      await ctx.answerCallbackQuery();
-      const from = ctx.from;
-      if (!from) return;
-
-      const orderId = ctx.match[1];
-      if (!orderId) return;
-
-      try {
-        const order = await DigitalProductService.getOrderByOrderId(orderId);
-        if (!order || order.userId !== String(from.id)) {
-          await ctx.answerCallbackQuery({
-            text: "⚠️ Pesanan tidak ditemukan atau bukan milik akun ini.",
-            show_alert: true,
-          });
-          return;
-        }
-
-        const rawContent = order.itemContent || order.items?.[0]?.itemContent || "";
-        const secret = TotpService.extractSecret(rawContent);
-
-        if (!secret) {
-          await ctx.answerCallbackQuery({
-            text: "⚠️ Tidak ada 2FA secret key yang terdeteksi pada pesanan ini.",
-            show_alert: true,
-          });
-          return;
-        }
-
-        const displayName = order.productName || order.items?.[0]?.productName || "Akun Digital";
-        const { text, keyboard } = TotpService.buildTotpView(secret, {
-          label: `${displayName} (Order: ${order.orderId})`,
-          backCallback: "dg_myorders",
-          backLabel: "🔙 Kembali ke Riwayat Pesanan",
-        });
-
-        await safeEditOrReply(ctx, text, {
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-        });
-      } catch (err) {
-        console.error("[digital] dg_totp_ord error:", err);
       }
     });
 

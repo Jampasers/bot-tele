@@ -14,6 +14,15 @@ import { BalanceLog } from "../models/BalanceLog.js";
 import { RestockAlert } from "../models/RestockAlert.js";
 import { WarrantyService } from "./warranty.js";
 import { CartService, CartSummary } from "./cartService.js";
+import { encryptSecret } from "./crypto.js";
+import {
+  digitalStockTotpPurpose,
+  isValidAccountCode,
+  isValidTotpSecret,
+  normalizeAccountCode,
+  normalizeTotpSecret,
+  type TotpStockReference,
+} from "./totp.js";
 import type { Api } from "grammy";
 
 // ============================================================================
@@ -78,6 +87,7 @@ export interface DeliveredLineItem {
   warrantyDuration?: number | undefined;
   warrantyUnit?: WarrantyUnit | undefined;
   maxClaims?: number | undefined;
+  totpStocks: TotpStockReference[];
 }
 
 export type PurchaseResult =
@@ -93,6 +103,7 @@ export type PurchaseResult =
       fileUrl?: string | undefined;
       dynamicResponse?: string | undefined;
       deliveryMessage?: string | undefined;
+      totpStocks: TotpStockReference[];
     }
   | {
       success: false;
@@ -105,6 +116,109 @@ export type PurchaseResult =
         | "INTERNAL_ERROR";
       message: string;
     };
+
+export interface PreparedDigitalStock {
+  _id: Types.ObjectId;
+  productId: Types.ObjectId;
+  content: string;
+  accountCode?: string | undefined;
+  totpSecretEncrypted?: string | undefined;
+  isSold: false;
+  createdAt: Date;
+}
+
+interface ParsedDigitalStock {
+  row: number;
+  content: string;
+  accountCode?: string | undefined;
+  totpSecret?: string | undefined;
+}
+
+export class DigitalStockInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DigitalStockInputError";
+  }
+}
+
+function parseDigitalStockInput(rawText: string): ParsedDigitalStock[] {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const parsed = lines.map((line, index): ParsedDigitalStock => {
+    const row = index + 1;
+    const parts = line.split("|");
+
+    // The established stock format remains an opaque payload. Exactly four
+    // pipe-delimited fields opt into the protected account-code/TOTP format.
+    if (parts.length !== 4) return { row, content: line };
+
+    const username = parts[0]!.trim();
+    const password = parts[1]!.trim();
+    const accountCode = normalizeAccountCode(parts[2]!);
+    const totpSecret = normalizeTotpSecret(parts[3]!);
+
+    if (!username || !password) {
+      throw new DigitalStockInputError(`Baris ${row}: email/username dan password wajib diisi.`);
+    }
+    if (!isValidAccountCode(accountCode)) {
+      throw new DigitalStockInputError(
+        `Baris ${row}: accountCode harus 3-40 karakter A-Z, 0-9, underscore, atau tanda minus.`
+      );
+    }
+    if (!isValidTotpSecret(totpSecret)) {
+      throw new DigitalStockInputError(`Baris ${row}: TOTP secret tidak valid.`);
+    }
+
+    return {
+      row,
+      content: `${username}|${password}`,
+      accountCode,
+      totpSecret,
+    };
+  });
+
+  const firstRows = new Map<string, number>();
+  for (const item of parsed) {
+    if (!item.accountCode) continue;
+    const firstRow = firstRows.get(item.accountCode);
+    if (firstRow !== undefined) {
+      throw new DigitalStockInputError(
+        `Baris ${item.row}: accountCode ${item.accountCode} duplikat dengan baris ${firstRow}.`
+      );
+    }
+    firstRows.set(item.accountCode, item.row);
+  }
+
+  return parsed;
+}
+
+/** Prepares encrypted documents without ever returning a plaintext TOTP secret. */
+export function prepareDigitalStockDocuments(
+  productId: Types.ObjectId,
+  rawText: string,
+  now = new Date()
+): PreparedDigitalStock[] {
+  return parseDigitalStockInput(rawText).map((item) => {
+    const stockId = new Types.ObjectId();
+    const base: PreparedDigitalStock = {
+      _id: stockId,
+      productId,
+      content: item.content,
+      isSold: false,
+      createdAt: now,
+    };
+
+    if (!item.accountCode || !item.totpSecret) return base;
+    return {
+      ...base,
+      accountCode: item.accountCode,
+      totpSecretEncrypted: encryptSecret(item.totpSecret, digitalStockTotpPurpose(stockId)),
+    };
+  });
+}
 
 export type CartCheckoutResult =
   | {
@@ -442,7 +556,7 @@ export class DigitalProductService {
     productId: string,
     rawText: string,
     api?: Api
-  ): Promise<{ added: number; lines: string[] }> {
+  ): Promise<{ added: number }> {
     if (!Types.ObjectId.isValid(productId)) {
       throw new Error("Invalid product ID");
     }
@@ -452,23 +566,38 @@ export class DigitalProductService {
       throw new Error("Product not found");
     }
 
-    const lines = rawText
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+    const docs = prepareDigitalStockDocuments(product._id, rawText);
+    if (docs.length === 0) return { added: 0 };
 
-    if (lines.length === 0) {
-      return { added: 0, lines: [] };
+    const accountCodes = docs
+      .map((doc) => doc.accountCode)
+      .filter((code): code is string => Boolean(code));
+    if (accountCodes.length > 0) {
+      const existing = await DigitalStock.find({ accountCode: { $in: accountCodes } })
+        .select("accountCode")
+        .lean();
+      if (existing.length > 0) {
+        throw new DigitalStockInputError(
+          `accountCode ${existing[0]!.accountCode} sudah digunakan pada tenant ini.`
+        );
+      }
     }
 
-    const docs = lines.map((content) => ({
-      productId: product._id,
-      content,
-      isSold: false,
-      createdAt: new Date(),
-    }));
-
-    await DigitalStock.insertMany(docs);
+    try {
+      await DigitalStock.insertMany(docs);
+    } catch (error: unknown) {
+      // Ordered insertMany can have inserted rows before a concurrent unique
+      // conflict. Roll back only the pre-generated IDs belonging to this batch.
+      await DigitalStock.deleteMany({ _id: { $in: docs.map((doc) => doc._id) } }).catch(() => undefined);
+      const errorCode =
+        error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      if (errorCode === 11000) {
+        throw new DigitalStockInputError("accountCode duplikat pada tenant ini.");
+      }
+      throw error;
+    }
 
     // ── Restock Alert Notifications ─────────────────────────────────────────
     if (api) {
@@ -502,7 +631,7 @@ export class DigitalProductService {
       }
     }
 
-    return { added: docs.length, lines };
+    return { added: docs.length };
   }
 
   /**
@@ -599,7 +728,7 @@ export class DigitalProductService {
    */
   static async getSingleStockItem(stockId: string): Promise<DigitalStockDocument | null> {
     if (!Types.ObjectId.isValid(stockId)) return null;
-    return await DigitalStock.findById(stockId);
+    return await DigitalStock.findById(stockId).select("+totpSecretEncrypted");
   }
 
   /**
@@ -677,6 +806,7 @@ export class DigitalProductService {
 
     const orderId = `DIGI-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
     const acquiredItems: DigitalStockDocument[] = [];
+    let totpStocks: TotpStockReference[] = [];
     let formattedContent = "";
     let dynamicResponse: string | undefined = undefined;
 
@@ -702,7 +832,7 @@ export class DigitalProductService {
             sort: { createdAt: 1 },
             returnDocument: "after",
           }
-        );
+        ).select("+totpSecretEncrypted");
 
         if (!acquired) break;
         acquiredItems.push(acquired);
@@ -738,6 +868,12 @@ export class DigitalProductService {
         acquiredItems.length === 1
           ? acquiredItems[0]!.content
           : acquiredItems.map((item, idx) => `[Item #${idx + 1}]\n${item.content}`).join("\n\n");
+      totpStocks = acquiredItems
+        .filter((item) => Boolean(item.accountCode && item.totpSecretEncrypted))
+        .map((item) => ({
+          stockId: item._id.toString(),
+          accountCode: item.accountCode!,
+        }));
     } else if (deliveryType === "FILE") {
       formattedContent = product.fileUrl || product.fileId || "📁 File terlampir (akan dikirimkan otomatis).";
     } else if (deliveryType === "DYNAMIC_API") {
@@ -892,6 +1028,7 @@ export class DigitalProductService {
       fileUrl: product.fileUrl,
       dynamicResponse,
       deliveryMessage: product.deliveryMessage || "",
+      totpStocks,
     };
   }
 
@@ -976,6 +1113,7 @@ export class DigitalProductService {
       const deliveryType: DeliveryType = product.deliveryType || "CREDENTIAL";
       let formattedContent = "";
       let dynamicResponse: string | undefined = undefined;
+      let itemTotpStocks: TotpStockReference[] = [];
 
       if (deliveryType === "CREDENTIAL") {
         const itemStocks: DigitalStockDocument[] = [];
@@ -998,7 +1136,7 @@ export class DigitalProductService {
               sort: { createdAt: 1 },
               returnDocument: "after",
             }
-          );
+          ).select("+totpSecretEncrypted");
 
           if (!acquired) break;
           itemStocks.push(acquired);
@@ -1025,6 +1163,12 @@ export class DigitalProductService {
           itemStocks.length === 1
             ? itemStocks[0]!.content
             : itemStocks.map((s, idx) => `[Item #${idx + 1}]\n${s.content}`).join("\n\n");
+        itemTotpStocks = itemStocks
+          .filter((stock) => Boolean(stock.accountCode && stock.totpSecretEncrypted))
+          .map((stock) => ({
+            stockId: stock._id.toString(),
+            accountCode: stock.accountCode!,
+          }));
       } else if (deliveryType === "FILE") {
         formattedContent = product.fileUrl || product.fileId || "📁 File terlampir (dikirim otomatis).";
       } else if (deliveryType === "DYNAMIC_API") {
@@ -1108,6 +1252,7 @@ export class DigitalProductService {
         warrantyDuration: product.warrantyDuration,
         warrantyUnit: product.warrantyUnit,
         maxClaims: product.maxClaims,
+        totpStocks: itemTotpStocks,
       });
     }
 

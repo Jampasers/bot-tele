@@ -1,9 +1,14 @@
-import crypto from "node:crypto";
 import { InlineKeyboard } from "grammy";
+import { Types } from "mongoose";
+import { createGuardrails, generateSync } from "otplib";
+import { DigitalStock, type DigitalStockDocument } from "../models/DigitalStock.js";
+import { decryptSecret } from "./crypto.js";
 
-// ============================================================================
-//  Types & Interfaces
-// ============================================================================
+export const ACCOUNT_CODE_PATTERN = /^[A-Z0-9_-]{3,40}$/;
+export const TOTP_PERIOD_SECONDS = 30;
+export const TOTP_DIGITS = 6;
+
+const TOTP_GUARDRAILS = createGuardrails({ MIN_SECRET_BYTES: 5 });
 
 export interface TotpResult {
   token: string;
@@ -12,240 +17,198 @@ export interface TotpResult {
   digits: number;
 }
 
-export interface TotpViewOptions {
-  label?: string | undefined;
-  maskedSecret?: boolean | undefined;
-  backCallback?: string | undefined;
-  backLabel?: string | undefined;
-  sourceContext?: string | undefined;
+export interface TotpStockReference {
+  stockId: string;
+  accountCode: string;
 }
 
-// ============================================================================
-//  Base32 & RFC 6238 Helpers
-// ============================================================================
+export type TotpAccessFailure = "NOT_FOUND" | "NO_TOTP" | "UNAVAILABLE";
 
-const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+export type TotpAccessResult =
+  | ({ success: true } & TotpStockReference & TotpResult)
+  | { success: false; reason: TotpAccessFailure };
 
-/**
- * Decodes a Base32 string into a Buffer.
- * Supports standard RFC 4648 Base32 with or without padding and whitespace.
- */
-export function base32ToBuffer(base32: string): Buffer {
-  const clean = base32.toUpperCase().replace(/[\s\-_=]/g, "");
-  let bits = 0;
-  let value = 0;
-  const bytes: number[] = [];
+export interface TotpStockAccessSnapshot {
+  _id: Types.ObjectId | string;
+  isSold: boolean;
+  soldTo?: string | undefined;
+  accountCode?: string | undefined;
+  totpSecretEncrypted?: string | undefined;
+}
 
-  for (let i = 0; i < clean.length; i++) {
-    const idx = BASE32_ALPHABET.indexOf(clean[i]!);
-    if (idx === -1) continue;
-    value = (value << 5) | idx;
-    bits += 5;
-    if (bits >= 8) {
-      bytes.push((value >>> (bits - 8)) & 0xff);
-      bits -= 8;
-    }
+export function normalizeAccountCode(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+export function isValidAccountCode(value: string): boolean {
+  return ACCOUNT_CODE_PATTERN.test(normalizeAccountCode(value));
+}
+
+export function normalizeTotpSecret(value: string): string {
+  return value.trim().toUpperCase().replace(/[\s-]+/g, "").replace(/=+$/g, "");
+}
+
+export function isValidTotpSecret(value: string): boolean {
+  const normalized = normalizeTotpSecret(value);
+  if (normalized.length < 8 || normalized.length > 128 || !/^[A-Z2-7]+$/.test(normalized)) {
+    return false;
   }
 
-  return Buffer.from(bytes);
+  try {
+    generateSync({
+      secret: normalized,
+      algorithm: "sha1",
+      digits: TOTP_DIGITS,
+      period: TOTP_PERIOD_SECONDS,
+      epoch: 0,
+      guardrails: TOTP_GUARDRAILS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-/**
- * Validates if a string is a potentially valid Base32 secret key.
- */
-export function isValidBase32(secret: string): boolean {
-  const clean = secret.toUpperCase().replace(/[\s\-_=]/g, "");
-  if (clean.length < 8 || clean.length > 128) return false;
-  return /^[A-Z2-7]+$/.test(clean);
+export function digitalStockTotpPurpose(stockId: Types.ObjectId | string): string {
+  return `digital-stock:totp:${stockId.toString()}`;
 }
 
-// ============================================================================
-//  TotpService Class
-// ============================================================================
+/** Filters used by both command and refresh paths. Ownership is never inferred from a callback. */
+export function ownedStockByAccountCodeFilter(accountCode: string, telegramId: string): Record<string, unknown> {
+  return {
+    accountCode: normalizeAccountCode(accountCode),
+    isSold: true,
+    soldTo: telegramId,
+  };
+}
+
+export function ownedStockByIdFilter(stockId: string, telegramId: string): Record<string, unknown> {
+  return {
+    _id: stockId,
+    isSold: true,
+    soldTo: telegramId,
+  };
+}
+
+/** Defense-in-depth check used after the already owner-scoped database query. */
+export function classifyTotpStockAccess(
+  stock: TotpStockAccessSnapshot | null,
+  telegramId: string
+): TotpAccessFailure | "AUTHORIZED" {
+  if (!stock || !stock.isSold || stock.soldTo !== telegramId || !stock.accountCode) {
+    return "NOT_FOUND";
+  }
+  if (!stock.totpSecretEncrypted) return "NO_TOTP";
+  return "AUTHORIZED";
+}
 
 export class TotpService {
-  /**
-   * Generates a standard RFC 6238 TOTP 6-digit token and calculates remaining valid seconds.
-   *
-   * @param secretKey Base32 encoded secret key
-   * @param period Time step period in seconds (default: 30)
-   * @param digits Number of digits in token (default: 6)
-   */
-  public static generateToken(
-    secretKey: string,
-    period = 30,
-    digits = 6
-  ): TotpResult {
-    const cleanSecret = secretKey.toUpperCase().replace(/[\s\-_=]/g, "");
-    const key = base32ToBuffer(cleanSecret);
+  public static generateToken(secretKey: string, epochSeconds = Math.floor(Date.now() / 1000)): TotpResult {
+    const normalized = normalizeTotpSecret(secretKey);
+    if (!isValidTotpSecret(normalized)) throw new Error("Invalid TOTP secret.");
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const counter = Math.floor(nowSeconds / period);
-    const remainingSeconds = period - (nowSeconds % period);
-
-    const timeBuffer = Buffer.alloc(8);
-    timeBuffer.writeBigUInt64BE(BigInt(counter), 0);
-
-    const hmac = crypto.createHmac("sha1", key);
-    hmac.update(timeBuffer);
-    const digest = hmac.digest();
-
-    const offset = digest[digest.length - 1]! & 0x0f;
-    const binaryCode =
-      ((digest[offset]! & 0x7f) << 24) |
-      ((digest[offset + 1]! & 0xff) << 16) |
-      ((digest[offset + 2]! & 0xff) << 8) |
-      (digest[offset + 3]! & 0xff);
-
-    const tokenNumber = binaryCode % Math.pow(10, digits);
-    const token = tokenNumber.toString().padStart(digits, "0");
+    const token = generateSync({
+      secret: normalized,
+      algorithm: "sha1",
+      digits: TOTP_DIGITS,
+      period: TOTP_PERIOD_SECONDS,
+      epoch: epochSeconds,
+      guardrails: TOTP_GUARDRAILS,
+    });
+    const remainingSeconds = TOTP_PERIOD_SECONDS - (epochSeconds % TOTP_PERIOD_SECONDS);
 
     return {
       token,
       remainingSeconds: Math.max(1, remainingSeconds),
-      period,
-      digits,
+      period: TOTP_PERIOD_SECONDS,
+      digits: TOTP_DIGITS,
     };
   }
 
-  /**
-   * Intelligently extracts a 2FA Base32 secret from various formats:
-   * - `otpauth://totp/...?secret=JBSWY3DPEHPK3PXP...`
-   * - `email|password|2FA_SECRET` or `email:pass:2FA_SECRET`
-   * - `2FA: JBSWY3DPEHPK3PXP`
-   * - Direct Base32 string
-   */
-  public static extractSecret(input: string): string | null {
-    if (!input || typeof input !== "string") return null;
-    const trimmed = input.trim();
+  public static async getOwnedByAccountCode(
+    accountCode: string,
+    telegramId: string
+  ): Promise<TotpAccessResult> {
+    if (!isValidAccountCode(accountCode)) return { success: false, reason: "NOT_FOUND" };
 
-    // 1. Format: otpauth URI
-    if (trimmed.toLowerCase().startsWith("otpauth://")) {
-      try {
-        const url = new URL(trimmed);
-        const secretParam = url.searchParams.get("secret");
-        if (secretParam && isValidBase32(secretParam)) {
-          return secretParam.toUpperCase().replace(/[\s\-_=]/g, "");
-        }
-      } catch {
-        const match = trimmed.match(/[?&]secret=([A-Za-z2-7=]+)/i);
-        if (match && match[1] && isValidBase32(match[1])) {
-          return match[1].toUpperCase().replace(/[\s\-_=]/g, "");
-        }
-      }
-    }
-
-    // 2. Format: Explicit 2FA prefix like "2FA: XYZ", "2FA Secret: XYZ", "OTP: XYZ"
-    const prefixMatch = trimmed.match(/(?:2fa|two[- ]?factor|totp|otp|secret)(?:\s*(?:secret|key|code)?\s*[:=\-|])\s*([A-Za-z2-7]{8,64})/i);
-    if (prefixMatch && prefixMatch[1] && isValidBase32(prefixMatch[1])) {
-      return prefixMatch[1].toUpperCase().replace(/[\s\-_=]/g, "");
-    }
-
-    // 3. Format: Delimited credentials like email|pass|2FA_SECRET or email:pass:2FA_SECRET
-    const delimiterSplit = trimmed.split(/[\r\n|:]+/);
-    if (delimiterSplit.length >= 3) {
-      for (let i = 2; i < delimiterSplit.length; i++) {
-        const part = delimiterSplit[i]!.trim();
-        if (isValidBase32(part) && part.length >= 16) {
-          return part.toUpperCase().replace(/[\s\-_=]/g, "");
-        }
-      }
-    }
-
-    // Also test all tokens in lines if multiline
-    const lines = trimmed.split(/[\r\n]+/);
-    for (const line of lines) {
-      const parts = line.split(/[|,: \t]+/);
-      for (const p of parts) {
-        const cleaned = p.trim().replace(/^["']|["']$/g, "");
-        if (isValidBase32(cleaned) && cleaned.length >= 16 && cleaned.length <= 64) {
-          // Avoid matching plain password strings unless they are base32-like
-          return cleaned.toUpperCase().replace(/[\s\-_=]/g, "");
-        }
-      }
-    }
-
-    // 4. Format: Standalone Base32 secret string
-    const directClean = trimmed.toUpperCase().replace(/[\s\-_=]/g, "");
-    if (isValidBase32(directClean) && directClean.length >= 16 && directClean.length <= 64) {
-      return directClean;
-    }
-
-    return null;
+    const stock = await DigitalStock.findOne(ownedStockByAccountCodeFilter(accountCode, telegramId))
+      .select("+totpSecretEncrypted")
+      .exec();
+    return this.resolveOwnedStock(stock, telegramId);
   }
 
-  /**
-   * Masks a secret key for safe UI display (e.g. `JBSW••••••••3PXP`).
-   */
-  public static maskSecret(secret: string): string {
-    const clean = secret.toUpperCase().replace(/[\s\-_=]/g, "");
-    if (clean.length <= 8) return "••••••••";
-    const start = clean.slice(0, 4);
-    const end = clean.slice(-4);
-    return `${start}••••••••${end}`;
+  public static async getOwnedByStockId(stockId: string, telegramId: string): Promise<TotpAccessResult> {
+    if (!Types.ObjectId.isValid(stockId)) return { success: false, reason: "NOT_FOUND" };
+
+    const stock = await DigitalStock.findOne(ownedStockByIdFilter(stockId, telegramId))
+      .select("+totpSecretEncrypted")
+      .exec();
+    return this.resolveOwnedStock(stock, telegramId);
   }
 
-  /**
-   * Generates a visual progress bar for the remaining seconds.
-   */
-  public static renderProgressBar(remainingSeconds: number, totalPeriod = 30): string {
-    const totalBars = 6;
-    const filledBars = Math.max(1, Math.round((remainingSeconds / totalPeriod) * totalBars));
-    const emptyBars = totalBars - filledBars;
+  public static async getReferencesForOrders(
+    orderIds: string[],
+    telegramId: string
+  ): Promise<Map<string, TotpStockReference[]>> {
+    const result = new Map<string, TotpStockReference[]>();
+    if (orderIds.length === 0) return result;
 
-    let icon = "🟩";
-    if (remainingSeconds <= 5) icon = "🟥";
-    else if (remainingSeconds <= 10) icon = "🟨";
+    const stocks = await DigitalStock.find({
+      orderId: { $in: orderIds },
+      isSold: true,
+      soldTo: telegramId,
+      accountCode: { $exists: true },
+      totpSecretEncrypted: { $exists: true },
+    })
+      .select("accountCode orderId")
+      .lean();
 
-    return icon.repeat(filledBars) + "⬜".repeat(emptyBars);
+    for (const stock of stocks) {
+      if (!stock.orderId || !stock.accountCode) continue;
+      const refs = result.get(stock.orderId) ?? [];
+      refs.push({ stockId: stock._id.toString(), accountCode: stock.accountCode });
+      result.set(stock.orderId, refs);
+    }
+
+    return result;
   }
 
-  /**
-   * Builds an interactive HTML message and Inline Keyboard for live TOTP viewing.
-   */
-  public static buildTotpView(
-    secret: string,
-    options?: TotpViewOptions
-  ): { text: string; keyboard: InlineKeyboard } {
-    const result = this.generateToken(secret);
-    const progressBar = this.renderProgressBar(result.remainingSeconds, result.period);
-    const masked = this.maskSecret(secret);
+  public static buildTotpView(result: TotpAccessResult & { success: true }): {
+    text: string;
+    keyboard: InlineKeyboard;
+  } {
+    const formattedToken = `${result.token.slice(0, 3)} ${result.token.slice(3)}`;
+    return {
+      text:
+        `🔐 <b>Kode 2FA</b>\n\n` +
+        `Akun: <code>${result.accountCode}</code>\n` +
+        `Kode: <code>${formattedToken}</code>\n\n` +
+        `⏳ Berlaku sekitar ${result.remainingSeconds} detik lagi.`,
+      keyboard: new InlineKeyboard().text("🔄 Refresh Code", `totp_refresh_${result.stockId}`),
+    };
+  }
 
-    // Format token with a space in the middle for easier readability (e.g. 123 456)
-    const formattedToken =
-      result.token.length === 6
-        ? `${result.token.slice(0, 3)} ${result.token.slice(3)}`
-        : result.token;
+  private static resolveOwnedStock(
+    stock: DigitalStockDocument | null,
+    telegramId: string
+  ): TotpAccessResult {
+    const classification = classifyTotpStockAccess(stock, telegramId);
+    if (classification !== "AUTHORIZED") return { success: false, reason: classification };
 
-    // Base64 encode secret for callback query data (safe URL-safe base64)
-    const encodedSecret = Buffer.from(secret).toString("base64url");
-
-    let text =
-      `🔐 <b>Kode Verifikasi 2FA (TOTP)</b>\n` +
-      `${"─".repeat(30)}\n\n`;
-
-    if (options?.label) {
-      text += `🏷️ <b>Label / Akun:</b> ${options.label}\n`;
+    try {
+      const secret = decryptSecret(
+        stock!.totpSecretEncrypted!,
+        digitalStockTotpPurpose(stock!._id)
+      );
+      const generated = this.generateToken(secret);
+      return {
+        success: true,
+        stockId: stock!._id.toString(),
+        accountCode: stock!.accountCode!,
+        ...generated,
+      };
+    } catch {
+      return { success: false, reason: "UNAVAILABLE" };
     }
-
-    text +=
-      `🔑 <b>Secret Key:</b> <code>${masked}</code>\n\n` +
-      `🔢 <b>Kode OTP Saat Ini:</b>\n` +
-      `👉 <code>${result.token}</code> 👈 (<i>${formattedToken}</i>)\n\n` +
-      `⏳ <b>Masa Berlaku:</b> ${progressBar} <b>${result.remainingSeconds}s</b>\n` +
-      `<i>(Kode akan otomatis berganti setiap ${result.period} detik)</i>\n\n` +
-      `💡 <i>Ketuk kode angka di atas untuk langsung menyalin ke clipboard.</i>`;
-
-    const kb = new InlineKeyboard()
-      .text(`🔄 Refresh (${result.remainingSeconds}s)`, `totp_ref_${encodedSecret}`)
-      .row();
-
-    if (options?.backCallback) {
-      kb.text(options.backLabel || "🔙 Kembali", options.backCallback);
-    } else {
-      kb.text("❌ Tutup", "totp_del");
-    }
-
-    return { text, keyboard: kb };
   }
 }

@@ -404,6 +404,10 @@ async function buildStockItemDetailCard(
 
   const prod = await DigitalProductService.getProductWithStock(String(item.productId));
   const dateStr = item.createdAt ? new Date(item.createdAt).toLocaleString("id-ID") : "-";
+  const totpInfo = item.accountCode
+    ? `🔐 <b>Kode Akun:</b>   <code>${item.accountCode}</code>\n` +
+      `🛡️ <b>2FA/TOTP:</b>     ${item.totpSecretEncrypted ? "Terenkripsi & siap" : "Tidak tersedia"}\n`
+    : "";
 
   let text =
     `🔍 <b>Detail Item Stok</b>\n` +
@@ -412,6 +416,7 @@ async function buildStockItemDetailCard(
     `🆔 <b>Stock ID:</b>    <code>${item._id}</code>\n` +
     `🕒 <b>Ditambahkan:</b> ${dateStr}\n` +
     `⚙️ <b>Status:</b>      ${item.isSold ? "🔴 Sudah Terjual" : "🟢 Tersedia (Belum Terjual)"}\n\n` +
+    totpInfo +
     `🔑 <b>Isi Stok / Data (Tap untuk salin):</b>\n` +
     `<code>${item.content}</code>\n`;
 
@@ -674,8 +679,12 @@ const digiAdminPlugin: Plugin = {
         `${"─".repeat(30)}\n\n` +
         `Kirimkan data stok yang ingin ditambahkan.\n` +
         `Bisa mengirim banyak stok sekaligus (<b>1 baris = 1 item stok</b>).\n\n` +
-        `<b>Contoh format:</b>\n` +
-        `<code>akun1@gmail.com:password123\nakun2@gmail.com:password456\nakun3@gmail.com:password789</code>\n\n` +
+        `<b>Format stok biasa (tetap didukung):</b>\n` +
+        `<code>akun1@gmail.com|password123</code>\n\n` +
+        `<b>Format stok dengan 2FA/TOTP:</b>\n` +
+        `<code>email|password|accountCode|totpSecret</code>\n` +
+        `<code>netflix01@gmail.com|pass123|NF-A01|JBSWY3DPEHPK3PXP</code>\n\n` +
+        `<i>accountCode harus unik. Secret TOTP akan dienkripsi dan tidak pernah dikirim ke buyer.</i>\n\n` +
         `<i>Ketik atau paste pesan ke chat ini sekarang:</i>`,
         { parse_mode: "HTML", reply_markup: kb }
       );
@@ -1400,7 +1409,7 @@ const digiAdminPlugin: Plugin = {
       if (state.action === "ADD_STOCK" && state.productId) {
         adminInputState.delete(adminId);
         try {
-          const { added, lines } = await DigitalProductService.addStockBulk(state.productId, text, ctx.api);
+          const { added } = await DigitalProductService.addStockBulk(state.productId, text, ctx.api);
           const prod = await DigitalProductService.getProductWithStock(state.productId);
 
           ActivityLogService.logStockAdded(ctx.api, {
@@ -2090,7 +2099,9 @@ const digiAdminPlugin: Plugin = {
         adminInputState.set(String(ctx.from?.id), { action: "ADD_STOCK", productId });
         await ctx.reply(
           `📥 <b>Tambah Stok: ${prod.name}</b>\n\n` +
-          `Kirimkan data stok (1 baris = 1 item) ke chat ini sekarang:`,
+          `Kirimkan data stok (1 baris = 1 item) ke chat ini sekarang.\n\n` +
+          `<b>Biasa:</b> <code>username|password</code>\n` +
+          `<b>Dengan 2FA:</b> <code>email|password|accountCode|totpSecret</code>`,
           { parse_mode: "HTML" }
         );
         return;

@@ -48,7 +48,9 @@ export interface BackupCollectionInfo {
 export const BACKUP_COLLECTIONS: readonly BackupCollectionInfo[] = [
   { name: "users",           model: User, select: "+appliedVpsPaymentEffectIds +appliedRentalBalancePaymentIds" },
   { name: "digitalproducts", model: DigitalProduct },
-  { name: "digitalstocks",   model: DigitalStock },
+  // Backups retain only the encrypted TOTP envelope; previews expose counts,
+  // never document contents.
+  { name: "digitalstocks",   model: DigitalStock, select: "+totpSecretEncrypted" },
   { name: "digitalorders",   model: DigitalOrder },
   { name: "carts",           model: Cart },
   { name: "orders",          model: Order },

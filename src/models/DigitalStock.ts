@@ -13,6 +13,12 @@ export interface IDigitalStock {
   /** The actual stock payload (credentials, license key, voucher code, etc.) */
   content: string;
 
+  /** Admin-defined public reference used by the buyer to request a TOTP code. */
+  accountCode?: string;
+
+  /** AES-GCM encrypted Base32 TOTP secret. Excluded from queries by default. */
+  totpSecretEncrypted?: string;
+
   /** Whether this item has already been delivered to a buyer */
   isSold: boolean;
 
@@ -49,6 +55,18 @@ const digitalStockSchema = new Schema<IDigitalStock>(
       required: [true, "Stock content is required"],
       trim: true,
     },
+    accountCode: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      match: [/^[A-Z0-9_-]{3,40}$/, "Invalid accountCode format"],
+      default: undefined,
+    },
+    totpSecretEncrypted: {
+      type: String,
+      select: false,
+      default: undefined,
+    },
     isSold: {
       type: Boolean,
       default: false,
@@ -81,6 +99,11 @@ const digitalStockSchema = new Schema<IDigitalStock>(
 
 // Compound index for finding and acquiring available stock FIFO
 digitalStockSchema.index({ productId: 1, isSold: 1, createdAt: 1 });
+
+// tenantPlugin prefixes this index with tenantId and converts sparse to a
+// partial index, so legacy stock without an accountCode remains valid while an
+// account code is unique inside its own tenant.
+digitalStockSchema.index({ accountCode: 1 }, { unique: true, sparse: true });
 
 // ============================================================================
 //  3. Model

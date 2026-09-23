@@ -344,7 +344,7 @@ export class WarrantyService {
         },
       },
       { sort: { createdAt: 1 }, returnDocument: "after" }
-    );
+    ).select("+totpSecretEncrypted");
 
     if (!stock) {
       return {
@@ -369,14 +369,21 @@ export class WarrantyService {
       `🎫 <b>ID Tiket:</b> <code>${claim.claimId}</code>\n\n` +
       `🔑 <b>DATA PRODUK / AKUN PENGGANTI:</b>\n` +
       `<code>${stock.content}</code>\n\n` +
+      (stock.accountCode ? `🔐 <b>Kode Akun:</b> <code>${stock.accountCode}</code>\n\n` : "") +
       `⚠️ <i>Data akun baru di atas diberikan sebagai pengganti garansi. Harap simpan dengan baik.</i>`;
+
+    const replacementKeyboard = new InlineKeyboard();
+    if (stock.accountCode && stock.totpSecretEncrypted) {
+      replacementKeyboard.text("🔐 Ambil Kode 2FA", `totp_refresh_${stock._id}`).row();
+    }
+    replacementKeyboard
+      .text("📜 Riwayat Pesanan", "dg_myorders")
+      .row()
+      .text("🛍️ Belanja Lagi", "product_digital");
 
     data.api.sendMessage(claim.userId, userMsg, {
       parse_mode: "HTML",
-      reply_markup: new InlineKeyboard()
-        .text("📜 Riwayat Pesanan", "dg_myorders")
-        .row()
-        .text("🛍️ Belanja Lagi", "product_digital"),
+      reply_markup: replacementKeyboard,
     }).catch((err) => console.error(`[WarrantyService] Failed sending replace to user ${claim.userId}:`, err));
 
     // Audit log
