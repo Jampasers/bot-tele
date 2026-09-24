@@ -33,7 +33,8 @@ async function main(): Promise<void> {
   if (!token || !process.env.MONGODB_URI?.trim()) throw new Error("BOT_TOKEN and MONGODB_URI are required.");
   const rentalEnabled = process.env.RENTAL_ENABLED === "true";
   const vpsEnabled = process.env.VPS_ENABLED === "true";
-  if (rentalEnabled || vpsEnabled) validateEncryptionKey();
+  const emailRentalEnabled = process.env.EMAIL_RENTAL_ENABLED === "true";
+  if (rentalEnabled || vpsEnabled || emailRentalEnabled) validateEncryptionKey();
   const context = platformContext();
   let platform: BotInstance | undefined;
   let manager: BotManager | undefined;

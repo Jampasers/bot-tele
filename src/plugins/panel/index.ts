@@ -80,6 +80,8 @@ export async function buildCatalogKeyboard(): Promise<InlineKeyboard> {
     }
   }
 
+  if (hasFeature("email_otp")) kb.row().text("📧 OTP Email", "email_otp");
+
   if (hasFeature("digital"))
     kb.row().text("📦 Produk Digital (Akun / Lisensi)", "product_digital");
   if (hasRentalCatalog()) kb.row().text("🤖 Sewa Bot", "rs_home");
@@ -147,6 +149,9 @@ export async function buildCatalogText(): Promise<string> {
     : config.enabled !== false
       ? `💬 <b>OTP SMS</b> — Sewa nomor virtual untuk verifikasi kode OTP sekali pakai.\n`
       : `💬 <b>OTP SMS</b> — <i>(Layanan sedang dinonaktifkan / maintenance)</i>\n`;
+  const emailDesc = hasFeature("email_otp")
+    ? `📧 <b>OTP Email</b> — Sewa mailbox atau alias domain untuk menerima kode verifikasi.\n\n`
+    : "";
   const rentalDesc = hasRentalCatalog()
     ? `🤖 <b>Sewa Bot</b> — Daftarkan bot Telegram dari BotFather dan aktifkan setelah pembayaran.\n`
     : "";
@@ -156,6 +161,7 @@ export async function buildCatalogText(): Promise<string> {
     `${"─".repeat(28)}\n\n` +
     `Pilih kategori produk yang ingin dibeli:\n\n` +
     otpDesc +
+    emailDesc +
     `📦 <b>Produk Digital</b> — Akun premium, lisensi, voucher, & produk digital instan.\n\n` +
     rentalDesc +
     (hasVpsCatalog() ? "🖥️ <b>VPS</b> — Beli VPS DigitalOcean atau jasa setup/install pada akun sendiri.\n" : "") +

@@ -27,7 +27,7 @@ export async function reservePaymentAmount(merchantId: string, tenantId: string,
 }
 
 export async function claimSettlement(input: {
-  merchantId: string; tenantId: string; invoiceReference: string; kind: "store" | "rental" | "vps"; transaction: PaymentTransaction;
+  merchantId: string; tenantId: string; invoiceReference: string; kind: "store" | "rental" | "vps" | "email_rental"; transaction: PaymentTransaction;
 }): Promise<{ owned: boolean; created: boolean }> {
   const transaction = input.transaction;
   if (transaction.merchantId !== input.merchantId || !transaction.transactionId?.trim() || !input.invoiceReference?.trim() ||

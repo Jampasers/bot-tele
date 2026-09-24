@@ -10,9 +10,9 @@ export type StartupStage =
   | "ready";
 
 const GENERIC_GUIDANCE: Record<StartupStage, string> = {
-  environment: "Check BOT_TOKEN, MONGODB_URI, RENTAL_ENABLED, and CREDENTIAL_ENCRYPTION_KEY in .env.",
+  environment: "Check BOT_TOKEN, MONGODB_URI, RENTAL_ENABLED, EMAIL_RENTAL_ENABLED, and CREDENTIAL_ENCRYPTION_KEY in .env.",
   database: "Check MONGODB_URI, DATABASE_NAME, MongoDB credentials, DNS, and the server IP allowlist.",
-  migration: "Back up MongoDB, run npm run migrate:tenants as a dry-run, then apply the reviewed migration.",
+  migration: "Back up MongoDB, run npm run migrate:tenants as a dry-run, then apply the reviewed migration. Email OTP also requires npm run migrate:email-rental -- --apply.",
   "provider-data": "Check SMSBOWER_API_KEY and outbound provider connectivity.",
   "platform-bot": "Check BOT_TOKEN and connectivity to api.telegram.org.",
   "vps-worker": "Check VPS_ENABLED, VPS_CONCURRENCY (1-5), CREDENTIAL_ENCRYPTION_KEY, VPS indexes and outbound DigitalOcean/SSH connectivity.",
@@ -25,7 +25,7 @@ const GENERIC_GUIDANCE: Record<StartupStage, string> = {
 export function formatStartupFailure(stage: StartupStage, error: unknown): string {
   const message = error instanceof Error ? error.message : "";
 
-  if (stage === "migration" && message.startsWith("Tenant migration required")) return message;
+  if (stage === "migration" && (message.startsWith("Tenant migration required") || message.startsWith("Email Rental migration required"))) return message;
   if (stage === "environment" && message === "BOT_TOKEN and MONGODB_URI are required.") {
     return "Startup failed during environment validation: BOT_TOKEN and MONGODB_URI are required in .env.";
   }

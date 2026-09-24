@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { TENANT_MODELS, PLATFORM_MODELS } from "./models.js";
+import { EMAIL_RENTAL_MODELS, TENANT_MODELS, PLATFORM_MODELS } from "./models.js";
 
 export const LEGACY_TENANT_FILTER = { $or: [{ tenantId: { $exists: false } }, { tenantId: null }] };
 export const INVALID_TENANT_FILTER = { tenantId: { $exists: true, $ne: null, $not: /^[A-Za-z0-9_-]{1,100}$/ } };
@@ -11,7 +11,9 @@ export async function assertTenantMigrationReady(): Promise<void> {
   const present = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map(c => c.name));
   const issues: string[] = [];
   const tenantNames = new Set<string>(TENANT_MODELS.map(model => model.modelName));
-  for (const model of [...TENANT_MODELS, ...PLATFORM_MODELS]) {
+  const emailModelNames = new Set<string>(EMAIL_RENTAL_MODELS.map(model => model.modelName));
+  const requiredModels = [...TENANT_MODELS.filter(model => !emailModelNames.has(model.modelName) || process.env.EMAIL_RENTAL_ENABLED === "true"), ...PLATFORM_MODELS];
+  for (const model of requiredModels) {
     const name = model.collection.name;
     if (!present.has(name)) {
       issues.push(`${name}: tenant indexes have not been installed`);
@@ -35,5 +37,10 @@ export async function assertTenantMigrationReady(): Promise<void> {
       }
     }
   }
-  if (issues.length) throw new Error(`Tenant migration required. Stop the application, back up MongoDB, inspect npm run migrate:tenants, then apply it explicitly. ${issues.join("; ")}`);
+  if (issues.length) {
+    const emailCollections = new Set(EMAIL_RENTAL_MODELS.map(model => model.collection.name));
+    const emailIssues = issues.filter(issue => emailCollections.has(issue.split(":", 1)[0] ?? ""));
+    if (emailIssues.length) throw new Error(`Email Rental migration required. Stop the application, back up MongoDB, run npm run migrate:email-rental as a dry-run, then apply it explicitly. ${emailIssues.join("; ")}`);
+    throw new Error(`Tenant migration required. Stop the application, back up MongoDB, inspect npm run migrate:tenants, then apply it explicitly. ${issues.join("; ")}`);
+  }
 }

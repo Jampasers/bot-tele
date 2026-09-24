@@ -8,8 +8,9 @@
     "dev": "tsx src/index.ts",
     "check:imap": "tsx src/scripts/inspectImap.ts",
     "build": "tsc",
-    "test": "tsx --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "test": "node --import tsx --test --test-concurrency=1 \"tests/**/*.test.ts\"",
     "migrate:tenants": "tsx src/scripts/migrateTenantData.ts",
+    "migrate:email-rental": "tsx src/scripts/migrateEmailRental.ts",
     "rental:admin": "tsx src/scripts/rentalAdmin.ts",
     "vps:reset-catalog": "tsx src/scripts/resetVpsCatalog.ts",
     "start": "node dist/index.js"

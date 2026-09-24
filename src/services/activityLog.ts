@@ -2,6 +2,7 @@ import { TenantMap } from "../tenant/TenantMap.js";
 import { Api, InlineKeyboard } from "grammy";
 import { BotConfig, IBotConfig } from "../models/BotConfig.js";
 import { ITopupSession } from "../models/TopupSession.js";
+import { getTenantId } from "../tenant/context.js";
 
 // ============================================================================
 //  Types & Interfaces
@@ -374,6 +375,7 @@ function formatUserHtml(user: LogUserInfo): string {
 
 export class ActivityLogService {
   private static defaultApi: Api | null = null;
+  private static readonly tenantApis = new Map<string, Api>();
 
   /**
    * Sets the global default grammY Api instance for the ActivityLogService.
@@ -382,10 +384,17 @@ export class ActivityLogService {
     this.defaultApi = api;
   }
 
+  static setTenantApi(api: Api, tenantId: string): void { this.tenantApis.set(tenantId, api); }
+  static clearTenantApi(tenantId: string): void { this.tenantApis.delete(tenantId); }
+
   /**
    * Retrieves the default grammY Api instance or creates a fallback if BOT_TOKEN is present.
    */
   static getDefaultApi(): Api | null {
+    try {
+      const tenantApi = this.tenantApis.get(getTenantId());
+      if (tenantApi) return tenantApi;
+    } catch { /* callers outside a tenant use the platform fallback */ }
     if (this.defaultApi) return this.defaultApi;
     const token = process.env["BOT_TOKEN"];
     if (token && token.trim() !== "") {
@@ -1363,6 +1372,33 @@ export class ActivityLogService {
 
   // ── 23. IMAP OTP Forwarded Log ─────────────────────────────────────────────
 
+  static async logEmailRentalEvent(
+    api: Api | null | undefined,
+    data: { event: string; rentalId?: string; userId?: string; emailAddress?: string; serviceName?: string }
+  ): Promise<boolean> {
+    const labels: Record<string, string> = {
+      reserved: "Rental email direservasi", payment_success: "Pembayaran rental berhasil",
+      activated: "Rental email diaktifkan", otp_received: "Email OTP diterima dan dikirim ke renter",
+      completed: "Rental email diselesaikan", expired: "Rental email kedaluwarsa", renewed: "Masa rental email diperpanjang",
+      failed: "Rental email gagal", failed_refunded: "Rental gagal; pengembalian saldo dicatat",
+      alias_created: "Alias Cloudflare dibuat", alias_retired: "Alias domain dipensiunkan",
+      mailbox_broken: "Mailbox ditandai rusak setelah pemeriksaan", provider_created: "Provider IMAP dibuat",
+      mailbox_added: "Mailbox berhasil ditambahkan", health_failed: "Pemeriksaan mailbox gagal", health_ok: "Pemeriksaan mailbox berhasil",
+    };
+    const userId = data.userId ? "*".repeat(Math.max(0, data.userId.length - 4)) + data.userId.slice(-4) : "";
+    const text =
+      `📧 <b>[AUDIT: EMAIL OTP RENTAL]</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `⚙️ <b>Aktivitas:</b> ${escapeHtml(labels[data.event] || "Perubahan Email OTP Rental")}\n` +
+      (data.serviceName ? `🎯 <b>Layanan:</b> ${escapeHtml(data.serviceName)}\n` : "") +
+      (data.rentalId ? `🆔 <b>Rental:</b> <code>${escapeHtml(data.rentalId)}</code>\n` : "") +
+      (userId ? `👤 <b>Pengguna:</b> <code>${escapeHtml(userId)}</code>\n` : "") +
+      `📅 <b>Waktu:</b> ${formatDateWIB(new Date())}\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `<i>Kode OTP dan credential mailbox tidak dicatat pada activity log.</i>`;
+    return this.sendToLogChannel(api ?? undefined, text);
+  }
+
   static async logEmailOtpForwarded(
     api: Api | undefined,
     data: EmailOtpForwardedLogData
@@ -1534,4 +1570,3 @@ export class ActivityLogService {
     return this.sendToLogChannel(api, text);
   }
 }
-
