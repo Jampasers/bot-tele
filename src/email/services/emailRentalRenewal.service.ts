@@ -5,7 +5,6 @@ import { EmailDomainAlias } from "../../models/EmailDomainAlias.js";
 import { EmailMailbox } from "../../models/EmailMailbox.js";
 import { EmailPaymentEffect } from "../../models/EmailPaymentEffect.js";
 import { EmailRental } from "../../models/EmailRental.js";
-import { EmailRentalPrice } from "../../models/EmailRentalPrice.js";
 import { EmailRentalRenewal, type IEmailRentalRenewal } from "../../models/EmailRentalRenewal.js";
 import { User } from "../../models/User.js";
 import { ActivityLogService } from "../../services/activityLog.js";
@@ -13,6 +12,7 @@ import { generateQris } from "../../services/payment/paymentService.js";
 import { getTenantPaymentClients } from "../../payments/tenantPayment.service.js";
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../../payments/paymentLedger.service.js";
 import { getTenantId } from "../../tenant/context.js";
+import { getEmailRentalPrice } from "./emailPricing.service.js";
 
 async function ownedRenewal(renewalId: string, userId: string): Promise<IEmailRentalRenewal> {
   if (!Types.ObjectId.isValid(renewalId)) throw new Error("Perpanjangan tidak ditemukan.");
@@ -24,10 +24,11 @@ async function ownedRenewal(renewalId: string, userId: string): Promise<IEmailRe
 export async function createEmailRenewal(rentalId: string, userId: string): Promise<IEmailRentalRenewal> {
   const rental = await EmailRental.findOne({ _id: rentalId, userId, status: "ACTIVE" }).lean();
   if (!rental) throw new Error("Hanya rental email yang masih aktif yang bisa diperpanjang.");
-  const price = await EmailRentalPrice.findOne({
-    serviceId: rental.serviceId, resourceType: rental.resourceType, enabled: true,
-    ...(rental.providerId ? { providerId: rental.providerId } : { providerId: { $in: [null] } }),
-  }).lean();
+  const price = await getEmailRentalPrice({
+    serviceId: rental.serviceId,
+    resourceType: rental.resourceType,
+    ...(rental.providerId ? { providerId: rental.providerId } : {}),
+  });
   if (!price) throw new Error("Harga perpanjangan belum tersedia.");
   const existing = await EmailRentalRenewal.findOne({ rentalId, userId, status: "WAITING_PAYMENT" }).lean();
   if (existing) return existing as IEmailRentalRenewal;

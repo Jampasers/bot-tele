@@ -12,12 +12,12 @@ import {
 } from "../../src/rental/rentalProvisioning.service.js";
 
 test("main bot parses a configurable rental plan and rejects internal features", () => {
-  assert.deepEqual(parseRentalPlanSetup("monthly | 30 | 25000 | Paket Bulanan | digital,affiliate"), {
+  assert.deepEqual(parseRentalPlanSetup("monthly | 30 | 25000 | Paket Bulanan | digital,affiliate,email_otp"), {
     code: "monthly",
     durationDays: 30,
     price: 25000,
     name: "Paket Bulanan",
-    enabledFeatures: ["digital", "affiliate"],
+    enabledFeatures: ["digital", "affiliate", "email_otp"],
     enabled: true,
   });
   assert.throws(() => parseRentalPlanSetup("internal | 30 | 1 | Internal | smsbower"));

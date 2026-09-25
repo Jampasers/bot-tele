@@ -7,10 +7,12 @@ import { EmailMailbox } from "../../src/models/EmailMailbox.js";
 import { EmailOtpService } from "../../src/models/EmailOtpService.js";
 import { EmailProvider } from "../../src/models/EmailProvider.js";
 import { EmailRentalCounter } from "../../src/models/EmailRentalCounter.js";
+import { EmailRentalPrice } from "../../src/models/EmailRentalPrice.js";
 import { EmailUsage } from "../../src/models/EmailUsage.js";
 import { encryptSecret } from "../../src/services/crypto.js";
 import { runWithTenant } from "../../src/tenant/context.js";
 import { getEligibleMailboxCount, reserveMailboxCandidate, releaseReservedResource } from "../../src/email/services/emailReservation.service.js";
+import { GLOBAL_EMAIL_SERVICE_ID, getEmailRentalPrice } from "../../src/email/services/emailPricing.service.js";
 
 const uri = process.env.TEST_MONGODB_URI;
 
@@ -20,7 +22,7 @@ test("Email Rental usage is permanent per service and atomic mailbox reservation
   const savedKey = process.env.CREDENTIAL_ENCRYPTION_KEY;
   process.env.CREDENTIAL_ENCRYPTION_KEY = randomBytes(32).toString("hex");
   await mongoose.connect(uri!, { dbName, autoCreate: false, autoIndex: false });
-  const models = [EmailProvider, EmailMailbox, EmailOtpService, EmailUsage, EmailRentalCounter, EmailDomain];
+  const models = [EmailProvider, EmailMailbox, EmailOtpService, EmailUsage, EmailRentalCounter, EmailDomain, EmailRentalPrice];
   try {
     for (const Model of models) {
       await Model.createCollection();
@@ -35,6 +37,18 @@ test("Email Rental usage is permanent per service and atomic mailbox reservation
         senderPatterns: ["netflix"], subjectPatterns: ["code"] });
       const steam = await EmailOtpService.create({ code: "STEAM", name: "Steam", rentalDurationMinutes: 20, cooldownMinutes: 5,
         senderPatterns: ["steam"], subjectPatterns: ["code"] });
+      await EmailRentalPrice.create({
+        serviceId: GLOBAL_EMAIL_SERVICE_ID, providerId: String(provider._id), resourceType: "MAILBOX", price: 2000,
+      });
+      assert.equal((await getEmailRentalPrice({
+        serviceId: String(discord._id), providerId: String(provider._id), resourceType: "MAILBOX",
+      }))?.price, 2000, "global provider price applies without per-service setup");
+      await EmailRentalPrice.create({
+        serviceId: String(discord._id), providerId: String(provider._id), resourceType: "MAILBOX", price: 2500,
+      });
+      assert.equal((await getEmailRentalPrice({
+        serviceId: String(discord._id), providerId: String(provider._id), resourceType: "MAILBOX",
+      }))?.price, 2500, "service-specific price overrides the provider global price");
       const mailboxIds = [new Types.ObjectId(), new Types.ObjectId()];
       await Promise.all(mailboxIds.map((id, index) => EmailMailbox.create({
         _id: id, providerId: String(provider._id), email: `m${index + 1}@example.invalid`, username: `m${index + 1}@example.invalid`,

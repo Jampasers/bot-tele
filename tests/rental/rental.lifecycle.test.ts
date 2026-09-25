@@ -167,7 +167,7 @@ test("command parser respects Telegram entities and target bot usernames", () =>
 });
 
 test("CLI feature and bot identity validation rejects internal services and platform tokens", () => {
-  assert.deepEqual(parseRentalFeatures("digital,affiliate,digital"), ["digital", "affiliate"]);
+  assert.deepEqual(parseRentalFeatures("digital,affiliate,email_otp,digital"), ["digital", "affiliate", "email_otp"]);
   for (const features of ["smsbower", "imap", "whatsapp", "admin", "digital,whatsapp", ""]) assert.throws(() => parseRentalFeatures(features));
   const token = "1000:abcdefghijklmnopqrstuvwxyz";
   assert.doesNotThrow(() => validateProvisionIdentity("42", token, "2000:abcdefghijklmnopqrstuvwxyz"));

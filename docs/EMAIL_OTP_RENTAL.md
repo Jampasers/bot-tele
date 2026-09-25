@@ -19,11 +19,14 @@ In a private chat as a configured admin:
 1. `/emailadmin` → **Provider** → add `GMAIL|Gmail|📮|imap.gmail.com|993|true|APP_PASSWORD`.
 2. **Mailbox** → choose Gmail → send one or more rows in a private message: `gmail01@example.com|app-password`. The bot deletes that message before testing or saving. If Telegram cannot delete it, the bot cancels the operation. The confirmation never echoes the secret.
 3. **OTP Service** → add a service, for example `DISCORD|Discord|🎮|20|5|discord\\.com|verification|\\b(code|otp)\\D{0,8}(\\d{4,8})|false|true`. Sender, subject, and OTP fields accept semicolon-separated JavaScript regular expressions. At least one sender or subject matcher is required.
-4. **Harga** → set `DISCORD|MAILBOX|GMAIL|2000`.
+4. **Harga** → **Harga Global Provider** → set `GMAIL|2000`. Semua OTP service yang memakai Gmail langsung memakai harga Rp2.000 tanpa perlu dibuat satu per satu.
+5. Jika service tertentu perlu harga berbeda, gunakan **Harga per Service**, misalnya `PAYPAL|MAILBOX|GMAIL|4000`. Harga per-service selalu mengalahkan harga global provider.
 
 For domain aliases, first configure Cloudflare using `/cf` and verify the desired zone appears in `/cf`. Add a collector mailbox and then add the domain from **Domain** using `domain|zoneId|collectorEmail|true`. Add a `DOMAIN_ALIAS` price for each service. Aliases are random, tenant-unique, routed through the existing Cloudflare client, retired permanently after use, and their rule is deleted after the configured grace period.
 
 Admin settings use `maxConcurrentEmailRentalsPerUser|reservationMinutes|messageGraceMinutes|aliasGraceMinutes|maxConcurrentConnections|pollIntervalSeconds`. Defaults are 3 concurrent rentals, 10-minute reservations, 5-minute late-message grace, 15-minute Cloudflare cleanup grace, 5 worker connections, and 15-second polling.
+
+The main Catalog shows **📧 OTP Email** when `EMAIL_RENTAL_ENABLED=true`. Rental tenants must also have `email_otp` in the package's enabled features, for example `digital,affiliate,email_otp`.
 
 ## Lifecycle and safety
 

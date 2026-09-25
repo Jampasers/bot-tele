@@ -50,3 +50,42 @@ test("rental entry is exposed once in the enabled platform catalog and hidden el
     assert.doesNotMatch(rendered(buildMainMenuReplyKeyboard()), /Sewa Bot/i);
   });
 });
+
+test("Email OTP is visible in Catalog only when globally enabled and allowed for the tenant", async t => {
+  const previousEmailEnabled = process.env["EMAIL_RENTAL_ENABLED"];
+  t.after(() => {
+    if (previousEmailEnabled === undefined) delete process.env["EMAIL_RENTAL_ENABLED"];
+    else process.env["EMAIL_RENTAL_ENABLED"] = previousEmailEnabled;
+  });
+  t.mock.method(SmsConfig, "getOrCreate", async () => ({ enabled: true }) as never);
+
+  process.env["EMAIL_RENTAL_ENABLED"] = "true";
+  await runWithTenant(platformContext(), async () => {
+    assert.equal((rendered(await buildCatalogKeyboard()).match(/"callback_data":"email_otp"/g) ?? []).length, 1);
+    assert.match(await buildCatalogText(), /<b>OTP Email<\/b>/i);
+  });
+
+  await runWithTenant({
+    tenantId: "tenant_email_catalog",
+    rentalId: "rental_email_catalog",
+    ownerTelegramId: "42",
+    enabledFeatures: ["digital", "email_otp"],
+  }, async () => {
+    assert.match(rendered(await buildCatalogKeyboard()), /"callback_data":"email_otp"/);
+    assert.match(await buildCatalogText(), /<b>OTP Email<\/b>/i);
+  });
+
+  await runWithTenant({
+    tenantId: "tenant_without_email",
+    rentalId: "rental_without_email",
+    ownerTelegramId: "43",
+    enabledFeatures: ["digital"],
+  }, async () => {
+    assert.doesNotMatch(rendered(await buildCatalogKeyboard()), /"callback_data":"email_otp"/);
+  });
+
+  process.env["EMAIL_RENTAL_ENABLED"] = "false";
+  await runWithTenant(platformContext(), async () => {
+    assert.doesNotMatch(rendered(await buildCatalogKeyboard()), /"callback_data":"email_otp"/);
+  });
+});

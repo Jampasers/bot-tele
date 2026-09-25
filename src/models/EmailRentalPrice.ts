@@ -3,6 +3,7 @@ import { tenantPlugin } from "../tenant/tenantPlugin.js";
 import type { EmailResourceType } from "./EmailUsage.js";
 
 export interface IEmailRentalPrice {
+  /** OTP service ObjectId, or the reserved provider-wide global pricing key. */
   tenantId: string; serviceId: string; providerId?: string; resourceType: EmailResourceType;
   price: number; enabled: boolean; createdAt: Date; updatedAt: Date;
 }

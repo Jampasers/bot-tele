@@ -1658,7 +1658,7 @@ const adminPlugin: Plugin = {
       if (!isAdmin(ctx) || ctx.chat?.type !== "private") return;
       fsubInputState.set(String(ctx.from.id), { action: "RENTAL_PLAN" });
       await ctx.reply(
-        "Kirim paket dalam format:\n\n<code>kode | durasi_hari | harga | nama | digital,affiliate</code>\n\nFitur valid: digital, affiliate, totp. Ketik /batal untuk membatalkan.",
+        "Kirim paket dalam format:\n\n<code>kode | durasi_hari | harga | nama | digital,affiliate,email_otp</code>\n\nFitur valid: digital, affiliate, totp, email_otp. Ketik /batal untuk membatalkan.",
         { parse_mode: "HTML" },
       );
     });
@@ -3647,7 +3647,7 @@ const adminPlugin: Plugin = {
             { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🔙 Manajemen Rental", "adm_rental") },
           );
         } catch {
-          await ctx.reply("❌ Paket belum disimpan. Gunakan format: kode | hari | harga | nama | digital,affiliate");
+          await ctx.reply("❌ Paket belum disimpan. Gunakan format: kode | hari | harga | nama | digital,affiliate,email_otp");
         }
         return;
       }

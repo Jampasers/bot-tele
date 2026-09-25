@@ -14,11 +14,12 @@ import { EmailRentalSettings } from "../../models/EmailRentalSettings.js";
 import { EmailUsage } from "../../models/EmailUsage.js";
 import { CloudflareService } from "../../services/cloudflare.js";
 import { ActivityLogService } from "../../services/activityLog.js";
-import { createMailbox, disableMailbox, removeMailboxIfSafe, storeMailboxCredential, testMailbox, upsertEmailProvider, upsertEmailService, setEmailRentalPrice, toggleService } from "../../email/services/emailRental.service.js";
+import { createMailbox, disableMailbox, removeMailboxIfSafe, storeMailboxCredential, testMailbox, upsertEmailProvider, upsertEmailService, toggleService } from "../../email/services/emailRental.service.js";
+import { GLOBAL_EMAIL_SERVICE_ID, setEmailRentalPrice, setGlobalEmailRentalPrice } from "../../email/services/emailPricing.service.js";
 
 type InputState = { kind: "provider"; id?: string } | { kind: "mailbox_bulk"; providerId: string } |
   { kind: "mailbox_credential"; mailboxId: string } | { kind: "service"; id?: string } |
-  { kind: "domain"; id?: string } | { kind: "price" } | { kind: "settings" };
+  { kind: "domain"; id?: string } | { kind: "price" } | { kind: "global_price" } | { kind: "settings" };
 const inputs = new TenantMap<string, InputState>();
 const line = (value: string): string => value.replace(/[\r\n\t]+/g, " ").slice(0, 180);
 const errorText = (error: unknown): string => error instanceof Error && error.message.length < 250 ? error.message : "Operasi gagal. Data rahasia tidak disimpan atau ditampilkan.";
@@ -139,6 +140,12 @@ const adminPlugin: Plugin = {
           if (resourceType === "MAILBOX" && !provider) throw new Error("Provider tidak ditemukan.");
           await setEmailRentalPrice({ serviceId: String(service._id), resourceType, ...(provider ? { providerId: String(provider._id) } : {}), price: Number(priceText) });
           await ctx.reply("✅ Harga OTP Email disimpan.");
+        } else if (state.kind === "global_price") {
+          const [providerCode = "", priceText = ""] = text.split("|");
+          const provider = await EmailProvider.findOne({ code: providerCode.trim().toUpperCase() }).lean();
+          if (!provider) throw new Error("Provider tidak ditemukan.");
+          await setGlobalEmailRentalPrice({ resourceType: "MAILBOX", providerId: String(provider._id), price: Number(priceText) });
+          await ctx.reply("✅ Harga global " + provider.name + " disimpan. Semua service tanpa harga khusus akan memakai harga ini.");
         } else if (state.kind === "settings") {
           const [max = "3", reservation = "10", grace = "5", aliasGrace = "15", connections = "5", poll = "15"] = text.split("|");
           await EmailRentalSettings.findOneAndUpdate({}, { $set: {
@@ -278,17 +285,22 @@ const adminPlugin: Plugin = {
           const prices = await EmailRentalPrice.find({ enabled: true }).sort({ serviceId: 1 }).limit(100).lean();
           const lines: string[] = [];
           for (const price of prices) {
-            const service = await EmailOtpService.findById(price.serviceId).select("name").lean();
+            const global = price.serviceId === GLOBAL_EMAIL_SERVICE_ID;
+            const service = global ? null : await EmailOtpService.findById(price.serviceId).select("name").lean();
             const provider = price.providerId ? await EmailProvider.findById(price.providerId).select("name").lean() : null;
-            lines.push((service?.name ?? "Service") + " + " + (provider?.name ?? "Domain") + " · Rp" + price.price.toLocaleString("id-ID"));
+            lines.push((global ? "Semua Service" : service?.name ?? "Service") + " + " + (provider?.name ?? "Domain") + " · Rp" + price.price.toLocaleString("id-ID"));
           }
           await ctx.reply("💰 Harga\n" + (lines.join("\n") || "Belum ada harga.") +
-            "\n\nUntuk mengatur, tekan Set Harga dan kirim serviceCode|MAILBOX/providerCode|price atau serviceCode|DOMAIN_ALIAS|-|price.", {
-              reply_markup: new InlineKeyboard().text("➕ Set Harga", "ema:setprice").row().text("🔙 Menu", "ema:home"),
+            "\n\nHarga khusus service selalu mengalahkan harga global provider.", {
+              reply_markup: new InlineKeyboard().text("🌐 Harga Global Provider", "ema:setglobalprice").row()
+                .text("🎯 Harga per Service", "ema:setprice").row().text("🔙 Menu", "ema:home"),
             });
+        } else if (data === "ema:setglobalprice") {
+          inputs.set(stateKey(ctx), { kind: "global_price" });
+          await ctx.reply("Kirim providerCode|price\nContoh: GMAIL|2000\n\nHarga ini otomatis berlaku untuk semua service yang belum punya harga khusus.");
         } else if (data === "ema:setprice") {
           inputs.set(stateKey(ctx), { kind: "price" });
-          await ctx.reply("Format harga:\nDISCORD|MAILBOX|GMAIL|2000\nDISCORD|DOMAIN_ALIAS|-|1000");
+          await ctx.reply("Format harga khusus service:\nDISCORD|MAILBOX|GMAIL|2500\nDISCORD|DOMAIN_ALIAS|-|1000\n\nHarga khusus ini mengalahkan harga global provider.");
         } else if (data === "ema:active") {
           const rentals = await EmailRental.find({ status: { $in: ["ACTIVE", "WAITING_PAYMENT", "PROCESSING"] } }).sort({ createdAt: -1 }).limit(50).lean();
           await ctx.reply("📊 Rental Aktif\n" + (rentals.map((rental) => rental.serviceSnapshot.name + " · " + rental.emailAddress + " · " + rental.status + " · " + rental.userId.slice(-4)).join("\n") || "Tidak ada rental aktif."));

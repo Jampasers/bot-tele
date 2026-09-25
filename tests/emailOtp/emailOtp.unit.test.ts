@@ -9,6 +9,7 @@ import { parseOtpEmail, matchesOtpService } from "../../src/email/services/otpPa
 import { decryptSecret, encryptSecret } from "../../src/services/crypto.js";
 import { scopeTenantFilter } from "../../src/tenant/tenantPlugin.js";
 import { runWithTenant } from "../../src/tenant/context.js";
+import { GLOBAL_EMAIL_SERVICE_ID, selectEmailRentalPrice } from "../../src/email/services/emailPricing.service.js";
 
 const service = {
   senderPatterns: ["discord\\.com"], subjectPatterns: ["verification|security code"], otpPatterns: [],
@@ -115,3 +116,11 @@ test("Email Rental model filters remain tenant-scoped", () => runWithTenant({ te
     $and: [{ serviceId: "discord" }, { tenantId: "email_tenant_a" }],
   });
 }));
+
+test("email pricing prefers a service override and otherwise falls back to the provider global price", () => {
+  const global = { serviceId: GLOBAL_EMAIL_SERVICE_ID, price: 2000 };
+  const discord = { serviceId: "discord-service-id", price: 2500 };
+  assert.equal(selectEmailRentalPrice([global, discord], discord.serviceId)?.price, 2500);
+  assert.equal(selectEmailRentalPrice([global, discord], "new-service-id")?.price, 2000);
+  assert.equal(selectEmailRentalPrice([discord], "new-service-id"), null);
+});

@@ -10,7 +10,6 @@ import { EmailPaymentEffect } from "../../models/EmailPaymentEffect.js";
 import { EmailProvider } from "../../models/EmailProvider.js";
 import { EmailRental, type IEmailRental } from "../../models/EmailRental.js";
 import { EmailRentalCounter } from "../../models/EmailRentalCounter.js";
-import { EmailRentalPrice } from "../../models/EmailRentalPrice.js";
 import { EmailRentalSettings } from "../../models/EmailRentalSettings.js";
 import { BalanceLog } from "../../models/BalanceLog.js";
 import { User } from "../../models/User.js";
@@ -20,6 +19,8 @@ import { ActivityLogService } from "../../services/activityLog.js";
 import { generateQris } from "../../services/payment/paymentService.js";
 import type { PaymentTransaction } from "../../services/payment/types.js";
 import { getTenantPaymentClients } from "../../payments/tenantPayment.service.js";
+import { getEmailRentalPrice } from "./emailPricing.service.js";
+export { setEmailRentalPrice } from "./emailPricing.service.js";
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../../payments/paymentLedger.service.js";
 import { cloudflareEmailDomainProvider } from "../providers/cloudflareDomainProvider.js";
 import { imapMailboxProvider, ImapMailboxProviderError } from "../providers/imapProvider.js";
@@ -140,14 +141,14 @@ export async function getEmailRentalOptions(serviceId: string): Promise<EmailRen
   for (const provider of providers) {
     const stock = await getEligibleMailboxCount(serviceId, String(provider._id)).catch(() => 0);
     if (!stock) continue;
-    const price = await EmailRentalPrice.findOne({ serviceId, resourceType: "MAILBOX", providerId: String(provider._id), enabled: true }).lean();
+    const price = await getEmailRentalPrice({ serviceId, resourceType: "MAILBOX", providerId: String(provider._id) });
     if (price) options.push({ resourceType: "MAILBOX", providerId: String(provider._id), providerName: provider.name, stock, price: price.price });
   }
   const domains = await EmailDomain.find({ enabled: true, sellable: true, routingMode: "FORWARD" }).sort({ domain: 1 }).lean();
   for (const domain of domains) {
     const collector = await EmailMailbox.findOne({ _id: domain.destinationMailboxId, enabled: true, status: { $in: ["AVAILABLE", "COOLDOWN"] } }).lean();
     if (!collector || !(await EmailProvider.exists({ _id: collector.providerId, enabled: true }))) continue;
-    const price = await EmailRentalPrice.findOne({ serviceId, resourceType: "DOMAIN_ALIAS", enabled: true, providerId: { $in: [null] } }).lean();
+    const price = await getEmailRentalPrice({ serviceId, resourceType: "DOMAIN_ALIAS" });
     if (price) options.push({ resourceType: "DOMAIN_ALIAS", domainId: String(domain._id), providerName: "@" + domain.domain, stock: 1, price: price.price });
   }
   return options;
@@ -819,13 +820,6 @@ export async function upsertEmailProvider(input: {
   await EmailProvider.findOneAndUpdate(input.id ? { _id: input.id } : { code }, {
     $set: { code, name: input.name.trim(), icon: input.icon.trim() || "📮", protocol: "IMAP", imapHost: input.host.trim(), imapPort: input.port, imapSecure: input.secure, authType: input.authType, enabled: true },
   }, { upsert: true, returnDocument: "after", runValidators: true });
-}
-export async function setEmailRentalPrice(input: { serviceId: string; resourceType: "MAILBOX" | "DOMAIN_ALIAS"; providerId?: string; price: number }): Promise<void> {
-  if (!Number.isSafeInteger(input.price) || input.price < 1) throw new Error("Harga harus angka rupiah positif.");
-  await EmailRentalPrice.findOneAndUpdate({
-    serviceId: input.serviceId, resourceType: input.resourceType,
-    ...(input.providerId ? { providerId: input.providerId } : { providerId: { $in: [null] } }),
-  }, { $set: { price: input.price, enabled: true, ...(input.providerId ? { providerId: input.providerId } : {}) } }, { upsert: true, returnDocument: "after", runValidators: true });
 }
 export async function toggleService(serviceId: string): Promise<void> {
   const service = await EmailOtpService.findById(serviceId);

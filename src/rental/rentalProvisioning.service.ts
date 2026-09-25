@@ -6,7 +6,7 @@ import { encryptSecret, validateEncryptionKey } from "../services/crypto.js";
 import { getTenantId, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { DAY_MS } from "./rental.service.js";
 
-const PUBLIC_FEATURES = new Set(["digital", "affiliate", "totp"]);
+const PUBLIC_FEATURES = new Set(["digital", "affiliate", "totp", "email_otp"]);
 
 export interface RentalPlanInput {
   code: string;
@@ -54,7 +54,7 @@ interface VerifiedBotIdentity {
 export function parseRentalFeatures(value: string): string[] {
   const features = [...new Set(value.split(",").map(item => item.trim()).filter(Boolean))];
   if (features.length === 0 || features.some(feature => !PUBLIC_FEATURES.has(feature))) {
-    throw new Error("Fitur valid: digital,affiliate,totp. Fitur internal tidak tersedia untuk rental.");
+    throw new Error("Fitur valid: digital,affiliate,totp,email_otp. Fitur internal tidak tersedia untuk rental.");
   }
   return features;
 }
