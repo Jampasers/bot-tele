@@ -5,6 +5,8 @@ import type { GeneratedQris } from "../services/payment/paymentService.js";
 
 let platformClients: PaymentClients | undefined;
 
+export function invalidatePlatformPaymentClients(): void { platformClients = undefined; }
+
 /** Explicit platform merchant. Never consults tenant payment configuration. */
 export function getPlatformPaymentClients(): PaymentClients {
   if (platformClients) return platformClients;
