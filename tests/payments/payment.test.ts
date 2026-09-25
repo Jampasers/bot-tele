@@ -5,7 +5,7 @@ import { encryptSecret, decryptSecret, validateEncryptionKey } from "../../src/s
 import { matchesSettlement, claimSettlement, reservePaymentAmount } from "../../src/payments/paymentLedger.service.js";
 import { validateTenantQrisImage, validateTenantQrisPayload } from "../../src/payments/paymentConfigValidation.js";
 import { getTenantPaymentClients, invalidateTenantPaymentConfig, saveTenantPaymentConfig } from "../../src/payments/tenantPayment.service.js";
-import { getPlatformPaymentClients } from "../../src/payments/platformPayment.service.js";
+import { getPlatformPaymentClients, invalidatePlatformPaymentClients } from "../../src/payments/platformPayment.service.js";
 import { TenantPaymentConfig } from "../../src/models/TenantPaymentConfig.js";
 import { TopupSession } from "../../src/models/TopupSession.js";
 import { PaymentAmountReservation } from "../../src/models/PaymentLedger.js";
@@ -172,12 +172,14 @@ test("platform QRIS generation does not require GoBiz login until settlement loo
     GOJEK_ACCESS_TOKEN: process.env["GOJEK_ACCESS_TOKEN"],
   };
   t.after(() => {
+    invalidatePlatformPaymentClients();
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
   });
 
+  invalidatePlatformPaymentClients();
   process.env["GOPAY_MERCHANT_ID"] = "platform-test-merchant";
   process.env["QRIS_STATIC_PAYLOAD"] = await qris("PLATFORM LOGIN OPTIONAL");
   for (const key of ["GOJEK_EMAIL", "GOJEK_PASSWORD", "GOBIZ_EMAIL", "GOBIZ_PASSWORD", "GOPAY_ACCESS_TOKEN", "GOBIZ_ACCESS_TOKEN", "GOJEK_ACCESS_TOKEN"]) {
