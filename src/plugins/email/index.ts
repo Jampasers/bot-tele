@@ -2,7 +2,7 @@ import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { Plugin } from "../../types/Plugin.js";
 import { EmailOtpService } from "../../models/EmailOtpService.js";
 import { TenantMap } from "../../tenant/TenantMap.js";
-import { getEmailRentalOptions, createEmailRentalReservation, payEmailRentalFromBalance, createEmailRentalQrisInvoice, checkEmailRentalQris, cancelEmailRental, completeEmailRental, getUserEmailRentals, getRentalInbox } from "../../email/services/emailRental.service.js";
+import { getEmailRentalOptions, createEmailRentalReservation, payEmailRentalFromBalance, createEmailRentalQrisInvoice, checkEmailRentalQris, cancelEmailRental, completeEmailRental, getUserEmailRentals, getRentalInbox, attachEmailRentalQrisMessage, expireEmailRentalInvoice } from "../../email/services/emailRental.service.js";
 import { createEmailRenewal, renewEmailRentalFromBalance, createEmailRenewalQrisInvoice, checkEmailRenewalQris } from "../../email/services/emailRentalRenewal.service.js";
 
 const lastRefresh = new TenantMap<string, number>();
@@ -224,10 +224,11 @@ const emailPlugin: Plugin = {
       try {
         const result = await createEmailRentalQrisInvoice(ctx.match[1]!, userId(ctx));
         const caption = "📱 QRIS OTP Email\nNominal: Rp" + (result.rental.qrisAmount ?? result.rental.price).toLocaleString("id-ID") + "\nInvoice berlaku sampai reservasi berakhir.";
-        await ctx.replyWithPhoto(new InputFile(result.qr, "email-rental-qris.png"), {
+        const sent = await ctx.replyWithPhoto(new InputFile(result.qr, "email-rental-qris.png"), {
           caption, reply_markup: new InlineKeyboard().text("✅ Cek pembayaran", "em:check:" + String(result.rental._id))
             .text("❌ Batal", "em:cancel:" + String(result.rental._id)),
         });
+        await attachEmailRentalQrisMessage(String(result.rental._id), userId(ctx), String(ctx.chat!.id), sent.message_id);
       } catch (error) { await ctx.reply(messageError(error)); }
     });
     bot.callbackQuery(/^em:check:([a-f\d]{24})$/i, async (ctx) => {
@@ -237,7 +238,15 @@ const emailPlugin: Plugin = {
         const rental = await checkEmailRentalQris(ctx.match[1]!, userId(ctx));
         if (rental.status === "ACTIVE") await ctx.reply(activeText(rental), { reply_markup: activeKeyboard(String(rental._id)) });
         else await ctx.reply("Pembayaran diterima dan sedang diproses.");
-      } catch (error) { await ctx.reply(messageError(error)); }
+      } catch (error) {
+        const text = messageError(error);
+        if (/kedaluwarsa/i.test(text)) {
+          await expireEmailRentalInvoice(ctx.match[1]!, userId(ctx), ctx.api).catch(() => {});
+          await ctx.reply("⌛ QRIS kedaluwarsa. Invoice ditutup, silakan buat rental baru dari katalog.");
+        } else {
+          await ctx.reply(text);
+        }
+      }
     });
     bot.callbackQuery(/^em:cancel:([a-f\d]{24})$/i, async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
