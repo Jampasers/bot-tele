@@ -103,6 +103,16 @@ export async function expireEmailRentalInvoice(
   if (current.status !== "EXPIRED") return current;
 
   await removeQrisMessage(current, api);
+  if (expired && api && current.qrisChatId) {
+    const amount = current.qrisAmount ?? current.price;
+    await api.sendMessage(
+      current.qrisChatId,
+      "⌛ QRIS OTP Email kedaluwarsa.\n\n" +
+        "Invoice Rp" + amount.toLocaleString("id-ID") + " untuk " + current.serviceSnapshot.name +
+        " sudah ditutup karena batas waktu pembayaran habis.\n\n" +
+        "Silakan buat rental baru dari katalog jika masih ingin melanjutkan.",
+    ).catch(() => {});
+  }
   await releaseResource(current).catch(() => {});
   await releaseCounter(String(current._id), current.userId).catch(() => {});
   await ActivityLogService.logEmailRentalEvent(ActivityLogService.getDefaultApi(), {
