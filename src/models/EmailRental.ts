@@ -7,7 +7,7 @@ export interface IEmailRental {
   _id: Types.ObjectId; tenantId: string; userId: string; serviceId: string; resourceType: EmailResourceType; resourceId: string; emailAddress: string;
   providerId?: string; providerName: string; serviceSnapshot: { code: string; name: string; icon: string; durationMinutes: number; cooldownMinutes: number; senderPatterns: string[]; subjectPatterns: string[]; otpPatterns: string[]; allowMagicLink: boolean; allowVerificationLink: boolean };
   price: number; paymentMethod?: "BALANCE" | "QRIS"; paymentReference?: string; qrisAmount?: number; paymentMerchantId?: string;
-  paymentConfigVersion?: number; paymentExpiresAt?: Date; matchedTransactionId?: string; status: EmailRentalStatus;
+  paymentConfigVersion?: number; paymentExpiresAt?: Date; matchedTransactionId?: string; qrisChatId?: string; qrisMessageId?: number; status: EmailRentalStatus;
   createdAt: Date; reservedAt?: Date; reservationExpiresAt?: Date; paidAt?: Date; startedAt?: Date; expiresAt?: Date;
   completedAt?: Date; lastMessageAt?: Date; startUid: number; usageCommitted: boolean; counterReleased: boolean;
 }
@@ -23,7 +23,7 @@ const schema = new Schema<IEmailRental>({
   emailAddress: { type: String, required: true, lowercase: true }, providerId: String, providerName: { type: String, required: true },
   serviceSnapshot: { type: serviceSnapshot, required: true }, price: { type: Number, required: true, min: 1 },
   paymentMethod: { type: String, enum: ["BALANCE", "QRIS"] }, paymentReference: String, qrisAmount: Number, paymentMerchantId: String,
-  paymentConfigVersion: Number, paymentExpiresAt: Date, matchedTransactionId: String,
+  paymentConfigVersion: Number, paymentExpiresAt: Date, matchedTransactionId: String, qrisChatId: String, qrisMessageId: Number,
   status: { type: String, enum: ["RESERVED", "WAITING_PAYMENT", "PROCESSING", "ACTIVE", "COMPLETED", "EXPIRED", "CANCELLED", "FAILED"], default: "WAITING_PAYMENT", index: true },
   reservedAt: Date, reservationExpiresAt: Date, paidAt: Date, startedAt: Date, expiresAt: Date, completedAt: Date, lastMessageAt: Date,
   startUid: { type: Number, default: 0 }, usageCommitted: { type: Boolean, default: false }, counterReleased: { type: Boolean, default: false },
