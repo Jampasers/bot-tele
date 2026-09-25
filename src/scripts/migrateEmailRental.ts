@@ -125,7 +125,13 @@ async function main(): Promise<void> {
 
       const usedNames = new Set(currentIndexes.map((index) => index.name).filter((indexName): indexName is string => Boolean(indexName)));
       const { background: _background, name: declaredName, unique, ...safeOptions } = options;
-      const indexName = makeIndexName(keys, { ...options, name: declaredName }, usedNames);
+      const indexName = makeIndexName(keys, {
+        ...(declaredName ? { name: declaredName } : {}),
+        ...(unique === undefined ? {} : { unique }),
+        ...(options.sparse === undefined ? {} : { sparse: options.sparse }),
+        ...(options.expireAfterSeconds === undefined ? {} : { expireAfterSeconds: options.expireAfterSeconds }),
+        ...(options.partialFilterExpression === undefined ? {} : { partialFilterExpression: options.partialFilterExpression }),
+      }, usedNames);
       await collection.createIndex(keys as IndexSpecification, {
         ...safeOptions,
         ...(unique === undefined ? {} : { unique: Array.isArray(unique) ? true : unique }),
