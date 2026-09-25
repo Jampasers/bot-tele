@@ -4,6 +4,77 @@ import type { IndexSpecification } from "mongodb";
 import { EMAIL_RENTAL_MODELS } from "../tenant/models.js";
 import { INVALID_TENANT_FILTER, LEGACY_TENANT_FILTER } from "../tenant/migration.js";
 
+type ExistingIndex = {
+  key: Record<string, unknown>;
+  name?: string;
+  unique?: boolean;
+  sparse?: boolean;
+  expireAfterSeconds?: number;
+  partialFilterExpression?: unknown;
+};
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => `${JSON.stringify(key)}:${stableStringify(child)}`)
+    .join(",")}}`;
+}
+
+function indexMatches(
+  index: ExistingIndex,
+  keys: Record<string, unknown>,
+  options: {
+    unique?: unknown;
+    sparse?: boolean;
+    expireAfterSeconds?: number;
+    partialFilterExpression?: unknown;
+  },
+): boolean {
+  return stableStringify(index.key) === stableStringify(keys)
+    && Boolean(index.unique) === Boolean(options.unique)
+    && Boolean(index.sparse) === Boolean(options.sparse)
+    && index.expireAfterSeconds === options.expireAfterSeconds
+    && stableStringify(index.partialFilterExpression) === stableStringify(options.partialFilterExpression);
+}
+
+function makeIndexName(
+  keys: Record<string, unknown>,
+  options: {
+    name?: string;
+    unique?: unknown;
+    sparse?: boolean;
+    expireAfterSeconds?: number;
+    partialFilterExpression?: unknown;
+  },
+  usedNames: Set<string>,
+): string {
+  const requestedName = typeof options.name === "string" && options.name.trim() ? options.name.trim() : undefined;
+  const keyName = Object.entries(keys)
+    .map(([field, direction]) => `${field}_${String(direction)}`)
+    .join("_")
+    .replace(/[^A-Za-z0-9_.-]/g, "_");
+  const qualifiers = [
+    options.unique ? "uniq" : "",
+    options.partialFilterExpression ? "partial" : "",
+    options.sparse ? "sparse" : "",
+    options.expireAfterSeconds !== undefined ? `ttl_${options.expireAfterSeconds}` : "",
+  ].filter(Boolean);
+
+  const base = requestedName ?? (qualifiers.length ? `${keyName}__${qualifiers.join("_")}` : keyName);
+  let candidate = base;
+  let suffix = 2;
+  while (usedNames.has(candidate)) candidate = `${base}__${suffix++}`;
+  return candidate;
+}
+
+function formatMigrationError(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return raw.replace(/mongodb(\+srv)?:\/\/[^@\s]+@/gi, "mongodb$1://***@");
+}
+
 /** Read-only by default. New rental collections never inherit legacy IMAP secrets. */
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
@@ -47,12 +118,22 @@ async function main(): Promise<void> {
     console.log(`${name}: ${exists ? "exists" : "will create"}; ${model.schema.indexes().length} required indexes; ${obsoleteGlobalUnique.length} obsolete global unique indexes`);
     if (!apply) continue;
     if (!exists) await db.createCollection(name);
+
     for (const [keys, options] of model.schema.indexes()) {
-      const { background: _background, name: _name, unique, ...safeOptions } = options;
+      const currentIndexes = await collection.indexes();
+      if (currentIndexes.some((index) => indexMatches(index as ExistingIndex, keys, options))) continue;
+
+      const usedNames = new Set(currentIndexes.map((index) => index.name).filter((indexName): indexName is string => Boolean(indexName)));
+      const { background: _background, name: declaredName, unique, ...safeOptions } = options;
+      const indexName = makeIndexName(keys, { ...options, name: declaredName }, usedNames);
       await collection.createIndex(keys as IndexSpecification, {
-        ...safeOptions, ...(unique === undefined ? {} : { unique: Array.isArray(unique) ? true : unique }),
+        ...safeOptions,
+        ...(unique === undefined ? {} : { unique: Array.isArray(unique) ? true : unique }),
+        name: indexName,
       });
+      console.log(`${name}: created index ${indexName}`);
     }
+
     // Retire unscoped unique indexes only after tenant-scoped indexes are ready.
     for (const index of obsoleteGlobalUnique) await collection.dropIndex(index.name!);
   }
@@ -61,7 +142,7 @@ async function main(): Promise<void> {
     for (const model of EMAIL_RENTAL_MODELS) {
       const indexes = await db.collection(model.collection.name).indexes();
       for (const [keys, options] of model.schema.indexes()) {
-        if (!indexes.some((index) => JSON.stringify(index.key) === JSON.stringify(keys) && Boolean(index.unique) === Boolean(options.unique))) {
+        if (!indexes.some((index) => indexMatches(index as ExistingIndex, keys, options))) {
           throw new Error(`${model.collection.name}: index verification failed after apply.`);
         }
       }
@@ -71,6 +152,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error && !error.name.startsWith("Mongo") ? error.message : "Email Rental migration failed; inspect MongoDB connectivity privately.");
+  console.error(`Email Rental migration failed: ${formatMigrationError(error)}`);
   process.exitCode = 1;
 }).finally(async () => { await mongoose.disconnect(); });
