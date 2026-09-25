@@ -124,3 +124,12 @@ test("email pricing prefers a service override and otherwise falls back to the p
   assert.equal(selectEmailRentalPrice([global, discord], "new-service-id")?.price, 2000);
   assert.equal(selectEmailRentalPrice([discord], "new-service-id"), null);
 });
+
+
+test("Email Rental persists QRIS Telegram message metadata for durable expiry cleanup", async () => {
+  const { EmailRental } = await import("../../src/models/EmailRental.js");
+  assert.ok(EmailRental.schema.path("qrisChatId"));
+  assert.ok(EmailRental.schema.path("qrisMessageId"));
+  const status = EmailRental.schema.path("status") as unknown as { enumValues?: string[] };
+  assert.ok(status.enumValues?.includes("EXPIRED"));
+});
