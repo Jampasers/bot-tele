@@ -157,3 +157,38 @@ test("payment settings enforce actor authorization, encrypt all secrets and bloc
   await assert.rejects(runWithTenant(context("a"), () => saveTenantPaymentConfig("101", input)), /Tunggu invoice/);
   assert.equal(writes.length, 1);
 });
+
+
+test("platform QRIS generation does not require GoBiz login until settlement lookup", async (t) => {
+  const saved = {
+    GOPAY_MERCHANT_ID: process.env["GOPAY_MERCHANT_ID"],
+    QRIS_STATIC_PAYLOAD: process.env["QRIS_STATIC_PAYLOAD"],
+    GOJEK_EMAIL: process.env["GOJEK_EMAIL"],
+    GOJEK_PASSWORD: process.env["GOJEK_PASSWORD"],
+    GOBIZ_EMAIL: process.env["GOBIZ_EMAIL"],
+    GOBIZ_PASSWORD: process.env["GOBIZ_PASSWORD"],
+    GOPAY_ACCESS_TOKEN: process.env["GOPAY_ACCESS_TOKEN"],
+    GOBIZ_ACCESS_TOKEN: process.env["GOBIZ_ACCESS_TOKEN"],
+    GOJEK_ACCESS_TOKEN: process.env["GOJEK_ACCESS_TOKEN"],
+  };
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  process.env["GOPAY_MERCHANT_ID"] = "platform-test-merchant";
+  process.env["QRIS_STATIC_PAYLOAD"] = await qris("PLATFORM LOGIN OPTIONAL");
+  for (const key of ["GOJEK_EMAIL", "GOJEK_PASSWORD", "GOBIZ_EMAIL", "GOBIZ_PASSWORD", "GOPAY_ACCESS_TOKEN", "GOBIZ_ACCESS_TOKEN", "GOJEK_ACCESS_TOKEN"]) {
+    delete process.env[key];
+  }
+
+  const { generator, merchantId, merchant } = getPlatformPaymentClients();
+  assert.equal(merchantId, "platform-test-merchant");
+  assert.match(await generator.getDynamicPayload(12345), /PLATFORM LOGIN OPTIONAL/);
+  await assert.rejects(
+    merchant.getQrisSettlements({ startTime: new Date(0), endTime: new Date() }),
+    /login belum dikonfigurasi/,
+  );
+});
