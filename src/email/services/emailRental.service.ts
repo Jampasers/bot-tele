@@ -55,6 +55,65 @@ async function releaseResource(rental: IEmailRental): Promise<void> {
   await releaseReservedResource(rental.resourceType, rental.resourceId, rental.userId);
 }
 
+async function removeQrisMessage(rental: IEmailRental, api?: Api): Promise<void> {
+  if (!api || !rental.qrisChatId || !rental.qrisMessageId) return;
+  await api.deleteMessage(rental.qrisChatId, rental.qrisMessageId).catch(() => {});
+}
+
+export async function attachEmailRentalQrisMessage(
+  rentalId: string,
+  userId: string,
+  chatId: string,
+  messageId: number,
+): Promise<void> {
+  await EmailRental.updateOne(
+    { _id: rentalId, userId, status: "WAITING_PAYMENT", paymentMethod: "QRIS" },
+    { $set: { qrisChatId: chatId, qrisMessageId: messageId } },
+  );
+}
+
+export async function expireEmailRentalInvoice(
+  rentalId: string,
+  userId: string,
+  api?: Api,
+): Promise<IEmailRental> {
+  const rental = await loadOwnedRental(rentalId, userId);
+  if (rental.status === "EXPIRED") {
+    await removeQrisMessage(rental, api);
+    return rental;
+  }
+  if (rental.status !== "WAITING_PAYMENT") return rental;
+
+  const now = new Date();
+  const expired = await EmailRental.findOneAndUpdate(
+    {
+      _id: rental._id,
+      userId,
+      status: "WAITING_PAYMENT",
+      $or: [
+        { paymentExpiresAt: { $lte: now } },
+        { reservationExpiresAt: { $lte: now } },
+      ],
+    },
+    { $set: { status: "EXPIRED", completedAt: now } },
+    { returnDocument: "after" },
+  ).lean();
+
+  const current = (expired ?? await loadOwnedRental(rentalId, userId)) as IEmailRental;
+  if (current.status !== "EXPIRED") return current;
+
+  await removeQrisMessage(current, api);
+  await releaseResource(current).catch(() => {});
+  await releaseCounter(String(current._id), current.userId).catch(() => {});
+  await ActivityLogService.logEmailRentalEvent(ActivityLogService.getDefaultApi(), {
+    event: "expired",
+    rentalId: String(current._id),
+    userId: current.userId,
+    serviceName: current.serviceSnapshot.name,
+  }).catch(() => {});
+  return current;
+}
+
 async function mailboxConnection(mailboxId: string): Promise<void> {
   const mailbox = await EmailMailbox.findById(mailboxId).select("+credentialEncrypted").lean();
   if (!mailbox || !mailbox.enabled || mailbox.status === "BROKEN" || mailbox.status === "DISABLED") {
@@ -558,6 +617,9 @@ export async function checkEmailRentalQris(rentalId: string, userId: string): Pr
   if (rental.status === "ACTIVE") return rental;
   if (rental.status === "PROCESSING" && rental.resourceType === "DOMAIN_ALIAS") return activateAliasRental(rental);
   if (rental.status === "PROCESSING" && rental.resourceType === "MAILBOX") return activateReservedMailboxWithRecovery(rental, "QRIS", false);
+  if (rental.status === "EXPIRED") {
+    throw new Error("Invoice QRIS sudah kedaluwarsa. Silakan buat rental baru dari katalog.");
+  }
   if (rental.status === "CANCELLED" || rental.status === "FAILED") {
     const lateSettlement = await findRentalSettlement(rental);
     if (!lateSettlement) throw new Error("Reservasi sudah berakhir. Jika pembayaran baru saja berhasil, hubungi admin dengan bukti transfer.");
@@ -568,11 +630,15 @@ export async function checkEmailRentalQris(rentalId: string, userId: string): Pr
   }
   if (rental.status !== "WAITING_PAYMENT" || rental.paymentMethod !== "QRIS" || !rental.paymentReference ||
       !rental.qrisAmount || !rental.paymentMerchantId || !rental.paymentExpiresAt) throw new Error("Invoice QRIS tidak ditemukan.");
+  if (rental.paymentExpiresAt <= new Date() || (rental.reservationExpiresAt && rental.reservationExpiresAt <= new Date())) {
+    rental = await expireEmailRentalInvoice(rentalId, userId);
+    throw new Error("Invoice QRIS sudah kedaluwarsa. Silakan buat rental baru dari katalog.");
+  }
   const transaction = await findRentalSettlement(rental);
   if (!transaction) {
     if (rental.paymentExpiresAt <= new Date() || (rental.reservationExpiresAt && rental.reservationExpiresAt <= new Date())) {
-      await failAndRelease(rental, false);
-      throw new Error("Invoice QRIS kedaluwarsa dan pembayaran belum terdeteksi.");
+      await expireEmailRentalInvoice(rentalId, userId);
+      throw new Error("Invoice QRIS sudah kedaluwarsa. Silakan buat rental baru dari katalog.");
     }
     throw new Error("Pembayaran belum terdeteksi. Tunggu sebentar lalu tekan cek pembayaran.");
   }
@@ -653,7 +719,7 @@ export async function completeEmailRental(rentalId: string, userId: string, expi
   });
 }
 
-export async function sweepEmailRentalLifecycle(): Promise<void> {
+export async function sweepEmailRentalLifecycle(api?: Api): Promise<void> {
   const now = new Date();
   const processingRentals = await EmailRental.find({ status: "PROCESSING" }).sort({ paidAt: 1 }).limit(100).lean();
   for (const rental of processingRentals) {
@@ -662,12 +728,15 @@ export async function sweepEmailRentalLifecycle(): Promise<void> {
       else await activateReservedMailboxWithRecovery(rental as IEmailRental, rental.paymentMethod ?? "QRIS", false);
     } catch { /* a temporary IMAP/Cloudflare failure is retried on the next bounded poll */ }
   }
-  const expiredReservations = await EmailRental.find({ status: "WAITING_PAYMENT", reservationExpiresAt: { $lte: now } }).limit(100).lean();
+  const expiredReservations = await EmailRental.find({
+    status: "WAITING_PAYMENT",
+    $or: [
+      { paymentExpiresAt: { $lte: now } },
+      { reservationExpiresAt: { $lte: now } },
+    ],
+  }).limit(100).lean();
   for (const rental of expiredReservations) {
-    const changed = await EmailRental.updateOne({ _id: rental._id, status: "WAITING_PAYMENT", reservationExpiresAt: { $lte: now } }, { $set: { status: "CANCELLED", completedAt: now } });
-    if (!changed.modifiedCount) continue;
-    await releaseResource(rental as IEmailRental).catch(() => {});
-    await releaseCounter(String(rental._id), rental.userId).catch(() => {});
+    await expireEmailRentalInvoice(String(rental._id), rental.userId, api).catch(() => {});
   }
   const expiredRentals = await EmailRental.find({ status: "ACTIVE", expiresAt: { $lte: now } }).limit(100).lean();
   for (const rental of expiredRentals) await completeEmailRental(String(rental._id), rental.userId, true).catch(() => {});

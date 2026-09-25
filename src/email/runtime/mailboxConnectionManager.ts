@@ -68,7 +68,7 @@ export class MailboxConnectionManager {
     const last = this.lastPollAt.get(tenantId) ?? 0;
     if (Date.now() - last < cadence) return;
     this.lastPollAt.set(tenantId, Date.now());
-    await sweepEmailRentalLifecycle();
+    await sweepEmailRentalLifecycle(api);
     const maximum = Math.min(25, Math.max(1, settings?.maxConcurrentConnections ?? 5));
     const active = await EmailRental.find({
       $or: [
