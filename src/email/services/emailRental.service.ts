@@ -340,7 +340,17 @@ function isEmailUsageDuplicate(error: unknown): boolean {
 async function activateReservedMailboxWithRecovery(
   rental: IEmailRental, method: "BALANCE" | "QRIS", chargeBalance: boolean,
 ): Promise<IEmailRental> {
-  let current = await ensureReservedMailbox(rental);
+  let current: IEmailRental;
+  try {
+    current = await ensureReservedMailbox(rental);
+  } catch (error) {
+    const temporaryMailboxFailure = /Mailbox sementara tidak dapat diperiksa/i.test(error instanceof Error ? error.message : "");
+    // A QRIS settlement has already been claimed before a rental reaches PROCESSING.
+    // Do not tell the buyer that payment is unprocessed just because IMAP is
+    // temporarily unavailable. Keep PROCESSING and let the lifecycle/QRIS poll retry.
+    if (method === "QRIS" && rental.status === "PROCESSING" && temporaryMailboxFailure) return rental;
+    throw error;
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
     try { return await activateMailboxRental(current, method, chargeBalance); }
     catch (error) {
