@@ -1,4 +1,5 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
+import { setTenantInterval as setInterval, clearTenantInterval as clearInterval } from "../../runtime/tenantTimers.js";
 import { Plugin } from "../../types/Plugin.js";
 import { EmailOtpService } from "../../models/EmailOtpService.js";
 import { TenantMap } from "../../tenant/TenantMap.js";
@@ -7,6 +8,68 @@ import { createEmailRenewal, renewEmailRentalFromBalance, createEmailRenewalQris
 
 const lastRefresh = new TenantMap<string, number>();
 const actionHistory = new TenantMap<string, number[]>();
+
+const EMAIL_QRIS_POLL_INTERVAL_MS = 10_000;
+interface EmailQrisPollState {
+  timer: NodeJS.Timeout;
+  processingNotified: boolean;
+}
+const activeEmailQrisPolls = new TenantMap<string, EmailQrisPollState>();
+
+function clearEmailQrisPoll(rentalId: string): void {
+  const state = activeEmailQrisPolls.get(rentalId);
+  if (!state) return;
+  clearInterval(state.timer);
+  activeEmailQrisPolls.delete(rentalId);
+}
+
+function startEmailQrisPolling(
+  bot: Bot<Context>,
+  rentalId: string,
+  uid: string,
+  chatId: number,
+  messageId: number,
+): void {
+  clearEmailQrisPoll(rentalId);
+  const state: EmailQrisPollState = { timer: undefined as unknown as NodeJS.Timeout, processingNotified: false };
+  state.timer = setInterval(async () => {
+    try {
+      const rental = await checkEmailRentalQris(rentalId, uid);
+      if (rental.status === "ACTIVE") {
+        clearEmailQrisPoll(rentalId);
+        await bot.api.deleteMessage(chatId, messageId).catch(() => {});
+        await bot.api.sendMessage(chatId, activeText(rental), { reply_markup: activeKeyboard(String(rental._id)) });
+        return;
+      }
+      if (rental.status === "PROCESSING") {
+        if (!state.processingNotified) {
+          state.processingNotified = true;
+          await bot.api.deleteMessage(chatId, messageId).catch(() => {});
+          await bot.api.sendMessage(
+            chatId,
+            "✅ Pembayaran QRIS diterima.\n\nMailbox sedang disiapkan. Bot akan mengaktifkan rental otomatis begitu mailbox siap.",
+          ).catch(() => {});
+        }
+        return;
+      }
+      if (["EXPIRED", "FAILED", "CANCELLED", "COMPLETED"].includes(rental.status)) {
+        clearEmailQrisPoll(rentalId);
+      }
+    } catch (error) {
+      const text = messageError(error);
+      if (/kedaluwarsa/i.test(text)) {
+        clearEmailQrisPoll(rentalId);
+        await expireEmailRentalInvoice(rentalId, uid, bot.api).catch(() => {});
+        return;
+      }
+      // "belum terdeteksi" and temporary provider/IMAP errors are retried on
+      // the next poll; do not spam the buyer on every background check.
+      if (/belum terdeteksi|sementara|login belum dikonfigurasi|timed out|rate limited/i.test(text)) return;
+      console.warn("[EmailRental] QRIS auto-check failed; next poll will retry.");
+    }
+  }, EMAIL_QRIS_POLL_INTERVAL_MS);
+  activeEmailQrisPolls.set(rentalId, state);
+}
 const line = (value: string): string => value.replace(/[\r\n\t]+/g, " ").slice(0, 240);
 function userId(ctx: Context): string {
   if (!ctx.from) throw new Error("Akun Telegram tidak ditemukan.");
@@ -228,16 +291,25 @@ const emailPlugin: Plugin = {
           caption, reply_markup: new InlineKeyboard().text("✅ Cek pembayaran", "em:check:" + String(result.rental._id))
             .text("❌ Batal", "em:cancel:" + String(result.rental._id)),
         });
-        await attachEmailRentalQrisMessage(String(result.rental._id), userId(ctx), String(ctx.chat!.id), sent.message_id);
+        const rentalId = String(result.rental._id);
+        const uid = userId(ctx);
+        await attachEmailRentalQrisMessage(rentalId, uid, String(ctx.chat!.id), sent.message_id);
+        startEmailQrisPolling(bot, rentalId, uid, ctx.chat!.id, sent.message_id);
       } catch (error) { await ctx.reply(messageError(error)); }
     });
     bot.callbackQuery(/^em:check:([a-f\d]{24})$/i, async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
       try {
         rateLimit(userId(ctx), "payment_check", 6, 60_000);
-        const rental = await checkEmailRentalQris(ctx.match[1]!, userId(ctx));
-        if (rental.status === "ACTIVE") await ctx.reply(activeText(rental), { reply_markup: activeKeyboard(String(rental._id)) });
-        else await ctx.reply("Pembayaran diterima dan sedang diproses.");
+        const rentalId = ctx.match[1]!;
+        const rental = await checkEmailRentalQris(rentalId, userId(ctx));
+        if (rental.status === "ACTIVE") {
+          clearEmailQrisPoll(rentalId);
+          await ctx.deleteMessage().catch(() => {});
+          await ctx.reply(activeText(rental), { reply_markup: activeKeyboard(String(rental._id)) });
+        } else {
+          await ctx.reply("✅ Pembayaran diterima dan sedang diproses. Bot akan mengaktifkan rental otomatis begitu mailbox siap.");
+        }
       } catch (error) {
         const text = messageError(error);
         if (/kedaluwarsa/i.test(text)) {
@@ -250,7 +322,13 @@ const emailPlugin: Plugin = {
     });
     bot.callbackQuery(/^em:cancel:([a-f\d]{24})$/i, async (ctx) => {
       await ctx.answerCallbackQuery().catch(() => {});
-      try { rateLimit(userId(ctx), "cancel", 5, 60_000); await cancelEmailRental(ctx.match[1]!, userId(ctx)); await ctx.reply("Reservasi dibatalkan. Mailbox dilepas dan alamat domain dipensiunkan."); }
+      try {
+        rateLimit(userId(ctx), "cancel", 5, 60_000);
+        clearEmailQrisPoll(ctx.match[1]!);
+        await cancelEmailRental(ctx.match[1]!, userId(ctx));
+        await ctx.deleteMessage().catch(() => {});
+        await ctx.reply("Reservasi dibatalkan. Mailbox dilepas dan alamat domain dipensiunkan.");
+      }
       catch (error) { await ctx.reply(messageError(error)); }
     });
     bot.callbackQuery(/^em:refresh:([a-f\d]{24})$/i, async (ctx) => {
