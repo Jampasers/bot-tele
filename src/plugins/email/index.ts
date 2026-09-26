@@ -65,6 +65,12 @@ function startEmailQrisPolling(
       // "belum terdeteksi" and temporary provider/IMAP errors are retried on
       // the next poll; do not spam the buyer on every background check.
       if (/belum terdeteksi|sementara|login belum dikonfigurasi|timed out|rate limited/i.test(text)) return;
+      if (/dikembalikan ke saldo|provider lain|mailbox ini sedang tidak tersedia/i.test(text)) {
+        clearEmailQrisPoll(rentalId);
+        await bot.api.deleteMessage(chatId, messageId).catch(() => {});
+        await bot.api.sendMessage(chatId, "❌ " + text).catch(() => {});
+        return;
+      }
       console.warn("[EmailRental] QRIS auto-check failed; next poll will retry.");
     }
   }, EMAIL_QRIS_POLL_INTERVAL_MS);
