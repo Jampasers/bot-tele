@@ -115,7 +115,27 @@ export class MailboxConnectionManager {
     if (!mailbox || !mailbox.enabled || mailbox.status === "DISABLED" || mailbox.status === "BROKEN") return;
     const provider = await EmailProvider.findOne({ _id: mailbox.providerId, enabled: true }).lean();
     if (!provider) return;
-    const password = decryptSecret(mailbox.credentialEncrypted, "email-mailbox:" + String(mailbox._id) + ":credential");
+    let password: string;
+    try {
+      password = decryptSecret(mailbox.credentialEncrypted, "email-mailbox:" + String(mailbox._id) + ":credential");
+    } catch (error) {
+      const unreadable = error instanceof Error &&
+        /Credential decryption failed|Invalid encrypted credential envelope/i.test(error.message);
+      if (!unreadable) throw error;
+      await EmailMailbox.updateOne({ _id: mailboxId }, {
+        $set: {
+          status: "DISABLED",
+          enabled: false,
+          lastCheckedAt: new Date(),
+          lastError: "Stored credential cannot be decrypted with the active encryption key",
+        },
+        $unset: { reservedBy: 1, reservedUntil: 1, rentedBy: 1, rentedUntil: 1 },
+      });
+      await ActivityLogService.logEmailRentalEvent(ActivityLogService.getDefaultApi(), { event: "mailbox_broken" }).catch(() => {});
+      if (source.directRental) await recoverActiveMailboxFailure(mailboxId, api).catch(() => {});
+      console.warn("[EmailRental] Mailbox credential is unreadable; mailbox disabled until admin repairs it.");
+      return;
+    }
     const credentials = {
       host: provider.imapHost, port: provider.imapPort, secure: provider.imapSecure,
       username: mailbox.username, password, mailbox: "INBOX",
