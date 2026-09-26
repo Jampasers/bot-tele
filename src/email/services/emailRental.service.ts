@@ -30,6 +30,8 @@ import { getEligibleMailboxCount, reserveDomainAlias, reserveMailboxCandidate, r
 const RESERVATION_MS = 10 * 60_000;
 const duplicate = (error: unknown): boolean => typeof error === "object" && error !== null && "code" in error && error.code === 11000;
 const isEnabled = (): boolean => process.env.EMAIL_RENTAL_ENABLED === "true";
+const isCredentialDecryptionFailure = (error: unknown): boolean =>
+  error instanceof Error && /Credential decryption failed|Invalid encrypted credential envelope/i.test(error.message);
 
 export interface EmailRentalOption {
   resourceType: "MAILBOX" | "DOMAIN_ALIAS"; providerId?: string; domainId?: string; providerName: string; stock: number; price: number;
@@ -131,7 +133,22 @@ async function mailboxConnection(mailboxId: string): Promise<void> {
   }
   const provider = await EmailProvider.findOne({ _id: mailbox.providerId, enabled: true }).lean();
   if (!provider) throw new Error("Provider IMAP tidak tersedia.");
-  const password = decryptSecret(mailbox.credentialEncrypted, "email-mailbox:" + String(mailbox._id) + ":credential");
+  let password: string;
+  try {
+    password = decryptSecret(mailbox.credentialEncrypted, "email-mailbox:" + String(mailbox._id) + ":credential");
+  } catch (error) {
+    if (!isCredentialDecryptionFailure(error)) throw error;
+    await EmailMailbox.updateOne({ _id: mailbox._id }, {
+      $set: {
+        status: "DISABLED",
+        enabled: false,
+        lastCheckedAt: new Date(),
+        lastError: "Stored credential cannot be decrypted with the active encryption key",
+      },
+      $unset: { reservedBy: 1, reservedUntil: 1, rentedBy: 1, rentedUntil: 1 },
+    });
+    throw new Error("MAILBOX_CREDENTIAL_UNREADABLE");
+  }
   await imapMailboxProvider.testConnection({ host: provider.imapHost, port: provider.imapPort, secure: provider.imapSecure,
     username: mailbox.username, password, mailbox: "INBOX" });
   await EmailMailbox.updateOne({ _id: mailbox._id, enabled: true }, {
@@ -186,6 +203,12 @@ async function ensureReservedMailbox(rental: IEmailRental): Promise<IEmailRental
     await mailboxConnection(rental.resourceId);
     return rental;
   } catch (error) {
+    if (error instanceof Error && error.message === "MAILBOX_CREDENTIAL_UNREADABLE") {
+      await failAndRelease(rental, rental.status === "PROCESSING");
+      throw new Error(rental.status === "PROCESSING"
+        ? "Credential mailbox bermasalah di sisi sistem. Pembayaran sudah dikembalikan ke saldo bot. Silakan coba provider lain atau hubungi admin."
+        : "Mailbox ini sedang tidak tersedia. Silakan pilih provider lain.");
+    }
     if (!(error instanceof ImapMailboxProviderError) || error.kind !== "AUTH") throw new Error("Mailbox sementara tidak dapat diperiksa. Pembayaran belum diproses; coba lagi sebentar.");
     await EmailMailbox.updateOne({ _id: rental.resourceId, status: "RESERVED" }, {
       $set: { status: "BROKEN", enabled: false, lastCheckedAt: new Date(), lastError: "IMAP authentication failed" },
