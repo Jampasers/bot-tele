@@ -214,13 +214,13 @@ function buildTelegramEmailMessage(
   email: TinyhostEmail
 ): string {
   const signals = extractTinyhostSignals(email);
-  const sender = escapeHtml(email.sender || "-");
-  const subject = escapeHtml(email.subject || "(tanpa subject)");
-  const date = escapeHtml(email.date || "-");
+  const sender = escapeHtml(truncate(email.sender || "-", 300));
+  const subject = escapeHtml(truncate(email.subject || "(tanpa subject)", 300));
+  const date = escapeHtml(truncate(email.date || "-", 100));
 
   let content =
     `📩 <b>Email masuk</b>\n` +
-    `Ke: <code>${escapeHtml(address)}</code>\n` +
+    `Ke: <code>${escapeHtml(truncate(address, 200))}</code>\n` +
     `Dari: <code>${sender}</code>\n` +
     `Subject: <b>${subject}</b>\n` +
     `Tanggal: <code>${date}</code>\n\n`;
@@ -236,8 +236,8 @@ function buildTelegramEmailMessage(
     content +=
       `🔗 <b>Link:</b>\n` +
       signals.links
-        .slice(0, 10)
-        .map((link) => `<code>${escapeHtml(link)}</code>`)
+        .slice(0, 5)
+        .map((link) => `<code>${escapeHtml(truncate(link, 500))}</code>`)
         .join("\n") +
       "\n";
   }
