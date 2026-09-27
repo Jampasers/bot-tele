@@ -111,7 +111,7 @@ const tinyhostPlugin: Plugin = {
       }
 
       const domain = state.domains[index]!;
-      domainMenus.delete(adminId);
+      domainMenus.delete(userId);
       await ctx.answerCallbackQuery({ text: `Domain dipilih: ${domain}` });
 
       const client = createTinyhostClientFromEnv();
