@@ -2,20 +2,20 @@ import { randomBytes } from "node:crypto";
 
 export interface TinyhostEmail {
   id: string | number;
-  subject?: string;
-  sender?: string;
-  date?: string;
-  body?: string;
-  html_body?: string;
-  has_attachments?: boolean;
+  subject?: string | undefined;
+  sender?: string | undefined;
+  date?: string | undefined;
+  body?: string | undefined;
+  html_body?: string | undefined;
+  has_attachments?: boolean | undefined;
 }
 
 export interface TinyhostInbox {
   emails: TinyhostEmail[];
-  total?: number;
-  page?: number;
-  limit?: number;
-  has_more?: boolean;
+  total?: number | undefined;
+  page?: number | undefined;
+  limit?: number | undefined;
+  has_more?: boolean | undefined;
 }
 
 export interface TinyhostSignals {
@@ -58,9 +58,9 @@ export class TinyhostClient {
   private readonly requestTimeoutMs: number;
 
   constructor(options: {
-    baseUrl?: string;
-    domainToken?: string;
-    requestTimeoutMs?: number;
+    baseUrl?: string | undefined;
+    domainToken?: string | undefined;
+    requestTimeoutMs?: number | undefined;
   } = {}) {
     this.baseUrl = (options.baseUrl ?? "https://tinyhost.shop").replace(/\/+$/u, "");
     this.domainToken = options.domainToken?.trim() || undefined;
