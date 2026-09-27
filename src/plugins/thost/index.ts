@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { Bot, Context, InlineKeyboard } from "grammy";
-import { isAdmin } from "../../core/admin.js";
 import {
   createTinyhostClientFromEnv,
   extractTinyhostSignals,
@@ -23,7 +22,6 @@ const domainMenus = new Map<string, DomainMenuState>();
 const activeWatchers = new Map<string, AbortController>();
 
 const tinyhostPlugin: Plugin = {
-  internalOnly: true,
   name: "tinyhost-temp-mail",
   version: "1.0.0",
   commands: [
@@ -35,19 +33,14 @@ const tinyhostPlugin: Plugin = {
 
   register(bot: Bot<Context>): void {
     bot.command("thost", async (ctx) => {
-      if (!isAdmin(ctx)) {
-        await ctx.reply("⛔ Admin only.");
-        return;
-      }
-
       if (ctx.chat?.type !== "private" || !ctx.from) {
-        await ctx.reply("⛔ /thost hanya bisa digunakan admin lewat chat pribadi.");
+        await ctx.reply("⛔ /thost hanya bisa digunakan lewat chat pribadi.");
         return;
       }
 
-      const adminId = String(ctx.from.id);
-      activeWatchers.get(adminId)?.abort();
-      activeWatchers.delete(adminId);
+      const userId = String(ctx.from.id);
+      activeWatchers.get(userId)?.abort();
+      activeWatchers.delete(userId);
 
       const client = createTinyhostClientFromEnv();
       let domains: string[];
@@ -67,7 +60,7 @@ const tinyhostPlugin: Plugin = {
       }
 
       const token = randomBytes(3).toString("hex");
-      domainMenus.set(adminId, {
+      domainMenus.set(userId, {
         token,
         domains,
         createdAt: Date.now()
@@ -89,16 +82,16 @@ const tinyhostPlugin: Plugin = {
     });
 
     bot.callbackQuery(/^thost_pick:([a-f0-9]{6}):(\d{1,2})$/, async (ctx) => {
-      if (!isAdmin(ctx) || !ctx.from || ctx.chat?.type !== "private") {
+      if (!ctx.from || ctx.chat?.type !== "private") {
         await ctx.answerCallbackQuery({
-          text: "Admin only.",
+          text: "Fitur ini hanya tersedia di chat pribadi.",
           show_alert: true
         });
         return;
       }
 
-      const adminId = String(ctx.from.id);
-      const state = domainMenus.get(adminId);
+      const userId = String(ctx.from.id);
+      const state = domainMenus.get(userId);
       const token = ctx.match[1]!;
       const index = Number(ctx.match[2]);
 
@@ -137,11 +130,11 @@ const tinyhostPlugin: Plugin = {
         return;
       }
 
-      const previous = activeWatchers.get(adminId);
+      const previous = activeWatchers.get(userId);
       previous?.abort();
 
       const controller = new AbortController();
-      activeWatchers.set(adminId, controller);
+      activeWatchers.set(userId, controller);
       const polling = getTinyhostPollingConfig();
 
       const readyText =
@@ -175,13 +168,13 @@ const tinyhostPlugin: Plugin = {
         },
         onPollError(error, consecutiveErrors) {
           console.warn(
-            `[TINYHOST] poll error admin=${adminId} consecutive=${consecutiveErrors} error=${formatTinyhostError(error)}`
+            `[TINYHOST] poll error user=${userId} consecutive=${consecutiveErrors} error=${formatTinyhostError(error)}`
           );
         }
       })
         .then(async (result) => {
-          if (activeWatchers.get(adminId) === controller) {
-            activeWatchers.delete(adminId);
+          if (activeWatchers.get(userId) === controller) {
+            activeWatchers.delete(userId);
           }
           if (result.reason === "timeout" && !controller.signal.aborted) {
             await bot.api.sendMessage(
@@ -192,8 +185,8 @@ const tinyhostPlugin: Plugin = {
           }
         })
         .catch(async (error) => {
-          if (activeWatchers.get(adminId) === controller) {
-            activeWatchers.delete(adminId);
+          if (activeWatchers.get(userId) === controller) {
+            activeWatchers.delete(userId);
           }
           if (controller.signal.aborted) return;
           console.error("[TINYHOST] watcher failed:", error);
