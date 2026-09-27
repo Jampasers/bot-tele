@@ -22,6 +22,7 @@ const domainMenus = new Map<string, DomainMenuState>();
 const activeWatchers = new Map<string, AbortController>();
 
 const tinyhostPlugin: Plugin = {
+  internalOnly: true,
   name: "tinyhost-temp-mail",
   version: "1.0.0",
   commands: [
