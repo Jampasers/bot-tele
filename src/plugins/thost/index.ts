@@ -247,7 +247,7 @@ function buildTelegramEmailMessage(
     content += `📄 <b>Detail email:</b>\n<pre>${escapeHtml(detail)}</pre>`;
   }
 
-  return truncate(content, 4_050);
+  return content;
 }
 
 function escapeHtml(value: string): string {
