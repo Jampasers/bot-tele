@@ -90,6 +90,7 @@ const ADMIN_HELP_SECTIONS: Readonly<Record<AdminHelpSectionId, AdminHelpSection>
       "<code>/toggleotpchannel</code> / <code>/testotpchannel</code>",
       "<code>/imapstatus</code> — status listener IMAP",
       "<code>/imapinfo</code> — konfigurasi IMAP tersimpan",
+      "<code>/thost</code> — buat temp mail Tinyhost dan pantau OTP/link masuk",
       "<code>/setimap &lt;host&gt; &lt;user&gt; &lt;pass&gt; [port] [sender]</code>",
     ],
   },
