@@ -7,7 +7,7 @@ import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
-import { catalogPlans } from "../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans } from "../../src/vps/catalogPlans.js";
 import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
 import { getOs } from "../../src/vps/installer.js";
 import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
@@ -160,16 +160,22 @@ test("VPS schemas expose no buyer token persistence field; backup exports encryp
   await platform(() => assert.rejects(executeRollback([{ name: "vpsorders", count: 1, docs: [order] }]), /offline/));
 });
 
-test("service menu derives all specs from catalog and discards arbitrary old named plans", async t => {
+test("service menu derives DO specs plus a separate buyer-owned install service", async t => {
   env(t);
   t.mock.method(VpsPlan, "find", (filter: Record<string, unknown>) => {
-    assert.equal(filter.catalogManaged, true);
+    assert.deepEqual(filter.$or, [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }]);
     return query(() => [{ _id: "old-id", name: "Old custom package", enabled: true, priceMatrix: [] }]);
   });
   const plans = await platform(() => vpsService.listPlans("install"));
-  assert.equal(plans.length, 7);
-  assert.ok(plans.every(plan => plan.regions.length === 16 && plan.osPrices.length === 18));
-  assert.ok(plans.every(plan => plan.name !== "Old custom package"));
+  const doPlans = plans.filter(plan => plan.id !== DIRECT_INSTALL_PLAN_ID);
+  const direct = plans.find(plan => plan.id === DIRECT_INSTALL_PLAN_ID);
+  assert.equal(doPlans.length, 7);
+  assert.ok(doPlans.every(plan => plan.regions.length === 16 && plan.osPrices.length === 18));
+  assert.ok(doPlans.every(plan => plan.name !== "Old custom package"));
+  assert.ok(direct);
+  assert.equal(direct.sizeSlug, "external-vps");
+  assert.deepEqual(direct.regions, ["external"]);
+  assert.deepEqual(direct.osPrices.map(os => os.os), ["windows2012r2", "windows2016", "windows2019", "windows2022"]);
 });
 
 test("catalog checkout without an exact configured price cannot create order or contact DigitalOcean", async t => {
@@ -183,6 +189,30 @@ test("catalog checkout without an exact configured price cannot create order or 
   await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(),
     serviceType: "install", planId: plan.id, os: "windows2022", region: "sgp1" }), /harga/));
   assert.equal(writes, 0); assert.equal(provider, 0);
+});
+
+test("admin direct-install price is stored per Windows OS without spec or region matrix", async t => {
+  env(t);
+  const oldAdmin = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
+  t.after(() => { if (oldAdmin === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = oldAdmin; });
+  t.mock.method(VpsPlan, "findOne", () => query(() => null));
+  const writes: { filter: unknown; update: any; options: unknown }[] = [];
+  t.mock.method(VpsPlan, "updateOne", async (filter, update, options) => {
+    writes.push({ filter, update, options }); return { matchedCount: 1, modifiedCount: 1, upsertedCount: 0 } as never;
+  });
+  await platform(async () => {
+    await vpsService.updatePlan("101", DIRECT_INSTALL_PLAN_ID, { os: "windows2022", price: 17500 });
+  });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0]!.filter, { _id: DIRECT_INSTALL_PLAN_ID, tenantId: "platform" });
+  assert.equal(writes[0]!.options && (writes[0]!.options as any).upsert, true);
+  const set = writes[0]!.update.$set;
+  assert.equal(set.sizeSlug, "external-vps");
+  assert.deepEqual(set.regions, ["external"]);
+  assert.equal(set.catalogManaged, false);
+  assert.equal(set.osPrices.find((os: any) => os.os === "windows2022")?.price, 17500);
+  assert.equal(set.osPrices.find((os: any) => os.os === "windows2019")?.price, null);
+  assert.deepEqual(set.priceMatrix, []);
 });
 
 test("admin combination price validates catalog membership before any write and targets an atomic matrix update", async t => {

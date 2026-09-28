@@ -9,11 +9,12 @@ import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vp
 import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
-import { catalogPlans, planPrice } from "../../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
+const DIRECT_PLAN: VpsUiPlan = { id: DIRECT_INSTALL_PLAN_ID, name: "Install Windows di VPS Buyer", serviceType: "install", sizeSlug: "external-vps", regions: ["external"], regionLabels: { external: "VPS milik buyer" }, osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 15_000, family: "windows" }], enabled: true, catalogManaged: false };
 const ORDER: VpsUiOrder = { _id: ORDER_ID, serviceType: "install", paymentStatus: "unpaid", stage: "queued", price: 43_210, planName: "RAM 2 GB", sizeSlug: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" };
 interface ApiCall { method: string; payload: Record<string, unknown> }
 function update(id: number, input: string, callback = false, actor = 42, chatType = "private", media = false): never {
@@ -55,7 +56,7 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   });
   const deps: Partial<VpsUiDependencies> = {
     enabled: () => true, listOs: () => [{ id: "windows2022", label: "Windows Server 2022" }],
-    listPlans: async () => [PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
+    listPlans: async serviceType => serviceType === "purchase" ? [PLAN] : [PLAN, DIRECT_PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
     checkout: async () => ORDER, getOwned: async () => ORDER, listOwned: async () => [ORDER],
     listCredentials: async () => [], ...overrides,
   };
@@ -87,27 +88,34 @@ test("jasa setup/install keeps both DigitalOcean and direct buyer VPS paths insi
   assert.doesNotMatch(JSON.stringify(calls), /vps_install_direct/);
 
   await bot.handleUpdate(update(2, "vps_install", true));
-  assert.match(replies(calls), /Pilih sumber VPS/);
+  assert.match(replies(calls), /Pilih kondisi VPS/);
   assert.match(JSON.stringify(calls), /vps_install_do/);
   assert.match(JSON.stringify(calls), /vps_install_direct/);
 });
 
-test("direct install collects buyer VPS connection and checks out Windows without a DO token", async () => {
+test("direct install skips spec and region, then checks out Windows without a DO token", async () => {
   let checkoutInput: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
   let acceptedTokens = 0;
   const { bot, calls } = await harness({
     acceptBuyerToken: async () => { acceptedTokens++; return { accountId: "unexpected" }; },
-    checkout: async input => { checkoutInput = input; return ORDER; },
+    checkout: async input => { checkoutInput = input; return { ...ORDER, sourceMode: "direct", planName: "Install Windows di VPS Buyer", sizeSlug: "external-vps", region: "external", price: 15_000 }; },
   });
   await bot.handleUpdate(update(1, "vps_install", true));
   await bot.handleUpdate(update(2, "vps_install_direct", true));
-  await bot.handleUpdate(update(3, "192.0.2.10"));
-  await bot.handleUpdate(update(4, "ubuntu"));
-  await bot.handleUpdate(update(5, "synthetic-source-password"));
-  await bot.handleUpdate(update(6, callback(calls, "vps_plan_"), true));
+  assert.match(replies(calls), /Langkah 1\/5.*Pilih Windows/s);
+  assert.doesNotMatch(JSON.stringify(calls.at(-1)), /vps_plan_|vps_region_/);
+
+  await bot.handleUpdate(update(3, callback(calls, "vps_os_"), true));
+  assert.match(replies(calls), /Langkah 2\/5.*Kirim IP/s);
+  await bot.handleUpdate(update(4, "192.0.2.10"));
+  await bot.handleUpdate(update(5, "ubuntu"));
+  await bot.handleUpdate(update(6, "synthetic-source-password"));
   await bot.handleUpdate(update(7, callback(calls, "vps_chrome_"), true));
 
   assert.equal(acceptedTokens, 0);
+  assert.equal(checkoutInput?.planId, DIRECT_INSTALL_PLAN_ID);
+  assert.equal(checkoutInput?.region, "external");
+  assert.equal(checkoutInput?.buyerSessionId, undefined);
   assert.deepEqual(checkoutInput?.direct, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
   assert.equal(checkoutInput?.os, "windows2022");
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-source-password/);
@@ -121,6 +129,7 @@ test("direct install order shows Windows access without a DigitalOcean token act
   assert.doesNotMatch(JSON.stringify(calls), /vps_token_/);
   assert.doesNotMatch(vpsOrderText(directOrder), /Biaya DigitalOcean/);
   assert.match(vpsOrderText(directOrder), /VPS milik buyer/);
+  assert.doesNotMatch(vpsOrderText(directOrder), /Spek:|Region:|external-vps|0 vCPU/);
 });
 
 test("Chrome checkout can be retried with the same intent and memory-only VPS password", async t => {
@@ -132,10 +141,10 @@ test("Chrome checkout can be retried with the same intent and memory-only VPS pa
     return ORDER;
   } });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
-  await bot.handleUpdate(update(2, "192.0.2.10"));
-  await bot.handleUpdate(update(3, "root"));
-  await bot.handleUpdate(update(4, "synthetic-source-password"));
-  await bot.handleUpdate(update(5, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(2, callback(calls, "vps_os_"), true));
+  await bot.handleUpdate(update(3, "192.0.2.10"));
+  await bot.handleUpdate(update(4, "root"));
+  await bot.handleUpdate(update(5, "synthetic-source-password"));
   const chrome = callback(calls, "vps_chrome_").replace(/_no$/, "_yes");
   await bot.handleUpdate(update(6, chrome, true));
   await bot.handleUpdate(update(7, chrome, true));
@@ -205,7 +214,7 @@ test("failed token deletion clears pending input without validation", async () =
   await bot.handleUpdate(update(2, "vps_install_do", true));
   await bot.handleUpdate(update(3, "synthetic-private-token"));
   assert.equal(accepted, 0);
-  assert.match(replies(calls), /token tidak diproses/);
+  assert.match(replies(calls), /input tidak diproses/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-private-token/);
 });
 
@@ -264,7 +273,7 @@ test("selection snapshots configured price and duplicate checkout uses the same 
   release!();
   await Promise.all([one, two]);
   assert.equal(checkoutCalls, 1);
-  assert.match(replies(calls), /Harga checkout: Rp\s*43\.210/);
+  assert.match(replies(calls), /Harga jasa: Rp\s*43\.210/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-private-token/);
 });
 
@@ -373,7 +382,7 @@ test("admin token wizard never saves a token when message deletion fails", async
   await bot.handleUpdate(update(3, "1"));
   await bot.handleUpdate(update(4, "synthetic-store-token"));
   assert.equal(saved, 0);
-  assert.match(replies(calls), /token tidak diproses/);
+  assert.match(replies(calls), /input tidak diproses/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-store-token/);
 });
 
@@ -476,28 +485,23 @@ test("admin adds a custom size one field at a time and legacy add-package button
   assert.deepEqual(saved, { kind: "size", value: ["s-custom", "12", "24 GB", "500 GB", "8 TB", "$120/month"] });
 });
 
-test("direct install lists all seven catalog sizes, all regions and each Windows version; unset price cannot checkout", async () => {
-  const plans = catalogPlans(defaultVpsCatalog(), "install");
+test("direct install shows only Windows prices and never asks for spec or region", async () => {
+  const direct = directInstallPlan(defaultVpsCatalog());
   let checkouts = 0;
-  const { bot, calls } = await harness({ listPlans: async () => plans, checkout: async () => { checkouts++; return ORDER; } });
+  const { bot, calls } = await harness({
+    listPlans: async serviceType => serviceType === "install" ? [...catalogPlans(defaultVpsCatalog(), "install"), direct] : [],
+    checkout: async () => { checkouts++; return ORDER; },
+  });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
-  await bot.handleUpdate(update(2, "192.0.2.10"));
-  await bot.handleUpdate(update(3, "root"));
-  await bot.handleUpdate(update(4, "synthetic-source-password"));
-  for (const plan of plans) assert.ok(JSON.stringify(calls).includes(plan.sizeLabel!));
-  await bot.handleUpdate(update(5, callback(calls, "vps_plan_"), true));
-  assert.match(JSON.stringify(calls), /Richmond, USA \(ric1\)/);
-  assert.match(JSON.stringify(calls), /Memphis/);
-  await bot.handleUpdate(update(6, callback(calls, "vps_region_"), true));
   const last = calls.at(-1)!;
   assert.match(JSON.stringify(last), /Windows Server 2012 R2/);
   assert.match(JSON.stringify(last), /Windows Server 2022/);
-  assert.doesNotMatch(JSON.stringify(last), /Ubuntu/);
-  assert.match(JSON.stringify(last), /Harga belum diatur/);
-  await bot.handleUpdate(update(7, callback(calls, "vps_os_"), true));
-  await bot.handleUpdate(update(8, callback(calls, "vps_chrome_"), true));
+  assert.doesNotMatch(JSON.stringify(last), /Ubuntu|Richmond|Memphis|vps_plan_|vps_region_/);
+  assert.match(JSON.stringify(last), /Belum tersedia/);
+  await bot.handleUpdate(update(2, callback(calls, "vps_os_"), true));
   assert.equal(checkouts, 0);
-  assert.match(replies(calls), /Belum ada tagihan/);
+  assert.match(replies(calls), /harga jasa belum diatur/i);
+  assert.doesNotMatch(replies(calls), /Kirim IP VPS/);
 });
 
 test("unreadable account metrics remain unknown and status text does not invent RDP login success", () => {

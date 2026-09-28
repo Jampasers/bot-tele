@@ -12,6 +12,30 @@ export function catalogPlanId(service: VpsServiceType, size: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+export const DIRECT_INSTALL_PLAN_ID = catalogPlanId("install", "__buyer-owned-vps__");
+
+export function directInstallPlan(
+  catalog: PlanCatalog,
+  saved?: Pick<VpsUiPlan, "enabled" | "osPrices">,
+): VpsUiPlan {
+  const savedPrices = new Map((saved?.osPrices ?? []).map(item => [item.os, item.price] as const));
+  return {
+    id: DIRECT_INSTALL_PLAN_ID,
+    name: "Install Windows di VPS Buyer",
+    serviceType: "install",
+    sizeSlug: "external-vps",
+    sizeLabel: "VPS Buyer · Direct SSH",
+    regions: ["external"],
+    regionLabels: { external: "VPS milik buyer" },
+    osPrices: catalog.os
+      .filter(os => os.family === "windows")
+      .map(os => ({ os: os.key, label: os.name, family: os.family, price: savedPrices.get(os.key) ?? null })),
+    priceMatrix: [],
+    enabled: saved?.enabled ?? true,
+    catalogManaged: false,
+  };
+}
+
 /** Price records are separate from choices: missing prices must not hide catalog options. */
 export function catalogPlans(catalog: PlanCatalog, serviceType?: VpsServiceType): VpsUiPlan[] {
   const services: VpsServiceType[] = serviceType ? [serviceType] : ["purchase", "install"];
