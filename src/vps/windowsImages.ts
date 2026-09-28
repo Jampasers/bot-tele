@@ -64,7 +64,7 @@ function mirrorImageUrl(defaultUrl: string, env: NodeJS.ProcessEnv): string | un
   if (format !== "xz" && format !== "zst") throw new InstallerError("validation");
   const filename = new URL(defaultUrl).pathname.split("/").at(-1);
   if (!filename?.endsWith(".xz")) throw new InstallerError("validation");
-  const mirroredName = filename.slice(0, -3) + format;
+  const mirroredName = filename.slice(0, -3) + `.${format}`;
   return validateWindowsImageUrl(`${base.replace(/\/+$/, "")}/${mirroredName}`);
 }
 
