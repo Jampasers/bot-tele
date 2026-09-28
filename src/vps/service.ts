@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
 import { defaultVpsCatalog, getVpsCatalog } from "./catalog.js";
-import { catalogPlans, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
@@ -218,9 +218,13 @@ export const vpsService: VpsUiDependencies = {
   async listPlans(serviceType, includeDisabled = false) {
     assertVpsPlatform();
     const catalog = await getVpsCatalog();
-    const saved = await VpsPlan.find({ tenantId: "platform", catalogManaged: true, ...(serviceType ? { serviceType } : {}) }).lean();
-    return catalogPlans(catalog, serviceType).map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)))
-      .filter(plan => includeDisabled || plan.enabled);
+    const saved = await VpsPlan.find({ tenantId: "platform", ...(serviceType ? { serviceType } : {}),
+      $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }] }).lean();
+    const plans = catalogPlans(catalog, serviceType).map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)));
+    if (!serviceType || serviceType === "install") {
+      plans.push(directInstallPlan(catalog, saved.find(row => row._id === DIRECT_INSTALL_PLAN_ID)));
+    }
+    return plans.filter(plan => includeDisabled || plan.enabled);
   },
   acceptBuyerToken,
   clearBuyerToken: (actor, orderId) => buyerTokens.delete(actor, orderId),
@@ -311,7 +315,36 @@ export const vpsService: VpsUiDependencies = {
   async updatePlan(actor, id, input) {
     assertVpsAdmin(actor);
     if (input.price !== undefined && (!Number.isSafeInteger(input.price) || input.price < 1 || input.price > 100_000_000)) throw new Error("Harga tidak valid.");
-    const plan = catalogPlans(await getVpsCatalog()).find(item => item.id === id);
+    const catalog = await getVpsCatalog();
+
+    if (id === DIRECT_INSTALL_PLAN_ID) {
+      const stored = await VpsPlan.findOne({ _id: DIRECT_INSTALL_PLAN_ID, tenantId: "platform", serviceType: "install" }).lean();
+      const plan = directInstallPlan(catalog, stored ? {
+        enabled: stored.enabled,
+        osPrices: stored.osPrices.map(item => ({ os: item.os, label: item.label, price: item.price ?? null })),
+      } : undefined);
+      if (input.price !== undefined && (!input.os || !plan.osPrices.some(os => os.os === input.os))) {
+        throw new Error("Pilih OS Windows dari katalog.");
+      }
+      const nextOsPrices = plan.osPrices.map(os => ({
+        os: os.os,
+        label: os.label,
+        price: input.price !== undefined && os.os === input.os ? input.price : os.price,
+      }));
+      await VpsPlan.updateOne({ _id: DIRECT_INSTALL_PLAN_ID, tenantId: "platform" }, { $set: {
+        name: plan.name,
+        serviceType: "install",
+        sizeSlug: plan.sizeSlug,
+        regions: plan.regions,
+        osPrices: nextOsPrices,
+        priceMatrix: [],
+        catalogManaged: false,
+        enabled: input.enabled ?? plan.enabled,
+      } }, { upsert: true, runValidators: true });
+      return;
+    }
+
+    const plan = catalogPlans(catalog).find(item => item.id === id);
     if (!plan || (input.price !== undefined && (!input.os || !input.region || !plan.regions.includes(input.region)
       || !plan.osPrices.some(os => os.os === input.os)))) throw new Error("Pilih spek, region, dan OS dari katalog.");
     const { id: planId, sizeLabel, regionLabels, providerPrice, transfer, ...fields } = plan;
