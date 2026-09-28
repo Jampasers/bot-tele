@@ -273,7 +273,7 @@ test("selection snapshots configured price and duplicate checkout uses the same 
   release!();
   await Promise.all([one, two]);
   assert.equal(checkoutCalls, 1);
-  assert.match(replies(calls), /Harga checkout: Rp\s*43\.210/);
+  assert.match(replies(calls), /Harga jasa: Rp\s*43\.210/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-private-token/);
 });
 
@@ -382,7 +382,7 @@ test("admin token wizard never saves a token when message deletion fails", async
   await bot.handleUpdate(update(3, "1"));
   await bot.handleUpdate(update(4, "synthetic-store-token"));
   assert.equal(saved, 0);
-  assert.match(replies(calls), /token tidak diproses/);
+  assert.match(replies(calls), /input tidak diproses/);
   assert.doesNotMatch(JSON.stringify(calls), /synthetic-store-token/);
 });
 
