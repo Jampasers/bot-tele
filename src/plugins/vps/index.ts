@@ -219,7 +219,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const plans = serviceType === "install"
       ? listedPlans.filter(plan => direct ? plan.id === DIRECT_INSTALL_PLAN_ID : plan.id !== DIRECT_INSTALL_PLAN_ID)
       : listedPlans;
-    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans, directMode: direct || undefined };
+    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans, ...(direct ? { directMode: true } : {}) };
     drafts.set(actor, draft);
 
     if (direct) {
