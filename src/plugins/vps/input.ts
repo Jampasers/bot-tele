@@ -56,7 +56,7 @@ export const vpsInputMiddleware: MiddlewareFn<Context> = async (ctx, next) => {
     try { await ctx.deleteMessage(); }
     catch {
       pending.cancel?.();
-      await ctx.reply("Pesan token gagal dihapus; token tidak diproses. Hapus pesan tersebut dan mulai kembali dari menu VPS.").catch(() => {});
+      await ctx.reply("Pesan rahasia gagal dihapus; input tidak diproses. Hapus pesan tersebut lalu mulai kembali dari menu VPS.").catch(() => {});
       return;
     }
   }
