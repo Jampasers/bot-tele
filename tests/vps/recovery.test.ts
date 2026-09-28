@@ -56,7 +56,8 @@ test("direct buyer VPS skips DigitalOcean creation and installs Windows with sup
             return true;
         },
         detectWindowsBootMode: async () => "efi",
-        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
+        resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
+        selectWindowsImage: async input => input.candidates[0]!,
         launchWindows: async input => {
             installs++;
             assert.equal(input.ip, "192.0.2.10"); assert.equal(input.username, "ubuntu");
@@ -80,7 +81,8 @@ test("persisted Windows image selection skips detection and resolution on retry"
     let launches = 0;
     await advanceVpsOrder(order, dependencies({
         detectWindowsBootMode: async () => { throw new Error("must not detect again"); },
-        resolveWindowsDdImage: () => { throw new Error("must not resolve against changed environment"); },
+        resolveWindowsDdImageCandidates: () => { throw new Error("must not resolve against changed environment"); },
+        selectWindowsImage: async () => { throw new Error("must not select against changed environment"); },
         launchWindows: async input => {
             launches++;
             assert.equal(input.bootMode, "efi");
@@ -97,7 +99,8 @@ test("installer cannot launch until detected mode and image are durably saved", 
     let launches = 0;
     await assert.rejects(advanceVpsOrder(order, dependencies({
         detectWindowsBootMode: async () => "efi",
-        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
+        resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
+        selectWindowsImage: async input => input.candidates[0]!,
         save: async patch => {
             if (patch.installerBootMode || patch.installerImageUrl) throw new Error("simulated persistence outage");
         },
