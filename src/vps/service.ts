@@ -222,7 +222,11 @@ export const vpsService: VpsUiDependencies = {
       $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }] }).lean();
     const plans = catalogPlans(catalog, serviceType).map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)));
     if (!serviceType || serviceType === "install") {
-      plans.push(directInstallPlan(catalog, saved.find(row => row._id === DIRECT_INSTALL_PLAN_ID)));
+      const storedDirect = saved.find(row => row._id === DIRECT_INSTALL_PLAN_ID);
+      plans.push(directInstallPlan(catalog, storedDirect ? {
+        enabled: storedDirect.enabled,
+        osPrices: storedDirect.osPrices.map(item => ({ os: item.os, label: item.label, price: item.price ?? null })),
+      } : undefined));
     }
     return plans.filter(plan => includeDisabled || plan.enabled);
   },
