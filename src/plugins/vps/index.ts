@@ -173,7 +173,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan) throw new Error("Paket install belum tersedia.");
     const options = pricedOs(draft.plan, "external", true);
     const keyboard = new InlineKeyboard();
-    options.forEach((os, index) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${index}`).row());
+    options.forEach((os, index) => keyboard.text(`${os.label} · ${os.price === null ? "Belum tersedia" : vpsPrice(os.price)}`, `vps_os_${draft.id}_${index}`).row());
     keyboard.text("🔙 Sumber VPS", "vps_install").text("Batal", "vps_home");
     await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 1/5) Pilih Windows yang mau di-install.\nHarga di bawah adalah biaya jasa install saja; spek dan provider VPS mengikuti VPS milik kamu.`, keyboard);
   }
@@ -183,14 +183,14 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const actor = actorOf(ctx);
     if (draft.direct) draft.direct.password = "";
     delete draft.direct;
-    setVpsInput(actor, { secret: false, cancel: () => dropDraft(actor), receive: async (ipCtx, ip) => {
+    setVpsInput(actor, { secret: false, cancel: () => {}, receive: async (ipCtx, ip) => {
       const current = currentDraft(actor, draft.id);
       current.direct = { ip: ip.trim(), username: "", password: "" };
-      setVpsInput(actor, { secret: false, cancel: () => dropDraft(actor), receive: async (usernameCtx, username) => {
+      setVpsInput(actor, { secret: false, cancel: () => {}, receive: async (usernameCtx, username) => {
         const active = currentDraft(actor, draft.id);
         if (!active.direct) throw new Error("Koneksi VPS belum tersedia.");
         active.direct.username = username.trim();
-        setVpsInput(actor, { secret: true, cancel: () => dropDraft(actor), receive: async (passwordCtx, password) => {
+        setVpsInput(actor, { secret: true, cancel: () => {}, receive: async (passwordCtx, password) => {
           const ready = currentDraft(actor, draft.id);
           if (!ready.direct || !ready.plan || !ready.os) throw new Error("Koneksi VPS belum lengkap.");
           ready.direct.password = password;
@@ -345,7 +345,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             }
           });
           keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-          await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n(Langkah 3/5) Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+          await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           return;
         }
         const selection = /^vps_(plan|os|region)_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
@@ -370,7 +370,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
               }
             });
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice && !draft.direct ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n(Langkah 2/3) Pilih lokasi/region VPS:${draft.direct ? "\n\nPilih lokasi VPS milik Anda." : draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
@@ -383,7 +383,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             const keyboard = new InlineKeyboard();
             pricedOs(draft.plan, region, Boolean(draft.directMode)).forEach((os, i) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n(Langkah 4/5) Pilih Sistem Operasi (OS):${draft.direct ? "\n\nBiaya hanya untuk jasa install Windows pada VPS Anda." : draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n${draft.serviceType === "install" ? "(Langkah 4/5)" : "(Langkah 3/3)"} Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else {
             const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.directMode))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
