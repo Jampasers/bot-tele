@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { PNG } from "pngjs";
-import { launchWindows } from "../../src/vps/installer.js";
+import { InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 function interpreter(candidates: string[], args: string[], expected: RegExp): string | undefined {
@@ -129,6 +129,52 @@ for (const anchor of ["bats=\n", "if $use_gpo; then\n"]) {
         assert.equal(readFileSync(path.join(directory, "trans.sh"), "utf8"), original, "failed patch must leave the upstream script intact");
     });
 }
+
+test("fast image selector uses the reachable candidate index without exposing URL output", async () => {
+    const candidates = [
+        "https://fast.example.test/windows2022.zst",
+        "https://fallback.example.test/windows2022.xz",
+    ];
+    let probe = "";
+    const selected = await selectWindowsImage({
+        ip: "192.0.2.10", password: "SyntheticSource123!", username: "root", candidates,
+    }, undefined, { ssh: async input => {
+        probe = input.stdin ?? "";
+        return { code: 0, output: "__VPS_IMAGE_OK__:2\n" };
+    } });
+    assert.equal(selected, candidates[1]);
+    assert.match(probe, /fast\.example\.test\/windows2022\.zst/);
+    assert.match(probe, /fallback\.example\.test\/windows2022\.xz/);
+    assert.match(probe, /--range 0-0/);
+    assert.match(probe, /--max-time 12/);
+});
+
+test("fast image selector fails before disk preparation when every candidate is unreachable", async () => {
+    await assert.rejects(() => selectWindowsImage({
+        ip: "192.0.2.10", password: "SyntheticSource123!", candidates: ["https://dead.example.test/windows.xz"],
+    }, undefined, { ssh: async () => ({ code: 1, output: "" }) }), InstallerError);
+});
+
+test("installer preparation caps cloud-init wait and starts Chrome asynchronously", async t => {
+    const directory = temporaryDirectory(t);
+    let script = "";
+    await launchWindows({
+        ip: "192.0.2.10", password: "SyntheticSource123!", windowsPassword: "SyntheticWindows123!",
+        os: "windows2019", orderId: "fast-installer-test", bootMode: "efi",
+        imageUrl: resolveWindowsDdImage("windows2019", "efi", {}), installChrome: true,
+    }, undefined, { ssh: async input => { script = input.stdin ?? ""; return { code: 0, output: "__VPS_PREPARED__" }; } });
+    assert.match(script, /timeout 20s cloud-init status --wait/);
+    const patch = script.match(/cat << 'EOF_PATCH_PY' > \/root\/patch_trans\.py\r?\n([\s\S]*?)\r?\nEOF_PATCH_PY/)?.[1];
+    assert.ok(patch);
+    const patched = patchFixture(directory, patch);
+    assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
+    assert.equal(emitted.status, 0, `${emitted.stdout}\n${emitted.stderr}`);
+    const chromeBatch = readFileSync(path.join(directory, "os", "windows-install-chrome.bat"), "utf8");
+    assert.match(chromeBatch, /start "" \/min powershell\.exe/i);
+    assert.doesNotMatch(chromeBatch, /powershell\.exe.*>>.*chrome-install\.log/i);
+    assert.match(chromeBatch, /exit \/b 0/i);
+});
 
 test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
     const directory = temporaryDirectory(t);

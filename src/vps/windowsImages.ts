@@ -57,13 +57,37 @@ export function validateWindowsImageUrl(value: string): string {
   return value;
 }
 
+function mirrorImageUrl(defaultUrl: string, env: NodeJS.ProcessEnv): string | undefined {
+  const base = env.VPS_WINDOWS_IMAGE_MIRROR_BASE_URL?.trim();
+  if (!base) return undefined;
+  const format = (env.VPS_WINDOWS_IMAGE_MIRROR_FORMAT ?? "zst").trim().toLowerCase();
+  if (format !== "xz" && format !== "zst") throw new InstallerError("validation");
+  const filename = new URL(defaultUrl).pathname.split("/").at(-1);
+  if (!filename?.endsWith(".xz")) throw new InstallerError("validation");
+  const mirroredName = filename.slice(0, -3) + `.${format}`;
+  return validateWindowsImageUrl(`${base.replace(/\/+$/, "")}/${mirroredName}`);
+}
+
+export function resolveWindowsDdImageCandidates(
+  os: string,
+  bootMode: WindowsBootMode,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  if (!isWindowsDdOs(os) || (bootMode !== "bios" && bootMode !== "efi")) throw new InstallerError("validation");
+  const definition = WINDOWS_DD_IMAGES[os];
+  const envName = definition.env[bootMode];
+  const candidates: string[] = [];
+  if (env[envName] !== undefined) candidates.push(validateWindowsImageUrl(env[envName]!));
+  const mirror = mirrorImageUrl(definition[bootMode], env);
+  if (mirror) candidates.push(mirror);
+  candidates.push(validateWindowsImageUrl(definition[bootMode]));
+  return [...new Set(candidates)];
+}
+
 export function resolveWindowsDdImage(
   os: string,
   bootMode: WindowsBootMode,
   env: NodeJS.ProcessEnv = process.env,
 ): string {
-  if (!isWindowsDdOs(os) || (bootMode !== "bios" && bootMode !== "efi")) throw new InstallerError("validation");
-  const definition = WINDOWS_DD_IMAGES[os];
-  const envName = definition.env[bootMode];
-  return validateWindowsImageUrl(env[envName] === undefined ? definition[bootMode] : env[envName]!);
+  return resolveWindowsDdImageCandidates(os, bootMode, env)[0]!;
 }

@@ -174,6 +174,40 @@ export function parseWindowsBootMode(output: string): WindowsBootMode {
     return bootMode;
 }
 
+export async function selectWindowsImage(
+    input: { ip: string; password: string; username?: string; candidates: readonly string[] },
+    signal?: AbortSignal,
+    deps: InstallerDependencies = {},
+): Promise<string> {
+    validIp(input.ip);
+    const candidates = [...new Set(input.candidates.map(validateWindowsImageUrl))];
+    if (!candidates.length) throw new InstallerError("validation", false, "image_unreachable");
+    const script = `set -u
+i=0
+${candidates.map(url => `i=$((i+1))
+set +e
+curl --silent --show-error --location --fail --connect-timeout 5 --max-time 12 --range 0-0 --max-filesize 1048576 ${quote(url)} --output /dev/null
+rc=$?
+set -e
+if [ "$rc" -eq 0 ] || [ "$rc" -eq 63 ]; then
+  printf '__VPS_IMAGE_OK__:%s\\n' "$i"
+  exit 0
+fi`).join("\n")}
+exit 1
+`;
+    const result = await (deps.ssh ?? executeSsh)({
+        ip: input.ip,
+        password: input.password,
+        username: input.username ?? "root",
+        command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s",
+        stdin: script,
+        timeoutMs: Math.min(60_000, Math.max(15_000, candidates.length * 15_000)),
+    }, signal);
+    const index = Number(result.output.match(/__VPS_IMAGE_OK__:(\d+)/)?.[1] ?? 0) - 1;
+    if (result.code !== 0 || index < 0 || index >= candidates.length) throw new InstallerError("validation", false, "image_unreachable");
+    return candidates[index]!;
+}
+
 /** Read-only Linux probe. It must run and be persisted before reinstall preparation. */
 export async function detectWindowsBootMode(
     input: { ip: string; password: string; username?: string },
@@ -325,9 +359,10 @@ if ($chromeExe) {
 EOF_CHROME_PS1
     cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1" >> "%SystemDrive%\\chrome-install.log" 2>&1
-del "%SystemDrive%\\windows-install-chrome.ps1" >nul 2>&1
+rem Chrome bersifat opsional; jalankan background agar RDP/first login tidak menunggu download.
+start "" /min powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1"
 del "%~f0" >nul 2>&1
+exit /b 0
 EOF_CHROME_INSTALL
     unix2dos "$os_dir/windows-install-chrome.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
@@ -352,7 +387,10 @@ if ! mkdir "$state" 2>/dev/null; then
   else echo __VPS_RUNNING__; exit 0; fi
 fi
 trap 'touch "$state/failed"' EXIT
-if command -v cloud-init >/dev/null 2>&1; then cloud-init status --wait || true; fi
+if command -v cloud-init >/dev/null 2>&1; then
+  if command -v timeout >/dev/null 2>&1; then timeout 20s cloud-init status --wait || true;
+  else cloud-init status --wait || true; fi
+fi
 for i in $(seq 1 30); do
   if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
     sleep 2

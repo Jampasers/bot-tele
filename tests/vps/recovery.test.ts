@@ -25,7 +25,8 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
         reserve: async () => { throw new Error("No new capacity may be reserved"); }, password: () => "MockPassword123!xyz",
         testSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
         detectWindowsBootMode: async () => { throw new Error("Boot detection must not be repeated"); },
-        resolveWindowsDdImage: () => { throw new Error("Image selection must not be repeated"); },
+        resolveWindowsDdImageCandidates: () => { throw new Error("Image candidates must not be resolved again"); },
+        selectWindowsImage: async () => { throw new Error("Image selection must not be repeated"); },
         launchWindows: async () => { throw new Error("Installer preparation must not be repeated"); },
         scheduleInstallerReboot: async () => "scheduled", inspectWindows: async () => ({ rdpOpen: false, loginVerified: false, logState: "unavailable", detail: "Waiting" }),
         clearToken: () => {}, now: Date.now, signal: new AbortController().signal, ...patch,
@@ -55,7 +56,8 @@ test("direct buyer VPS skips DigitalOcean creation and installs Windows with sup
             return true;
         },
         detectWindowsBootMode: async () => "efi",
-        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
+        resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
+        selectWindowsImage: async input => input.candidates[0]!,
         launchWindows: async input => {
             installs++;
             assert.equal(input.ip, "192.0.2.10"); assert.equal(input.username, "ubuntu");
@@ -79,7 +81,8 @@ test("persisted Windows image selection skips detection and resolution on retry"
     let launches = 0;
     await advanceVpsOrder(order, dependencies({
         detectWindowsBootMode: async () => { throw new Error("must not detect again"); },
-        resolveWindowsDdImage: () => { throw new Error("must not resolve against changed environment"); },
+        resolveWindowsDdImageCandidates: () => { throw new Error("must not resolve against changed environment"); },
+        selectWindowsImage: async () => { throw new Error("must not select against changed environment"); },
         launchWindows: async input => {
             launches++;
             assert.equal(input.bootMode, "efi");
@@ -96,7 +99,8 @@ test("installer cannot launch until detected mode and image are durably saved", 
     let launches = 0;
     await assert.rejects(advanceVpsOrder(order, dependencies({
         detectWindowsBootMode: async () => "efi",
-        resolveWindowsDdImage: () => "https://images.example.test/windows2022-efi.xz",
+        resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
+        selectWindowsImage: async input => input.candidates[0]!,
         save: async patch => {
             if (patch.installerBootMode || patch.installerImageUrl) throw new Error("simulated persistence outage");
         },
@@ -161,10 +165,8 @@ test("review monitoring observes quietly and becomes ready without bouncing stag
     assert.equal(order.rdpSuccesses, 1);
     assert.equal(order.stageStartedAt.getTime(), old.getTime());
     await advanceVpsOrder(order, deps);
-    assert.equal(order.stage, "review");
-    assert.equal(order.rdpSuccesses, 2);
-    await advanceVpsOrder(order, deps);
     assert.equal(order.stage, "ready");
+    assert.equal(order.rdpSuccesses, 2);
     assert.equal(order.resumeStage, null);
 });
 

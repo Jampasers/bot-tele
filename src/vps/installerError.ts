@@ -1,4 +1,4 @@
-export type InstallerErrorReason = "unsupported_virtualization" | "boot_detection";
+export type InstallerErrorReason = "unsupported_virtualization" | "boot_detection" | "image_unreachable";
 
 export class InstallerError extends Error {
   constructor(

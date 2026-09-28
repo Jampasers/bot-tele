@@ -8,8 +8,8 @@ import { decryptSecret } from "../services/crypto.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ThrottledWarningLogger } from "../runtime/retryLogger.js";
 import { DigitalOceanClient, DigitalOceanError } from "./digitalOcean.js";
-import { buildUserData, detectWindowsBootMode, getOs, inspectWindows, InstallerError, launchWindows, scheduleInstallerReboot, testSsh } from "./installer.js";
-import { resolveWindowsDdImage } from "./windowsImages.js";
+import { buildUserData, detectWindowsBootMode, getOs, inspectWindows, InstallerError, launchWindows, scheduleInstallerReboot, selectWindowsImage, testSsh } from "./installer.js";
+import { resolveWindowsDdImageCandidates } from "./windowsImages.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
 import { providerForCredential, releaseCapacityTicket, reserveStoreCapacity } from "./credentials.js";
 import { reconcileVpsPayments, refundVpsOrder } from "./payment.js";
@@ -23,7 +23,8 @@ export interface VpsStepDependencies {
   sourceUsername?(): string;
   testSsh: typeof testSsh;
   detectWindowsBootMode: typeof detectWindowsBootMode;
-  resolveWindowsDdImage: typeof resolveWindowsDdImage;
+  resolveWindowsDdImageCandidates: typeof resolveWindowsDdImageCandidates;
+  selectWindowsImage: typeof selectWindowsImage;
   launchWindows: typeof launchWindows;
   scheduleInstallerReboot: typeof scheduleInstallerReboot;
   inspectWindows: typeof inspectWindows;
@@ -48,7 +49,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     const inspection = await deps.inspectWindows({ ip: order.publicIp, windowsPassword, ...(order.installerLogUrl ? { logUrl: order.installerLogUrl } : {}) }, deps.signal);
     const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
     await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
-    if (successes >= 3) {
+    if (successes >= 2) {
       await stage("ready", { resumeStage: null, reservationActive: false, evidence: "Instalasi Windows selesai. Port RDP aktif & siap digunakan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis)." });
       deps.clearToken();
     } else if (enforceTimeout && deps.now() - order.stageStartedAt.getTime() > 90 * 60_000) {
@@ -181,14 +182,21 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
         return;
       }
       try {
-        imageUrl = deps.resolveWindowsDdImage(order.snapshot.os, bootMode);
+        const candidates = deps.resolveWindowsDdImageCandidates(order.snapshot.os, bootMode);
+        imageUrl = await deps.selectWindowsImage({
+          ip: order.publicIp,
+          password: sourcePassword,
+          username: sourceUsername,
+          candidates,
+        }, deps.signal);
       } catch {
-        await stage("failed", { lastError: "validation_failed", evidence: "Konfigurasi image Windows tidak valid; instalasi belum dijalankan." });
+        await stage("failed", { lastError: "validation_failed", evidence: "Image Windows tidak dapat dijangkau dari VPS; instalasi belum menyentuh disk." });
         return;
       }
       const bootLabel = bootMode === "efi" ? "UEFI" : "BIOS/Legacy";
+      const imageFormat = new URL(imageUrl).pathname.toLowerCase().endsWith(".zst") ? "Zstandard fast image" : "XZ image";
       await save({ installerBootMode: bootMode, installerImageUrl: imageUrl,
-        evidence: `SSH Linux berhasil. Boot mode terdeteksi: ${bootLabel}. Menyiapkan ${getOs(order.snapshot.os)?.name ?? "Windows"}.` });
+        evidence: `SSH Linux berhasil. Boot mode: ${bootLabel}. ${imageFormat} terpilih dan dapat dijangkau; menyiapkan ${getOs(order.snapshot.os)?.name ?? "Windows"}.` });
     }
     const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password,
       os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true }, deps.signal);
@@ -231,7 +239,7 @@ export class VpsWorker {
   constructor(private readonly api: Pick<Api, "sendMessage">) {}
   start(): void {
     assertVpsPlatform();
-    this.timer = setInterval(() => void runWithTenant(platformContext(), () => this.tick()), 15_000);
+    this.timer = setInterval(() => void runWithTenant(platformContext(), () => this.tick()), 10_000);
     this.timer.unref();
     void this.tick();
   }
@@ -309,7 +317,7 @@ export class VpsWorker {
         password: () => decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourceUsername: () => order.sourceUsername ?? "root",
-        testSsh, detectWindowsBootMode, resolveWindowsDdImage, launchWindows, scheduleInstallerReboot, inspectWindows,
+        testSsh, detectWindowsBootMode, resolveWindowsDdImageCandidates, selectWindowsImage, launchWindows, scheduleInstallerReboot, inspectWindows,
         clearToken: () => buyerTokens.delete(order.buyerId, order._id), now: Date.now, signal: stopStep.signal,
       });
       if (order.dropletId) await releaseCapacityTicket(order._id);
@@ -354,7 +362,7 @@ export class VpsWorker {
       this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Step interrupted; persistent stage retained.`, error);
     } finally {
       clearInterval(heartbeat); clearTimeout(deadline); this.abort.signal.removeEventListener("abort", stop);
-      await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + (order.stage === "review" ? 60_000 : 15_000)) } });
+      await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + (order.stage === "review" ? 60_000 : 10_000)) } });
     }
   }
   async stop(): Promise<void> {
