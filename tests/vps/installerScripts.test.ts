@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { PNG } from "pngjs";
-import { launchWindows } from "../../src/vps/installer.js";
+import { InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 function interpreter(candidates: string[], args: string[], expected: RegExp): string | undefined {
@@ -129,6 +129,31 @@ for (const anchor of ["bats=\n", "if $use_gpo; then\n"]) {
         assert.equal(readFileSync(path.join(directory, "trans.sh"), "utf8"), original, "failed patch must leave the upstream script intact");
     });
 }
+
+test("fast image selector uses the reachable candidate index without exposing URL output", async () => {
+    const candidates = [
+        "https://fast.example.test/windows2022.zst",
+        "https://fallback.example.test/windows2022.xz",
+    ];
+    let probe = "";
+    const selected = await selectWindowsImage({
+        ip: "192.0.2.10", password: "SyntheticSource123!", username: "root", candidates,
+    }, undefined, { ssh: async input => {
+        probe = input.stdin ?? "";
+        return { code: 0, output: "__VPS_IMAGE_OK__:2\n" };
+    } });
+    assert.equal(selected, candidates[1]);
+    assert.match(probe, /fast\.example\.test\/windows2022\.zst/);
+    assert.match(probe, /fallback\.example\.test\/windows2022\.xz/);
+    assert.match(probe, /--range 0-0/);
+    assert.match(probe, /--max-time 12/);
+});
+
+test("fast image selector fails before disk preparation when every candidate is unreachable", async () => {
+    await assert.rejects(() => selectWindowsImage({
+        ip: "192.0.2.10", password: "SyntheticSource123!", candidates: ["https://dead.example.test/windows.xz"],
+    }, undefined, { ssh: async () => ({ code: 1, output: "" }) }), InstallerError);
+});
 
 test("installer preparation caps cloud-init wait and starts Chrome asynchronously", async t => {
     const directory = temporaryDirectory(t);
