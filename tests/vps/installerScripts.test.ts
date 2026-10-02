@@ -104,8 +104,7 @@ async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpape
 for (const installChrome of [false, true]) {
     test(`generated setup runs network before wallpaper${installChrome ? " and Chrome" : ""}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, true);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat",
-            ...(installChrome ? ["windows-install-chrome.bat"] : []), "windows-fix-rdp.bat"]);
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat", "windows-fix-rdp.bat"]);
         const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
         assert.match(batch, /fDenyTSConnections/);
         assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
@@ -115,13 +114,14 @@ for (const installChrome of [false, true]) {
         assert.match(batch, /windows-set-admin-password\.bat/);
         if (installChrome) assert.match(batch, /windows-install-chrome\.bat/);
         else assert.doesNotMatch(batch, /windows-install-chrome\.bat/);
-        assert.match(batch, /timeout \/t 10/);
+        assert.match(batch, /BOT_TELE_ATTEMPT% GEQ 2/);
+        assert.match(batch, /timeout \/t 5/);
         assert.doesNotMatch(batch, /SetDankaWallpaper|Add-Type/);
         const passwordBatch = readFileSync(path.join(directory, "os", "windows-set-admin-password.bat"), "utf8");
         assert.match(passwordBatch, /echo ready>"%SystemRoot%\\bot-tele-password-ready"/);
         assert.doesNotMatch(passwordBatch, /fDenyTSConnections/);
         const passwordScript = readFileSync(path.join(directory, "os", "windows-set-admin-password.ps1"), "utf8");
-        assert.match(passwordScript, /for \(\$attempt = 1; \$attempt -le 30; \$attempt\+\+\)/);
+        assert.match(passwordScript, /for \(\$attempt = 1; \$attempt -le 10; \$attempt\+\+\)/);
         assert.match(passwordScript, /Get-LocalUser/);
         assert.equal(readFileSync(path.join(directory, "win-dir.txt"), "utf8").trim(), "Windows", "wallpaper copy must preserve the upstream relative Windows directory");
         assert.ok(existsSync(path.join(directory, "os", "Windows", "wallpaper.jpg")));
@@ -130,7 +130,7 @@ for (const installChrome of [false, true]) {
 
     test(`missing wallpaper preserves network setup and Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, false);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", ...(installChrome ? ["windows-install-chrome.bat"] : []), "windows-fix-rdp.bat"]);
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-fix-rdp.bat"]);
         assert.equal(existsSync(path.join(directory, "os", "windows-set-wallpaper.bat")), false);
         assert.equal(existsSync(path.join(directory, "os", "danka-wallpaper.ps1")), false);
     });
@@ -200,6 +200,8 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     const chromePs = readFileSync(path.join(directory, "os", "windows-install-chrome.ps1"), "utf8");
     assert.match(chromePs, /Preloaded Chrome MSI/);
     assert.match(chromePs, /msiexec\.exe/);
+    assert.match(chromePs, /WaitForExit\(90000\)/);
+    assert.match(chromePs, /Chrome MSI timed out after 90 seconds/);
     assert.match(chromePs, /bot-tele-chrome-ready/);
     assert.doesNotMatch(chromePs, /DownloadFile|dl\.google\.com/);
     assert.match(script, /googlechromestandaloneenterprise64\.msi/);
