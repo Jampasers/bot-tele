@@ -75,9 +75,12 @@ async function installerPatch(directory: string, installChrome: boolean, wallpap
     const encodedImage = script.match(/cat << 'EOF_WALLPAPER_B64'[^\n]*\n([^\n]+)\nEOF_WALLPAPER_B64/);
     assert.equal(Boolean(encodedImage), wallpaper);
     if (encodedImage) writeFileSync(path.join(directory, "source-wallpaper.jpg"), Buffer.from(encodedImage[1]!, "base64"));
-    // Remap only the Python shutil.copyfile source path for local test execution;
-    // wallpaper_copy_code now uses BASH_SOURCE-relative paths that resolve correctly.
-    return patch.replaceAll("'/root/wallpaper.jpg'", JSON.stringify(path.join(directory, "source-wallpaper.jpg")));
+    if (installChrome) writeFileSync(path.join(directory, "source-chrome.msi"), "synthetic-msi");
+    // Remap host-side preload sources only. The generated trans.sh still uses
+    // the production /configs/bot-tele path after switch_root.
+    return patch
+        .replaceAll("'/root/wallpaper.jpg'", JSON.stringify(path.join(directory, "source-wallpaper.jpg")))
+        .replaceAll("'/root/google-chrome-enterprise.msi'", JSON.stringify(path.join(directory, "source-chrome.msi")));
 }
 
 function patchFixture(directory: string, patch: string, fixture = transFixture) {
@@ -88,10 +91,12 @@ function patchFixture(directory: string, patch: string, fixture = transFixture) 
 
 async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpaper: boolean): Promise<{ directory: string; batches: string[] }> {
     const directory = temporaryDirectory(t);
-    if (installChrome) writeFileSync(path.join(directory, "google-chrome-enterprise.msi"), "synthetic-msi");
     const patched = patchFixture(directory, await installerPatch(directory, installChrome, wallpaper));
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
-    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
+    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], {
+        cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        env: { ...process.env, BOT_TELE_CONFIG_ROOT: path.join(directory, "configs", "bot-tele") },
+    });
     assert.equal(emitted.status, 0, `${emitted.stdout}\n${emitted.stderr}`);
     return { directory, batches: emitted.stdout.trim().split(/\s+/) };
 }
@@ -178,10 +183,14 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.match(script, /timeout 20s cloud-init status --wait/);
     const patch = script.match(/cat << 'EOF_PATCH_PY' > \/root\/patch_trans\.py\r?\n([\s\S]*?)\r?\nEOF_PATCH_PY/)?.[1];
     assert.ok(patch);
-    writeFileSync(path.join(directory, "google-chrome-enterprise.msi"), "synthetic-msi");
-    const patched = patchFixture(directory, patch);
+    const remappedPatch = patch.replaceAll("'/root/google-chrome-enterprise.msi'", JSON.stringify(path.join(directory, "source-chrome.msi")));
+    writeFileSync(path.join(directory, "source-chrome.msi"), "synthetic-msi");
+    const patched = patchFixture(directory, remappedPatch);
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
-    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
+    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], {
+        cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        env: { ...process.env, BOT_TELE_CONFIG_ROOT: path.join(directory, "configs", "bot-tele") },
+    });
     assert.equal(emitted.status, 0, `${emitted.stdout}\n${emitted.stderr}`);
     const chromeBatch = readFileSync(path.join(directory, "os", "windows-install-chrome.bat"), "utf8");
     assert.doesNotMatch(chromeBatch, /start "" \/min powershell\.exe/i);
@@ -195,7 +204,8 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.doesNotMatch(chromePs, /DownloadFile|dl\.google\.com/);
     assert.match(script, /googlechromestandaloneenterprise64\.msi/);
     assert.match(script, /__VPS_CHROME_PACKAGE_UNREACHABLE__/);
-    assert.match(script, /cp -f \/root\/google-chrome-enterprise\.msi/);
+    assert.match(script, /configs.*bot-tele/);
+    assert.doesNotMatch(readFileSync(path.join(directory, "trans.sh"), "utf8"), /BASH_SOURCE/);
 });
 
 test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {
@@ -234,17 +244,15 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /bot-tele-rdp-ready/);
 });
 
-test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
+test("wallpaper and Chrome asset lookup is POSIX-safe across initrd switch_root", { skip: !python && "Python 3 is required" }, async t => {
     const directory = temporaryDirectory(t);
     const patched = patchFixture(directory, await installerPatch(directory, false, true));
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
     const patchedScript = readFileSync(path.join(directory, "trans.sh"), "utf8");
-    // The wallpaper copy block must NOT reference a hardcoded absolute /wallpaper.jpg
-    const copyBlock = patchedScript.match(/_wp_dir=[\s\S]*?fi\r?\n\s*fi/)?.[0] ?? "";
-    assert.ok(copyBlock, "wallpaper copy block must exist in patched trans.sh");
-    assert.doesNotMatch(copyBlock, /\s\/wallpaper\.jpg/, "wallpaper source path must not be hardcoded /wallpaper.jpg");
-    assert.match(copyBlock, /\$_wp_dir\/wallpaper\.jpg/, "wallpaper source path must use $_wp_dir");
-    assert.match(patchedScript, /BASH_SOURCE/, "wallpaper_copy_code must use BASH_SOURCE to find wallpaper.jpg");
+    assert.doesNotMatch(patchedScript, /BASH_SOURCE/, "Alpine ash must never receive Bash-only BASH_SOURCE expansion");
+    assert.match(patchedScript, /BOT_TELE_CONFIG_ROOT:-\/configs\/bot-tele/);
+    assert.match(patchedScript, /_wp_src="\$_bot_assets\/wallpaper\.jpg"/);
+    assert.ok(existsSync(path.join(directory, "configs", "bot-tele", "wallpaper.jpg")));
 });
 
 
