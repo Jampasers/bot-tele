@@ -900,7 +900,7 @@ export async function checkTcpPort(ip: string, port: number, signal?: AbortSigna
         let finished = false;
         const socket = createConnection({ host: ip, port });
         const finish = (open: boolean): void => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy(); resolve(open); };
-        const abort = () => finish(false), timer = setTimeout(() => finish(false), 5000);
+        const abort = () => finish(false), timer = setTimeout(() => finish(false), port === 3389 ? 2500 : 5000);
         signal?.addEventListener("abort", abort, { once: true });
         socket.once("error", () => finish(false));
         if (port === 3389) {
@@ -951,6 +951,21 @@ export interface WindowsInspection { rdpOpen: boolean; loginVerified: false; log
 export async function inspectWindows(input: { ip: string; windowsPassword: string; logUrl?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInspection> {
     validIp(input.ip);
     if (signal?.aborted) throw new InstallerError("cancelled");
+
+    // External RDP is the readiness signal. Probe it first so an old installer
+    // viewer cannot delay a VPS that is already reachable from the Internet.
+    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    if (rdpOpen) {
+        return {
+            rdpOpen: true,
+            loginVerified: false,
+            logState: "unavailable",
+            ...(input.logUrl ? { logUrl: input.logUrl } : {}),
+            detail: "RDP merespons dari luar; menunggu satu pemeriksaan ulang untuk memastikan stabil.",
+        };
+    }
+
     let logUrl = input.logUrl ? extractInstallerLogUrl(input.logUrl, input.ip) : undefined;
     let logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
     if (!logUrl && !logReady) {
@@ -972,15 +987,11 @@ export async function inspectWindows(input: { ip: string; windowsPassword: strin
             detail: "Viewer log installer tersedia; instalasi Windows masih dipantau.",
         };
     }
-    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
-    if (signal?.aborted) throw new InstallerError("cancelled");
     return {
-        rdpOpen,
+        rdpOpen: false,
         loginVerified: false,
         logState: "unavailable",
         ...(logUrl ? { logUrl } : {}),
-        detail: rdpOpen
-            ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
-            : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui.",
+        detail: "RDP belum terjangkau dan viewer log belum tersedia; Windows masih boot atau menjalankan setup awal.",
     };
 }
