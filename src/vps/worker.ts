@@ -47,7 +47,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     if (!order.publicIp) return;
     const windowsPassword = knownPassword ?? deps.password();
     const inspection = await deps.inspectWindows({ ip: order.publicIp, windowsPassword, ...(order.installerLogUrl ? { logUrl: order.installerLogUrl } : {}) }, deps.signal);
-    const successes = (inspection.rdpOpen && inspection.logState !== "ready") ? order.rdpSuccesses + 1 : 0;
+    const successes = inspection.rdpOpen ? order.rdpSuccesses + 1 : 0;
     await save({ rdpSuccesses: successes, ...(inspection.logUrl ? { installerLogUrl: inspection.logUrl } : {}), evidence: inspection.detail });
     if (successes >= 2) {
       await stage("ready", { resumeStage: null, reservationActive: false, evidence: "Instalasi Windows selesai. Port RDP aktif & siap digunakan (NLA & Ctrl+Alt+Del dinonaktifkan otomatis)." });

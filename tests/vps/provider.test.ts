@@ -151,8 +151,10 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
     assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bats="\$bats windows-fix-rdp\.bat"'''/);
-    assert.match(calls[0]?.stdin ?? "", /chrome_bat_code = r'''[\s\S]*?bats="\$bats windows-install-chrome\.bat"'''/,
-        "generated patch_trans.py must use a delimiter that cannot be escaped by the batch closing quote");
+    assert.match(calls[0]?.stdin ?? "", /chrome_bat_code = r'''[\s\S]*?EOF_CHROME_INSTALL[\s\S]*?'''/,
+        "generated patch_trans.py must keep the Chrome batch inside a safely-delimited raw block");
+    assert.doesNotMatch(calls[0]?.stdin ?? "", /bats="\$bats windows-install-chrome\.bat"/);
+    assert.match(calls[0]?.stdin ?? "", /windows-fix-rdp\.bat[\s\S]*?windows-install-chrome\.bat/);
     assert.ok(calls[0]?.stdin?.includes("EOF_WALLPAPER_B64"));
     assert.ok(calls[0]?.stdin?.includes("wallpaper.jpg"));
     assert.ok(calls[0]?.stdin?.includes("wallpaper_copy_code = r'''"));
@@ -232,7 +234,7 @@ test("Linux readiness proves authenticated root command; TCP RDP never claims Wi
     const result = await inspectWindows({ ip: "203.0.113.10", windowsPassword: fakePassword }, undefined, {
         tcp: async () => true, ssh: async () => { throw new Error("SSH should not be tried after RDP opens"); },
     });
-    assert.equal(result.rdpOpen, true); assert.equal(result.loginVerified, false); assert.match(result.detail, /belum diverifikasi/);
+    assert.equal(result.rdpOpen, true); assert.equal(result.loginVerified, false); assert.match(result.detail, /RDP merespons dari luar/);
 });
 
 test("installer log discovery reads only random path metadata, restricts host and confirms viewer title", async () => {
@@ -251,12 +253,14 @@ test("installer log discovery reads only random path metadata, restricts host an
     assert.equal(wrong.logState, "unavailable"); assert.equal(wrong.rdpOpen, false);
 });
 
-test("installer log active state forces rdpOpen false to prevent premature ready while installer is running", async () => {
+test("external RDP wins immediately over a stale installer viewer", async () => {
+    let fetches = 0;
     const result = await inspectWindows({ ip: "203.0.113.10", windowsPassword: fakePassword, logUrl: "http://203.0.113.10/aB1cD2eF" }, undefined, {
         tcp: async () => true,
-        fetch: async () => new Response("<title>Reinstall Logs</title>"),
+        fetch: async () => { fetches++; return new Response("<title>Reinstall Logs</title>"); },
     });
-    assert.equal(result.logState, "ready");
-    assert.equal(result.rdpOpen, false);
-    assert.match(result.detail, /masih dipantau/);
+    assert.equal(result.rdpOpen, true);
+    assert.equal(result.logState, "unavailable");
+    assert.equal(fetches, 0);
+    assert.match(result.detail, /RDP merespons dari luar/);
 });

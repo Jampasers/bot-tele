@@ -280,7 +280,11 @@ if ((Get-Item $outMsi).Length -lt 10485760) { throw 'Preloaded Chrome MSI is inc
 
 Start-Service msiserver -ErrorAction SilentlyContinue
 $log = Join-Path $env:TEMP 'chrome-msi-install.log'
-$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -Wait -PassThru
+$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -PassThru
+if (-not $proc.WaitForExit(90000)) {
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    throw 'Chrome MSI timed out after 90 seconds'
+}
 if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
     throw "Chrome MSI failed with exit code $($proc.ExitCode)"
 }
@@ -320,7 +324,10 @@ EOF_CHROME_INSTALL
     printf 'ready' > "$os_dir/Windows/bot-tele-chrome-required"
     unix2dos "$os_dir/windows-install-chrome.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
-    bats="$bats windows-install-chrome.bat"'''
+    # Chrome is intentionally NOT a standalone GPO startup entry. The final
+    # RDP bootstrap invokes it with bounded retries so a stuck MSI cannot block
+    # every later startup script indefinitely.
+'''
 ` : "";
     const wallpaperB64 = getWallpaperJpegBase64(input.wallpaperPath);
     const wallpaperScript = wallpaperB64 ? `
@@ -419,7 +426,7 @@ $passwordBytes = [Convert]::FromBase64String('${passwordBase64}')
 try {
     $password = [Text.Encoding]::UTF8.GetString($passwordBytes)
     $lastError = $null
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             $administrator = $null
             if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
@@ -477,8 +484,8 @@ ${input.installChrome === true ? 'if exist "%SystemRoot%\\\\bot-tele-chrome-requ
     if exist "%SystemRoot%\\bot-tele-chrome-ready" goto BOT_TELE_SETUP_READY
 )
 set /a BOT_TELE_ATTEMPT+=1
-if %BOT_TELE_ATTEMPT% GEQ 30 exit /b 1
-timeout /t 10 /nobreak >nul 2>&1
+if %BOT_TELE_ATTEMPT% GEQ 2 exit /b 1
+timeout /t 5 /nobreak >nul 2>&1
 goto BOT_TELE_WAIT_SETUP
 :BOT_TELE_SETUP_READY
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
@@ -897,7 +904,7 @@ export async function checkTcpPort(ip: string, port: number, signal?: AbortSigna
         let finished = false;
         const socket = createConnection({ host: ip, port });
         const finish = (open: boolean): void => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy(); resolve(open); };
-        const abort = () => finish(false), timer = setTimeout(() => finish(false), 5000);
+        const abort = () => finish(false), timer = setTimeout(() => finish(false), port === 3389 ? 2500 : 5000);
         signal?.addEventListener("abort", abort, { once: true });
         socket.once("error", () => finish(false));
         if (port === 3389) {
@@ -948,6 +955,21 @@ export interface WindowsInspection { rdpOpen: boolean; loginVerified: false; log
 export async function inspectWindows(input: { ip: string; windowsPassword: string; logUrl?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInspection> {
     validIp(input.ip);
     if (signal?.aborted) throw new InstallerError("cancelled");
+
+    // External RDP is the readiness signal. Probe it first so an old installer
+    // viewer cannot delay a VPS that is already reachable from the Internet.
+    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    if (rdpOpen) {
+        return {
+            rdpOpen: true,
+            loginVerified: false,
+            logState: "unavailable",
+            ...(input.logUrl ? { logUrl: input.logUrl } : {}),
+            detail: "RDP merespons dari luar; menunggu satu pemeriksaan ulang untuk memastikan stabil.",
+        };
+    }
+
     let logUrl = input.logUrl ? extractInstallerLogUrl(input.logUrl, input.ip) : undefined;
     let logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
     if (!logUrl && !logReady) {
@@ -969,15 +991,11 @@ export async function inspectWindows(input: { ip: string; windowsPassword: strin
             detail: "Viewer log installer tersedia; instalasi Windows masih dipantau.",
         };
     }
-    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
-    if (signal?.aborted) throw new InstallerError("cancelled");
     return {
-        rdpOpen,
+        rdpOpen: false,
         loginVerified: false,
         logState: "unavailable",
         ...(logUrl ? { logUrl } : {}),
-        detail: rdpOpen
-            ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
-            : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui.",
+        detail: "RDP belum terjangkau dan viewer log belum tersedia; Windows masih boot atau menjalankan setup awal.",
     };
 }
