@@ -470,10 +470,21 @@ del "%~f0" >nul 2>&1
 EOF_PASSWORD_BAT
     unix2dos "$os_dir/windows-set-admin-password.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-set-admin-password.bat" 2>/dev/null || true
-    bats="$bats windows-set-admin-password.bat"'''
+'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 setlocal EnableExtensions
+set "BOT_TELE_LOG=%SystemDrive%\\windows-setup.log"
+echo [%date% %time%] bot-tele critical bootstrap start>>"%BOT_TELE_LOG%"
+
+rem Configure networking on the critical path instead of waiting behind resize/wallpaper.
+for %%F in ("%SystemDrive%\\windows-set-netconf-*.bat") do (
+    if exist "%%~fF" (
+        echo [%date% %time%] bot-tele netconf %%~nxF>>"%BOT_TELE_LOG%"
+        call "%%~fF" >>"%BOT_TELE_LOG%" 2>&1
+    )
+)
+
 set /a BOT_TELE_ATTEMPT=0
 :BOT_TELE_WAIT_SETUP
 if not exist "%SystemRoot%\\bot-tele-password-ready" (
@@ -488,6 +499,7 @@ if %BOT_TELE_ATTEMPT% GEQ 2 exit /b 1
 timeout /t 5 /nobreak >nul 2>&1
 goto BOT_TELE_WAIT_SETUP
 :BOT_TELE_SETUP_READY
+echo [%date% %time%] bot-tele prerequisites ready; enabling RDP>>"%BOT_TELE_LOG%"
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
@@ -582,6 +594,7 @@ sc config XboxNetApiSvc start= disabled >nul 2>&1
 sc config XboxGipSvc start= disabled >nul 2>&1
 
 echo ready>"%SystemRoot%\\bot-tele-rdp-ready"
+echo [%date% %time%] bot-tele RDP ready>>"%BOT_TELE_LOG%"
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
@@ -820,7 +833,17 @@ for line in lines:
         gpo_found = True
 ${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
 ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
-        new_lines.append(r'''    bats="$bats windows-fix-rdp.bat"''')
+        new_lines.append(r'''    bats="$bats windows-fix-rdp.bat"
+    _bot_tele_after=
+    for _bot_bat in $bats; do
+        case "$_bot_bat" in
+            windows-fix-rdp.bat) ;;
+            windows-set-netconf-*.bat) ;;
+            *) _bot_tele_after="$_bot_tele_after $_bot_bat" ;;
+        esac
+    done
+    bats="windows-fix-rdp.bat$_bot_tele_after"
+    echo "[PATCH] Windows startup order: $bats"''')
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
