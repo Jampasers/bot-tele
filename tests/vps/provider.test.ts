@@ -150,7 +150,8 @@ test("concurrent installer jobs keep IP, OS, password and durable markers isolat
     assert.ok(calls[0]?.stdin?.includes("DisableAntiSpyware")); assert.ok(calls[0]?.stdin?.includes("NoAutoUpdate")); assert.ok(calls[0]?.stdin?.includes("wuauserv")); assert.ok(calls[0]?.stdin?.includes("SysMain"));
     assert.ok(!calls[0]?.stdin?.includes("/tmp/autounattend.xml"), "custom XML mutation must not corrupt Windows specialize pass");
     assert.ok(calls[0]?.stdin?.includes("windows-install-chrome.bat")); assert.ok(calls[0]?.stdin?.includes("googlechromestandaloneenterprise64.msi"));
-    assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bats="\$bats windows-fix-rdp\.bat"'''/);
+    assert.match(calls[0]?.stdin ?? "", /fix_bat_code = r'''[\s\S]*?bot-tele-rdp-ready[\s\S]*?'''/);
+    assert.match(calls[0]?.stdin ?? "", /bats="windows-fix-rdp\.bat\$_bot_tele_after"/);
     assert.match(calls[0]?.stdin ?? "", /chrome_bat_code = r'''[\s\S]*?EOF_CHROME_INSTALL[\s\S]*?'''/,
         "generated patch_trans.py must keep the Chrome batch inside a safely-delimited raw block");
     assert.doesNotMatch(calls[0]?.stdin ?? "", /bats="\$bats windows-install-chrome\.bat"/);
