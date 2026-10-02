@@ -256,9 +256,11 @@ export class VpsWorker {
   private kickPaymentReconciliation(): void {
     if (this.paymentReconciliation || this.abort.signal.aborted) return;
     const job = reconcileVpsPayments({ signal: this.abort.signal })
-      .catch(error => this.warnings.warn("vps-payments", "[VPS] Payment reconciliation deferred; provisioning continues.", error))
-      .finally(() => { if (this.paymentReconciliation === job) this.paymentReconciliation = null; });
+      .catch(error => this.warnings.warn("vps-payments", "[VPS] Payment reconciliation deferred; provisioning continues.", error));
     this.paymentReconciliation = job;
+    void job.finally(() => {
+      if (this.paymentReconciliation === job) this.paymentReconciliation = null;
+    });
   }
 
   private async leaseOrder(leaseId: string, priorityOnly: boolean): Promise<IVpsOrder | null> {
