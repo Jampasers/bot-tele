@@ -636,13 +636,15 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
             if [ "$_svc" = viostor ]; then
                 _bus=00000001
                 _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,74,00,6f,00,72,00,2e,00,73,00,79,00,73,00,00,00'
-                _devices='1001 1042'
             else
                 _bus=0000000a
                 _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,63,00,73,00,69,00,2e,00,73,00,79,00,73,00,00,00'
-                _devices='1004 1048'
             fi
 
+            # The VirtIO package was already staged inside the captured Windows image.
+            # For modern Windows Server we only need to make its storage service boot-critical.
+            # Do not create the legacy per-device boot mapping here: Server 2019 images
+            # may not contain that parent key and hivexregedit refuses to create nested parents.
             cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
 [\\\\$_cs\\\\Services\\\\$_svc]
 "Type"=dword:00000001
@@ -662,14 +664,6 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
 "0"=dword:00000000
 
 EOF_VIRTIO_SERVICE
-            for _dev in $_devices; do
-                cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
-[\\\\$_cs\\\\Control\\\\CriticalDeviceDatabase\\\\PCI#VEN_1AF4&DEV_$_dev]
-"ClassGUID"="{4D36E97B-E325-11CE-BFC1-08002BE10318}"
-"Service"="$_svc"
-
-EOF_VIRTIO_DEVICE
-            done
             _virtio_patched="$_virtio_patched $_svc"
         done
 

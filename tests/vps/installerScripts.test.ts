@@ -182,12 +182,11 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /bot-tele-virtio-storage\.reg/);
     assert.match(patchedScript, /virtio_blk\) _required_virtio=viostor/);
     assert.match(patchedScript, /virtio_scsi\) _required_virtio=vioscsi/);
-    assert.match(patchedScript, /CriticalDeviceDatabase/);
     assert.match(patchedScript, /\\\\\$_cs\\\\Services\\\\\$_svc/);
-    assert.match(patchedScript, /\\\\\$_cs\\\\Control\\\\CriticalDeviceDatabase/);
     assert.doesNotMatch(patchedScript, /\[\\\$_cs\\Services\\\$_svc\]/);
     assert.match(patchedScript, /"Start"=dword:00000000/);
     assert.match(patchedScript, /StartOverride/);
+    assert.doesNotMatch(patchedScript, /CriticalDeviceDatabase/);
     assert.match(patchedScript, /bootstat\.dat/);
     assert.match(patchedScript, /missing boot-critical \$_svc\.sys/);
     assert.match(patchedScript, /-maxdepth 1 -type d -iname "\$_svc\.inf_\*"/);
