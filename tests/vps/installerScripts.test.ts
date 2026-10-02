@@ -98,14 +98,20 @@ async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpape
 for (const installChrome of [false, true]) {
     test(`generated setup runs network before wallpaper${installChrome ? " and Chrome" : ""}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, true);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat",
-            ...(installChrome ? ["windows-install-chrome.bat"] : [])]);
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat",
+            ...(installChrome ? ["windows-install-chrome.bat"] : []), "windows-fix-rdp.bat"]);
         const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
         assert.match(batch, /fDenyTSConnections/);
         assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
+        assert.match(batch, /bot-tele-rdp-ready/);
+        assert.match(batch, /bot-tele-chrome-required/);
         assert.doesNotMatch(batch, /SetDankaWallpaper|Add-Type/);
         const passwordBatch = readFileSync(path.join(directory, "os", "windows-set-admin-password.bat"), "utf8");
         assert.match(passwordBatch, /echo ready>"%SystemRoot%\\bot-tele-password-ready"/);
+        assert.doesNotMatch(passwordBatch, /fDenyTSConnections/);
+        const passwordScript = readFileSync(path.join(directory, "os", "windows-set-admin-password.ps1"), "utf8");
+        assert.match(passwordScript, /for \(\$attempt = 1; \$attempt -le 30; \$attempt\+\+\)/);
+        assert.match(passwordScript, /Get-LocalUser/);
         assert.equal(readFileSync(path.join(directory, "win-dir.txt"), "utf8").trim(), "Windows", "wallpaper copy must preserve the upstream relative Windows directory");
         assert.ok(existsSync(path.join(directory, "os", "Windows", "wallpaper.jpg")));
         assert.equal(existsSync(path.join(directory, "os", "windows-install-chrome.bat")), installChrome);
@@ -113,7 +119,7 @@ for (const installChrome of [false, true]) {
 
     test(`missing wallpaper preserves network setup and Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, false);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-fix-rdp.bat", "windows-set-netconf-eth0.bat", ...(installChrome ? ["windows-install-chrome.bat"] : [])]);
+        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", ...(installChrome ? ["windows-install-chrome.bat"] : []), "windows-fix-rdp.bat"]);
         assert.equal(existsSync(path.join(directory, "os", "windows-set-wallpaper.bat")), false);
         assert.equal(existsSync(path.join(directory, "os", "danka-wallpaper.ps1")), false);
     });
@@ -155,7 +161,7 @@ test("fast image selector fails before disk preparation when every candidate is 
     }, undefined, { ssh: async () => ({ code: 1, output: "" }) }), InstallerError);
 });
 
-test("installer preparation caps cloud-init wait and starts Chrome asynchronously", async t => {
+test("installer preparation caps cloud-init wait and gates readiness on Chrome completion", async t => {
     const directory = temporaryDirectory(t);
     let script = "";
     await launchWindows({
@@ -171,9 +177,12 @@ test("installer preparation caps cloud-init wait and starts Chrome asynchronousl
     const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
     assert.equal(emitted.status, 0, `${emitted.stdout}\n${emitted.stderr}`);
     const chromeBatch = readFileSync(path.join(directory, "os", "windows-install-chrome.bat"), "utf8");
-    assert.match(chromeBatch, /start "" \/min powershell\.exe/i);
-    assert.doesNotMatch(chromeBatch, /powershell\.exe.*>>.*chrome-install\.log/i);
-    assert.match(chromeBatch, /exit \/b 0/i);
+    assert.doesNotMatch(chromeBatch, /start "" \/min powershell\.exe/i);
+    assert.match(chromeBatch, /windows-install-chrome\.ps1/);
+    assert.match(chromeBatch, /bot-tele-chrome-ready/);
+    const chromePs = readFileSync(path.join(directory, "os", "windows-install-chrome.ps1"), "utf8");
+    assert.match(chromePs, /bot-tele-chrome-ready/);
+    assert.match(chromePs, /exit 1/);
 });
 
 test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {
@@ -185,6 +194,8 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /\\\\\$_cs\\\\Services\\\\\$_svc/);
     assert.doesNotMatch(patchedScript, /\[\\\$_cs\\Services\\\$_svc\]/);
     assert.match(patchedScript, /"Start"=dword:00000000/);
+    assert.match(patchedScript, /fDenyTSConnections/);
+    assert.match(patchedScript, /dword:00000001/);
     assert.match(patchedScript, /StartOverride/);
     assert.doesNotMatch(patchedScript, /\\\\CriticalDeviceDatabase\\\\/);
     assert.match(patchedScript, /DriverDatabase/);
