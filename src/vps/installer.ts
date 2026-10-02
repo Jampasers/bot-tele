@@ -320,7 +320,10 @@ EOF_CHROME_INSTALL
     printf 'ready' > "$os_dir/Windows/bot-tele-chrome-required"
     unix2dos "$os_dir/windows-install-chrome.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
-    bats="$bats windows-install-chrome.bat"'''
+    # Chrome is intentionally NOT a standalone GPO startup entry. The final
+    # RDP bootstrap invokes it with bounded retries so a stuck MSI cannot block
+    # every later startup script indefinitely.
+'''
 ` : "";
     const wallpaperB64 = getWallpaperJpegBase64(input.wallpaperPath);
     const wallpaperScript = wallpaperB64 ? `
@@ -419,7 +422,7 @@ $passwordBytes = [Convert]::FromBase64String('${passwordBase64}')
 try {
     $password = [Text.Encoding]::UTF8.GetString($passwordBytes)
     $lastError = $null
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
         try {
             $administrator = $null
             if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
@@ -477,8 +480,8 @@ ${input.installChrome === true ? 'if exist "%SystemRoot%\\\\bot-tele-chrome-requ
     if exist "%SystemRoot%\\bot-tele-chrome-ready" goto BOT_TELE_SETUP_READY
 )
 set /a BOT_TELE_ATTEMPT+=1
-if %BOT_TELE_ATTEMPT% GEQ 30 exit /b 1
-timeout /t 10 /nobreak >nul 2>&1
+if %BOT_TELE_ATTEMPT% GEQ 2 exit /b 1
+timeout /t 5 /nobreak >nul 2>&1
 goto BOT_TELE_WAIT_SETUP
 :BOT_TELE_SETUP_READY
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
