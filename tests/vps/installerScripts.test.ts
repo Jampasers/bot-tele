@@ -102,15 +102,17 @@ async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpape
 }
 
 for (const installChrome of [false, true]) {
-    test(`generated setup runs network before wallpaper${installChrome ? " and Chrome" : ""}`, { skip: scriptSkip }, async t => {
+    test(`generated setup puts critical RDP bootstrap before cosmetic tasks${installChrome ? " with Chrome" : ""}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, true);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-set-wallpaper.bat", "windows-fix-rdp.bat"]);
+        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-set-wallpaper.bat"]);
         const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
         assert.match(batch, /fDenyTSConnections/);
         assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
         assert.match(batch, /bot-tele-rdp-ready/);
         assert.match(batch, /bot-tele-chrome-required/);
         assert.match(batch, /BOT_TELE_WAIT_SETUP/);
+        assert.match(batch, /windows-set-netconf-\*\.bat/);
+        assert.match(batch, /bot-tele netconf/);
         assert.match(batch, /windows-set-admin-password\.bat/);
         if (installChrome) assert.match(batch, /windows-install-chrome\.bat/);
         else assert.doesNotMatch(batch, /windows-install-chrome\.bat/);
@@ -130,7 +132,7 @@ for (const installChrome of [false, true]) {
 
     test(`missing wallpaper preserves network setup and Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, false);
-        assert.deepEqual(batches, ["windows-set-admin-password.bat", "windows-set-netconf-eth0.bat", "windows-fix-rdp.bat"]);
+        assert.deepEqual(batches, ["windows-fix-rdp.bat"]);
         assert.equal(existsSync(path.join(directory, "os", "windows-set-wallpaper.bat")), false);
         assert.equal(existsSync(path.join(directory, "os", "danka-wallpaper.ps1")), false);
     });
@@ -244,6 +246,8 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /timeout 60s hivexregedit --merge/);
     assert.match(patchedScript, /VirtIO registry merge complete/);
     assert.match(patchedScript, /bot-tele-rdp-ready/);
+    assert.match(patchedScript, /Windows startup order:/);
+    assert.match(patchedScript, /bats="windows-fix-rdp\.bat\$_bot_tele_after"/);
 });
 
 test("wallpaper and Chrome asset lookup is POSIX-safe across initrd switch_root", { skip: !python && "Python 3 is required" }, async t => {
