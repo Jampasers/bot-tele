@@ -263,7 +263,7 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
-chrome_bat_code = r'''    _bot_assets=${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
+chrome_bat_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
     _chrome_src="$_bot_assets/google-chrome-enterprise.msi"
     _chrome_dst=$(get_path_in_correct_case "$os_dir/Windows/Temp/google-chrome-enterprise.msi")
     if [ ! -f "$_chrome_src" ]; then
@@ -405,7 +405,7 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 new_lines = []
 bats_found = False
 gpo_found = False
-wallpaper_copy_code = r'''    _bot_assets=${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
+wallpaper_copy_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
     _wp_src="$_bot_assets/wallpaper.jpg"
     if [ -f "$_wp_src" ]; then
         wallpaper_win_dir=$(get_path_in_correct_case "$os_dir/Windows")
