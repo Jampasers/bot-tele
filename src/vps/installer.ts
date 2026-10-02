@@ -623,7 +623,7 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
             fi
 
             for _cs in ControlSet001 ControlSet002; do
-                if ! hivexregedit --export "$_system_hive" "$_cs" >/dev/null 2>&1; then
+                if ! hivexget "$_system_hive" "$_cs\\Services" >/dev/null 2>&1; then
                     continue
                 fi
                 cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
