@@ -643,8 +643,8 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
 
             # The VirtIO package was already staged inside the captured Windows image.
             # For modern Windows Server we only need to make its storage service boot-critical.
-            # Do not create legacy CriticalDeviceDatabase keys: Server 2019 images may not
-            # contain that parent key and hivexregedit refuses to create nested parents.
+            # Do not create the legacy per-device boot mapping here: Server 2019 images
+            # may not contain that parent key and hivexregedit refuses to create nested parents.
             cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
 [\\\\$_cs\\\\Services\\\\$_svc]
 "Type"=dword:00000001
