@@ -176,6 +176,19 @@ test("installer preparation caps cloud-init wait and starts Chrome asynchronousl
     assert.match(chromeBatch, /exit \/b 0/i);
 });
 
+test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {
+    const { directory } = await emitWindowsFiles(t, false, false);
+    const patchedScript = readFileSync(path.join(directory, "trans.sh"), "utf8");
+    assert.match(patchedScript, /bot-tele-virtio-storage\.reg/);
+    assert.match(patchedScript, /virtio_blk\) _required_virtio=viostor/);
+    assert.match(patchedScript, /virtio_scsi\) _required_virtio=vioscsi/);
+    assert.match(patchedScript, /CriticalDeviceDatabase/);
+    assert.match(patchedScript, /"Start"=dword:00000000/);
+    assert.match(patchedScript, /StartOverride/);
+    assert.match(patchedScript, /bootstat\.dat/);
+    assert.match(patchedScript, /missing boot-critical \$_svc\.sys/);
+});
+
 test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
     const directory = temporaryDirectory(t);
     const patched = patchFixture(directory, await installerPatch(directory, false, true));
