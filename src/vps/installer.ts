@@ -573,6 +573,102 @@ EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
     bats="$bats windows-fix-rdp.bat"'''
 
+# A Hyper-V-built DD image can contain VirtIO packages in DriverStore without
+# having the boot-critical storage service enabled. The target KVM then falls
+# into WinRE before any Windows startup batch can run. Prime both storage
+# drivers offline while the DD image is mounted, and fail before reboot if the
+# target explicitly needs a driver that is absent from the image.
+virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/Windows/System32/config/SYSTEM")
+    if [ -f "$_system_hive" ]; then
+        _virtio_store=$(get_path_in_correct_case "$os_dir/Windows/System32/DriverStore/FileRepository")
+        _virtio_drivers=$(get_path_in_correct_case "$os_dir/Windows/System32/drivers")
+        _storage_driver=$(get_drivers "/sys/block/$xda" 2>/dev/null | grep -E '^(virtio_blk|virtio_scsi)$' | head -n1 || true)
+        case "$_storage_driver" in
+            virtio_blk) _required_virtio=viostor ;;
+            virtio_scsi) _required_virtio=vioscsi ;;
+            *) _required_virtio= ;;
+        esac
+
+        _virtio_reg=/tmp/bot-tele-virtio-storage.reg
+        : > "$_virtio_reg"
+        _virtio_patched=
+        apk add hivex-perl >/dev/null
+
+        for _svc in viostor vioscsi; do
+            _drv=$(get_path_in_correct_case "$_virtio_drivers/$_svc.sys")
+            if [ ! -f "$_drv" ] && [ -d "$_virtio_store" ]; then
+                _staged=$(find "$_virtio_store" -type f -iname "$_svc.sys" -print -quit 2>/dev/null || true)
+                if [ -n "$_staged" ] && [ -f "$_staged" ]; then
+                    cp -f "$_staged" "$_virtio_drivers/$_svc.sys"
+                    _drv="$_virtio_drivers/$_svc.sys"
+                fi
+            fi
+
+            if [ ! -f "$_drv" ]; then
+                if [ "$_required_virtio" = "$_svc" ]; then
+                    apk del hivex-perl >/dev/null 2>&1 || true
+                    error_and_exit "Custom Windows image is missing boot-critical $_svc.sys for target storage driver $_storage_driver."
+                fi
+                continue
+            fi
+
+            if [ "$_svc" = viostor ]; then
+                _bus=00000001
+                _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,74,00,6f,00,72,00,2e,00,73,00,79,00,73,00,00,00'
+                _devices='1001 1042'
+            else
+                _bus=0000000a
+                _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,63,00,73,00,69,00,2e,00,73,00,79,00,73,00,00,00'
+                _devices='1004 1048'
+            fi
+
+            for _cs in ControlSet001 ControlSet002; do
+                if ! hivexget "$_system_hive" "$_cs\\Services" >/dev/null 2>&1; then
+                    continue
+                fi
+                cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
+[\\$_cs\\Services\\$_svc]
+"Type"=dword:00000001
+"Start"=dword:00000000
+"ErrorControl"=dword:00000001
+"Group"="SCSI miniport"
+"ImagePath"=hex(2):$_image_hex
+
+[\\$_cs\\Services\\$_svc\\Parameters]
+"BusType"=dword:$_bus
+"DmaRemappingCompatible"=dword:00000000
+
+[\\$_cs\\Services\\$_svc\\Parameters\\PnpInterface]
+"5"=dword:00000001
+
+[\\$_cs\\Services\\$_svc\\StartOverride]
+"0"=dword:00000000
+
+EOF_VIRTIO_SERVICE
+                for _dev in $_devices; do
+                    cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
+[\\$_cs\\Control\\CriticalDeviceDatabase\\PCI#VEN_1AF4&DEV_$_dev]
+"ClassGUID"="{4D36E97B-E325-11CE-BFC1-08002BE10318}"
+"Service"="$_svc"
+
+EOF_VIRTIO_DEVICE
+                done
+            done
+            _virtio_patched="$_virtio_patched $_svc"
+        done
+
+        if [ -s "$_virtio_reg" ]; then
+            hivexregedit --merge "$_system_hive" "$_virtio_reg"
+        fi
+        apk del hivex-perl >/dev/null 2>&1 || true
+
+        _bootstat=$(get_path_in_correct_case "$os_dir/Windows/bootstat.dat")
+        if [ -f "$_bootstat" ]; then
+            rm -f "$_bootstat"
+        fi
+        echo "[PATCH] VirtIO storage boot drivers prepared:$_virtio_patched target:$_storage_driver"
+    fi'''
+
 # Keep cosmetic setup after the upstream network scripts. A failed optional
 # customization must not abort SetupComplete before the VPS has networking.
 wallpaper_bat_code = r'''    cat << 'EOF_WALLPAPER_PS1' > "$os_dir/danka-wallpaper.ps1"
@@ -639,6 +735,7 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
+        new_lines.append(virtio_boot_fix_code)
         new_lines.append(password_bat_code)
         new_lines.append(fix_bat_code)
 
