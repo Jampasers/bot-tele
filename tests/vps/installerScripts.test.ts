@@ -88,6 +88,7 @@ function patchFixture(directory: string, patch: string, fixture = transFixture) 
 
 async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpaper: boolean): Promise<{ directory: string; batches: string[] }> {
     const directory = temporaryDirectory(t);
+    if (installChrome) writeFileSync(path.join(directory, "google-chrome-enterprise.msi"), "synthetic-msi");
     const patched = patchFixture(directory, await installerPatch(directory, installChrome, wallpaper));
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
     const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
@@ -105,6 +106,10 @@ for (const installChrome of [false, true]) {
         assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
         assert.match(batch, /bot-tele-rdp-ready/);
         assert.match(batch, /bot-tele-chrome-required/);
+        assert.match(batch, /BOT_TELE_WAIT_SETUP/);
+        assert.match(batch, /windows-set-admin-password\.bat/);
+        assert.match(batch, /windows-install-chrome\.bat/);
+        assert.match(batch, /timeout \/t 10/);
         assert.doesNotMatch(batch, /SetDankaWallpaper|Add-Type/);
         const passwordBatch = readFileSync(path.join(directory, "os", "windows-set-admin-password.bat"), "utf8");
         assert.match(passwordBatch, /echo ready>"%SystemRoot%\\bot-tele-password-ready"/);
@@ -180,9 +185,15 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.doesNotMatch(chromeBatch, /start "" \/min powershell\.exe/i);
     assert.match(chromeBatch, /windows-install-chrome\.ps1/);
     assert.match(chromeBatch, /bot-tele-chrome-ready/);
+    assert.ok(existsSync(path.join(directory, "os", "Windows", "Temp", "google-chrome-enterprise.msi")));
     const chromePs = readFileSync(path.join(directory, "os", "windows-install-chrome.ps1"), "utf8");
+    assert.match(chromePs, /Preloaded Chrome MSI/);
+    assert.match(chromePs, /msiexec\.exe/);
     assert.match(chromePs, /bot-tele-chrome-ready/);
-    assert.match(chromePs, /exit 1/);
+    assert.doesNotMatch(chromePs, /DownloadFile|dl\.google\.com/);
+    assert.match(script, /googlechromestandaloneenterprise64\.msi/);
+    assert.match(script, /__VPS_CHROME_PACKAGE_UNREACHABLE__/);
+    assert.match(script, /cp -f \/root\/google-chrome-enterprise\.msi/);
 });
 
 test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {
@@ -218,6 +229,7 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /_cs="ControlSet001"/);
     assert.match(patchedScript, /timeout 60s hivexregedit --merge/);
     assert.match(patchedScript, /VirtIO registry merge complete/);
+    assert.match(patchedScript, /bot-tele-rdp-ready/);
 });
 
 test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
