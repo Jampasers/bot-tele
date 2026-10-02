@@ -497,10 +497,10 @@ EOF_PASSWORD_BAT
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
 if not exist "%SystemRoot%\\bot-tele-password-ready" (
-    reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 1 /f >nul 2>&1
-    netsh advfirewall firewall set rule group="remote desktop" new enable=No >nul 2>&1
-    exit /b 1
+    if exist "%SystemDrive%\\windows-set-admin-password.bat" call "%SystemDrive%\\windows-set-admin-password.bat"
 )
+if not exist "%SystemRoot%\\bot-tele-password-ready" exit /b 1
+if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" exit /b 1
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
@@ -594,11 +594,11 @@ sc config XblGameSave start= disabled >nul 2>&1
 sc config XboxNetApiSvc start= disabled >nul 2>&1
 sc config XboxGipSvc start= disabled >nul 2>&1
 
-del "%SystemRoot%\\bot-tele-password-ready" >nul 2>&1
+echo ready>"%SystemRoot%\\bot-tele-rdp-ready"
 del "%~f0"
 EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
-    bats="$bats windows-fix-rdp.bat"'''
+'''
 
 # A Hyper-V-built DD image can contain VirtIO packages in DriverStore without
 # having the boot-critical storage service enabled. The target KVM then falls
@@ -636,6 +636,12 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
         # injection; Windows normally boots that set for this captured image.
         _cs="ControlSet001"
         echo "[PATCH] VirtIO registry control set: $_cs"
+
+        cat >> "$_virtio_reg" <<EOF_RDP_GATE
+[\\\\$_cs\\\\Control\\\\Terminal Server]
+"fDenyTSConnections"=dword:00000001
+
+EOF_RDP_GATE
 
         for _svc in $_virtio_services; do
             echo "[PATCH] VirtIO locating $_svc.sys"
@@ -818,6 +824,7 @@ for line in lines:
         gpo_found = True
 ${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
 ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
+        new_lines.append(r'''    bats="$bats windows-fix-rdp.bat"''')
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
