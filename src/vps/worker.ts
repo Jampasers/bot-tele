@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { Api } from "grammy";
-import type { FilterQuery } from "mongoose";
 import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
 import { User } from "../models/User.js";
@@ -266,27 +265,31 @@ export class VpsWorker {
 
   private async leaseOrder(leaseId: string, priorityOnly: boolean): Promise<IVpsOrder | null> {
     const now = new Date();
-    const stageFilter: FilterQuery<IVpsOrder> = priorityOnly
-      ? { stage: { $in: ["queued", "ssh", "installing", "rebooting"] } }
-      : { $or: [
-          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
-          { rebootState: { $in: ["requested", "submitting", "running"] } },
-        ] };
-    const filter: FilterQuery<IVpsOrder> = {
+    const update = { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } };
+    const options = { sort: { nextRunAt: 1, createdAt: 1 }, returnDocument: "after" as const };
+
+    if (priorityOnly) {
+      return VpsOrder.findOneAndUpdate({
+        tenantId: "platform",
+        paymentStatus: "paid",
+        nextRunAt: { $lte: now },
+        stage: { $in: ["queued", "ssh", "installing", "rebooting"] },
+        $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }],
+      }, update, options).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
+    }
+
+    return VpsOrder.findOneAndUpdate({
       tenantId: "platform",
       paymentStatus: "paid",
       nextRunAt: { $lte: now },
       $and: [
         { $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }] },
-        stageFilter,
+        { $or: [
+          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
+          { rebootState: { $in: ["requested", "submitting", "running"] } },
+        ] },
       ],
-    };
-    return VpsOrder.findOneAndUpdate(filter, {
-      $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) },
-    }, {
-      sort: { nextRunAt: 1, createdAt: 1 },
-      returnDocument: "after",
-    }).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
+    }, update, options).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
   }
 
   start(): void {
