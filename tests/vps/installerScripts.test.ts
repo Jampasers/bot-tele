@@ -187,6 +187,9 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /StartOverride/);
     assert.match(patchedScript, /bootstat\.dat/);
     assert.match(patchedScript, /missing boot-critical \$_svc\.sys/);
+    assert.match(patchedScript, /-maxdepth 1 -type d -iname "\$_svc\.inf_\*"/);
+    assert.match(patchedScript, /timeout 60s hivexregedit --merge/);
+    assert.match(patchedScript, /VirtIO registry merge complete/);
 });
 
 test("wallpaper_copy_code uses BASH_SOURCE-relative path, not hardcoded /wallpaper.jpg", { skip: !python && "Python 3 is required" }, async t => {
