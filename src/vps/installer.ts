@@ -280,7 +280,11 @@ if ((Get-Item $outMsi).Length -lt 10485760) { throw 'Preloaded Chrome MSI is inc
 
 Start-Service msiserver -ErrorAction SilentlyContinue
 $log = Join-Path $env:TEMP 'chrome-msi-install.log'
-$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -Wait -PassThru
+$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -PassThru
+if (-not $proc.WaitForExit(90000)) {
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    throw 'Chrome MSI timed out after 90 seconds'
+}
 if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
     throw "Chrome MSI failed with exit code $($proc.ExitCode)"
 }
