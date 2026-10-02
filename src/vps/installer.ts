@@ -575,9 +575,10 @@ EOF_RDP_FIX
 
 # A Hyper-V-built DD image can contain VirtIO packages in DriverStore without
 # having the boot-critical storage service enabled. The target KVM then falls
-# into WinRE before any Windows startup batch can run. Prime both storage
-# drivers offline while the DD image is mounted, and fail before reboot if the
-# target explicitly needs a driver that is absent from the image.
+# into WinRE before any Windows startup batch can run. Patch only the storage
+# driver required by the current target when it can be detected. DriverStore
+# lookup is deliberately bounded to the matching INF package directory so the
+# offline NTFS scan cannot stall for minutes.
 virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/Windows/System32/config/SYSTEM")
     if [ -f "$_system_hive" ]; then
         _virtio_store=$(get_path_in_correct_case "$os_dir/Windows/System32/DriverStore/FileRepository")
@@ -588,19 +589,30 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
             virtio_scsi) _required_virtio=vioscsi ;;
             *) _required_virtio= ;;
         esac
+        _virtio_services=${_required_virtio:-"viostor vioscsi"}
+        echo "[PATCH] VirtIO storage preparation: target=${_storage_driver:-unknown}, service(s)=$_virtio_services"
 
         _virtio_reg=/tmp/bot-tele-virtio-storage.reg
         : > "$_virtio_reg"
         _virtio_patched=
         apk add hivex-perl >/dev/null
 
-        for _svc in viostor vioscsi; do
+        _current_cs=$(hivexget "$_system_hive" '\\Select' Current 2>/dev/null | tr -cd '0-9' || true)
+        [ -n "$_current_cs" ] || _current_cs=1
+        _cs="ControlSet$(printf '%03d' "$_current_cs")"
+        echo "[PATCH] VirtIO registry control set: $_cs"
+
+        for _svc in $_virtio_services; do
+            echo "[PATCH] VirtIO locating $_svc.sys"
             _drv=$(get_path_in_correct_case "$_virtio_drivers/$_svc.sys")
             if [ ! -f "$_drv" ] && [ -d "$_virtio_store" ]; then
-                _staged=$(find "$_virtio_store" -type f -iname "$_svc.sys" -print -quit 2>/dev/null || true)
-                if [ -n "$_staged" ] && [ -f "$_staged" ]; then
-                    cp -f "$_staged" "$_virtio_drivers/$_svc.sys"
-                    _drv="$_virtio_drivers/$_svc.sys"
+                _pkg=$(find "$_virtio_store" -maxdepth 1 -type d -iname "$_svc.inf_*" -print -quit 2>/dev/null || true)
+                if [ -n "$_pkg" ]; then
+                    _staged=$(find "$_pkg" -maxdepth 2 -type f -iname "$_svc.sys" -print -quit 2>/dev/null || true)
+                    if [ -n "$_staged" ] && [ -f "$_staged" ]; then
+                        cp -f "$_staged" "$_virtio_drivers/$_svc.sys"
+                        _drv="$_virtio_drivers/$_svc.sys"
+                    fi
                 fi
             fi
 
@@ -609,6 +621,7 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
                     apk del hivex-perl >/dev/null 2>&1 || true
                     error_and_exit "Custom Windows image is missing boot-critical $_svc.sys for target storage driver $_storage_driver."
                 fi
+                echo "[PATCH] VirtIO optional driver $_svc not present; skipping"
                 continue
             fi
 
@@ -622,11 +635,7 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
                 _devices='1004 1048'
             fi
 
-            for _cs in ControlSet001 ControlSet002; do
-                if ! hivexget "$_system_hive" "$_cs\\Services" >/dev/null 2>&1; then
-                    continue
-                fi
-                cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
+            cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
 [\\$_cs\\Services\\$_svc]
 "Type"=dword:00000001
 "Start"=dword:00000000
@@ -645,20 +654,24 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
 "0"=dword:00000000
 
 EOF_VIRTIO_SERVICE
-                for _dev in $_devices; do
-                    cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
+            for _dev in $_devices; do
+                cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
 [\\$_cs\\Control\\CriticalDeviceDatabase\\PCI#VEN_1AF4&DEV_$_dev]
 "ClassGUID"="{4D36E97B-E325-11CE-BFC1-08002BE10318}"
 "Service"="$_svc"
 
 EOF_VIRTIO_DEVICE
-                done
             done
             _virtio_patched="$_virtio_patched $_svc"
         done
 
         if [ -s "$_virtio_reg" ]; then
-            hivexregedit --merge "$_system_hive" "$_virtio_reg"
+            echo "[PATCH] VirtIO merging offline SYSTEM hive"
+            if ! timeout 60s hivexregedit --merge "$_system_hive" "$_virtio_reg"; then
+                apk del hivex-perl >/dev/null 2>&1 || true
+                error_and_exit "Timed out or failed while enabling VirtIO storage driver in offline Windows registry."
+            fi
+            echo "[PATCH] VirtIO registry merge complete"
         fi
         apk del hivex-perl >/dev/null 2>&1 || true
 
