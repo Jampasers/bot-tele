@@ -13,6 +13,7 @@ import { resolveWindowsDdImageCandidates } from "./windowsImages.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
 import { providerForCredential, releaseCapacityTicket, reserveStoreCapacity } from "./credentials.js";
 import { reconcileVpsPayments, refundVpsOrder } from "./payment.js";
+import { resolveVpsWallpaperBase64 } from "./wallpaper.js";
 
 export interface VpsStepDependencies {
   save(patch: Partial<IVpsOrder>): Promise<void>;
@@ -28,6 +29,7 @@ export interface VpsStepDependencies {
   launchWindows: typeof launchWindows;
   scheduleInstallerReboot: typeof scheduleInstallerReboot;
   inspectWindows: typeof inspectWindows;
+  wallpaperBase64?(): Promise<string | null>;
   clearToken(): void;
   now(): number;
   signal: AbortSignal;
@@ -207,8 +209,10 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       await save({ installerBootMode: bootMode, installerImageUrl: imageUrl,
         evidence: `SSH Linux berhasil. Boot mode: ${bootLabel}. ${imageFormat} terpilih dan dapat dijangkau; menyiapkan ${getOs(order.snapshot.os)?.name ?? "Windows"}.` });
     }
+    const wallpaperBase64 = await deps.wallpaperBase64?.();
     const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password,
-      os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true }, deps.signal);
+      os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true,
+      ...(wallpaperBase64 ? { wallpaperBase64 } : {}) }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
     if (result.state === "prepared") {
       // The reboot call is guarded by a durable remote marker, so it is safe
@@ -373,6 +377,7 @@ export class VpsWorker {
         sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourceUsername: () => order.sourceUsername ?? "root",
         testSsh, detectWindowsBootMode, resolveWindowsDdImageCandidates, selectWindowsImage, launchWindows, scheduleInstallerReboot, inspectWindows,
+        wallpaperBase64: resolveVpsWallpaperBase64,
         clearToken: () => buyerTokens.delete(order.buyerId, order._id), now: Date.now, signal: stopStep.signal,
       });
       if (order.dropletId) await releaseCapacityTicket(order._id);
