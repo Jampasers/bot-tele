@@ -355,15 +355,22 @@ if ($chromeExe) {
             $sc.Save()
         } catch {}
     }
+    Set-Content -Path (Join-Path $env:SystemRoot 'bot-tele-chrome-ready') -Value 'ready' -Encoding Ascii
+    exit 0
 }
+exit 1
 EOF_CHROME_PS1
     cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
-rem Chrome bersifat opsional; jalankan background agar RDP/first login tidak menunggu download.
-start "" /min powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1"
+del "%SystemRoot%\\bot-tele-chrome-ready" >nul 2>&1
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-install-chrome.ps1" >> "%SystemDrive%\\windows-setup.log" 2>&1
+if errorlevel 1 exit /b 1
+if not exist "%SystemRoot%\\bot-tele-chrome-ready" exit /b 1
+del "%SystemDrive%\\windows-install-chrome.ps1" >nul 2>&1
 del "%~f0" >nul 2>&1
 exit /b 0
 EOF_CHROME_INSTALL
+    printf 'ready' > "$os_dir/Windows/bot-tele-chrome-required"
     unix2dos "$os_dir/windows-install-chrome.ps1" 2>/dev/null || true
     unix2dos "$os_dir/windows-install-chrome.bat" 2>/dev/null || true
     bats="$bats windows-install-chrome.bat"'''
@@ -441,13 +448,35 @@ $ErrorActionPreference = 'Stop'
 $passwordBytes = [Convert]::FromBase64String('${passwordBase64}')
 try {
     $password = [Text.Encoding]::UTF8.GetString($passwordBytes)
-    $administrator = Get-WmiObject Win32_UserAccount -Filter "LocalAccount=True" | Where-Object { $_.SID -like '*-500' } | Select-Object -First 1
-    if (-not $administrator) { throw 'Built-in administrator account was not found' }
-    $account = [ADSI]("WinNT://" + $env:COMPUTERNAME + "/" + $administrator.Name + ",user")
-    $account.SetPassword($password)
-    $flags = [int]$account.Get('UserFlags')
-    $account.Put('UserFlags', (($flags -band (-bnot 2)) -bor 65536))
-    $account.SetInfo()
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+        try {
+            $administrator = $null
+            if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) {
+                $administrator = Get-LocalUser | Where-Object { $_.SID.Value -like '*-500' } | Select-Object -First 1
+            }
+            if (-not $administrator) {
+                $administrator = Get-WmiObject Win32_UserAccount -Filter "LocalAccount=True" | Where-Object { $_.SID -like '*-500' } | Select-Object -First 1
+            }
+            if (-not $administrator) { throw 'Built-in administrator account was not found' }
+            if (Get-Command Set-LocalUser -ErrorAction SilentlyContinue) {
+                $secure = ConvertTo-SecureString $password -AsPlainText -Force
+                Set-LocalUser -Name $administrator.Name -Password $secure -PasswordNeverExpires $true
+                Enable-LocalUser -Name $administrator.Name -ErrorAction SilentlyContinue
+            } else {
+                $account = [ADSI]("WinNT://" + $env:COMPUTERNAME + "/" + $administrator.Name + ",user")
+                $account.SetPassword($password)
+                $flags = [int]$account.Get('UserFlags')
+                $account.Put('UserFlags', (($flags -band (-bnot 2)) -bor 65536))
+                $account.SetInfo()
+            }
+            exit 0
+        } catch {
+            $lastError = $_
+            Start-Sleep -Seconds 2
+        }
+    }
+    throw $lastError
 } finally {
     if ($passwordBytes) { [Array]::Clear($passwordBytes, 0, $passwordBytes.Length) }
     $password = $null
@@ -456,8 +485,6 @@ EOF_PASSWORD_PS1
     cat << 'EOF_PASSWORD_BAT' > "$os_dir/windows-set-admin-password.bat"
 @echo off
 del "%SystemRoot%\\bot-tele-password-ready" >nul 2>&1
-reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 1 /f >nul 2>&1
-netsh advfirewall firewall set rule group="remote desktop" new enable=No >nul 2>&1
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SystemDrive%\\windows-set-admin-password.ps1" >> "%SystemDrive%\\windows-setup.log" 2>&1
 if errorlevel 1 exit /b 1
 echo ready>"%SystemRoot%\\bot-tele-password-ready"
