@@ -72,6 +72,14 @@ export interface IBotConfig extends Document {
   /** Pesan banner yang ditampilkan saat maintenance */
   maintenanceMessage: string;
 
+  // ── VPS Windows Wallpaper ───────────────────────────────────────────────────
+
+  /** JPEG wallpaper custom dalam base64; kosong berarti memakai Wallpaper.png bawaan */
+  vpsWallpaperBase64: string;
+
+  /** Waktu terakhir wallpaper VPS custom diperbarui */
+  vpsWallpaperUpdatedAt: Date | null;
+
   // ── Affiliate / Referral System ─────────────────────────────────────────────
 
   /** Apakah sistem referral/afiliasi diaktifkan */
@@ -295,6 +303,16 @@ const botConfigSchema = new Schema<IBotConfig>(
       type: String,
       default: "🔧 <b>Bot Sedang Maintenance</b>\n\nMaaf, bot sedang dalam proses pemeliharaan dan peningkatan sistem.\nSilakan coba lagi beberapa saat kemudian.\n\n<i>Terima kasih atas kesabaran Anda! 🙏</i>",
       trim: true,
+    },
+    // ── VPS Windows Wallpaper ───────────────────────────────────────────────
+    vpsWallpaperBase64: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+    vpsWallpaperUpdatedAt: {
+      type: Date,
+      default: null,
     },
     // ── Affiliate / Referral ────────────────────────────────────────────────
     affiliateEnabled: {
@@ -523,6 +541,8 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
       velocityMaxActionsPerSecond: 5,
       isMaintenance: false,
       maintenanceMessage: "🔧 <b>Bot Sedang Maintenance</b>\n\nMaaf, bot sedang dalam proses pemeliharaan dan peningkatan sistem.\nSilakan coba lagi beberapa saat kemudian.\n\n<i>Terima kasih atas kesabaran Anda! 🙏</i>",
+      vpsWallpaperBase64: "",
+      vpsWallpaperUpdatedAt: null,
       affiliateEnabled: false,
       affiliateCommissionType: "percentage",
       affiliateCommissionValue: 2,
@@ -602,6 +622,12 @@ botConfigSchema.static("getOrCreate", async function (): Promise<IBotConfig> {
     if (!doc.maintenanceMessage) {
       doc.maintenanceMessage = "🔧 <b>Bot Sedang Maintenance</b>\n\nMaaf, bot sedang dalam proses pemeliharaan dan peningkatan sistem.\nSilakan coba lagi beberapa saat kemudian.\n\n<i>Terima kasih atas kesabaran Anda! 🙏</i>";
       needSave = true;
+    }
+    if (doc.vpsWallpaperBase64 === undefined) {
+      doc.vpsWallpaperBase64 = ""; needSave = true;
+    }
+    if (doc.vpsWallpaperUpdatedAt === undefined) {
+      doc.vpsWallpaperUpdatedAt = null; needSave = true;
     }
     if (doc.affiliateEnabled === undefined) {
       doc.affiliateEnabled = false; needSave = true;
