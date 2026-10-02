@@ -644,27 +644,27 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
             fi
 
             cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
-[\\$_cs\\Services\\$_svc]
+[\\\\$_cs\\\\Services\\\\$_svc]
 "Type"=dword:00000001
 "Start"=dword:00000000
 "ErrorControl"=dword:00000001
 "Group"="SCSI miniport"
 "ImagePath"=hex(2):$_image_hex
 
-[\\$_cs\\Services\\$_svc\\Parameters]
+[\\\\$_cs\\\\Services\\\\$_svc\\\\Parameters]
 "BusType"=dword:$_bus
 "DmaRemappingCompatible"=dword:00000000
 
-[\\$_cs\\Services\\$_svc\\Parameters\\PnpInterface]
+[\\\\$_cs\\\\Services\\\\$_svc\\\\Parameters\\\\PnpInterface]
 "5"=dword:00000001
 
-[\\$_cs\\Services\\$_svc\\StartOverride]
+[\\\\$_cs\\\\Services\\\\$_svc\\\\StartOverride]
 "0"=dword:00000000
 
 EOF_VIRTIO_SERVICE
             for _dev in $_devices; do
                 cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
-[\\$_cs\\Control\\CriticalDeviceDatabase\\PCI#VEN_1AF4&DEV_$_dev]
+[\\\\$_cs\\\\Control\\\\CriticalDeviceDatabase\\\\PCI#VEN_1AF4&DEV_$_dev]
 "ClassGUID"="{4D36E97B-E325-11CE-BFC1-08002BE10318}"
 "Service"="$_svc"
 
