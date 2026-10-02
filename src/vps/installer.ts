@@ -263,80 +263,28 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
-chrome_bat_code = r'''    cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]'Ssl3, Tls, Tls11, Tls12' -bor 3072 -bor 12288
-$ProgressPreference = 'SilentlyContinue'
-$ErrorActionPreference = 'Continue'
+chrome_bat_code = r'''    _chrome_dir=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+    _chrome_src="$_chrome_dir/google-chrome-enterprise.msi"
+    _chrome_dst=$(get_path_in_correct_case "$os_dir/Windows/Temp/google-chrome-enterprise.msi")
+    if [ ! -f "$_chrome_src" ]; then
+        error_and_exit "Requested Chrome package is missing from installer initrd."
+    fi
+    mkdir -p "$(dirname "$_chrome_dst")"
+    cp -f "$_chrome_src" "$_chrome_dst"
 
-# 1. Tunggu koneksi internet & DNS dl.google.com siap (maks 60 detik)
-for ($i = 0; $i -lt 30; $i++) {
-    try {
-        $ips = [System.Net.Dns]::GetHostAddresses('dl.google.com')
-        if ($ips -and $ips.Count -gt 0) { break }
-    } catch {}
-    Start-Sleep -Seconds 2
+    cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
+$ErrorActionPreference = 'Stop'
+$outMsi = Join-Path $env:WINDIR 'Temp\\google-chrome-enterprise.msi'
+if (-not (Test-Path $outMsi)) { throw 'Preloaded Chrome MSI is missing' }
+if ((Get-Item $outMsi).Length -lt 10485760) { throw 'Preloaded Chrome MSI is incomplete' }
+
+Start-Service msiserver -ErrorAction SilentlyContinue
+$log = Join-Path $env:TEMP 'chrome-msi-install.log'
+$proc = Start-Process msiexec.exe -ArgumentList "/i `"$outMsi`" /qn /norestart /log `"$log`"" -Wait -PassThru
+if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+    throw "Chrome MSI failed with exit code $($proc.ExitCode)"
 }
 
-$urlMsi = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
-$urlExe = 'https://dl.google.com/dl/chrome/install/ChromeStandaloneSetup64.exe'
-$outMsi = Join-Path $env:TEMP 'google-chrome-enterprise.msi'
-$outExe = Join-Path $env:TEMP 'ChromeStandaloneSetup64.exe'
-
-$wc = New-Object System.Net.WebClient
-$wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
-
-# 2. Unduh Chrome Enterprise MSI (prioritas utama)
-$downloaded = $false
-for ($i = 0; $i -lt 20; $i++) {
-    try {
-        $wc.DownloadFile($urlMsi, $outMsi)
-        if ((Test-Path $outMsi) -and ((Get-Item $outMsi).Length -gt 10485760)) {
-            $downloaded = $true
-            break
-        }
-    } catch {
-        Start-Sleep -Seconds 5
-    }
-}
-
-# 3. Fallback unduh Standalone EXE jika MSI gagal diunduh
-if (-not $downloaded) {
-    for ($i = 0; $i -lt 10; $i++) {
-        try {
-            $wc.DownloadFile($urlExe, $outExe)
-            if ((Test-Path $outExe) -and ((Get-Item $outExe).Length -gt 10485760)) {
-                $downloaded = $true
-                break
-            }
-        } catch {
-            Start-Sleep -Seconds 5
-        }
-    }
-}
-
-# 4. Instalasi Google Chrome
-if (Test-Path $outMsi) {
-    Start-Service msiserver -ErrorAction SilentlyContinue
-    $log = Join-Path $env:TEMP 'chrome-msi-install.log'
-    $proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -Wait -PassThru
-    Start-Sleep -Seconds 2
-    Remove-Item -Force $outMsi -ErrorAction SilentlyContinue
-    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-        try {
-            $wc.DownloadFile($urlExe, $outExe)
-            if (Test-Path $outExe) {
-                Start-Process -FilePath $outExe -ArgumentList "/silent /install" -Wait
-                Remove-Item -Force $outExe -ErrorAction SilentlyContinue
-            }
-        } catch {}
-    }
-} elseif (Test-Path $outExe) {
-    Start-Process -FilePath $outExe -ArgumentList "/silent /install" -Wait
-    Start-Sleep -Seconds 2
-    Remove-Item -Force $outExe -ErrorAction SilentlyContinue
-}
-
-# 5. Pastikan shortcut desktop ada di Public Desktop untuk semua user
 $pf = [Environment]::GetFolderPath('ProgramFiles')
 $pfx = [Environment]::GetFolderPath('ProgramFilesX86')
 $chromePaths = @(
@@ -344,21 +292,20 @@ $chromePaths = @(
     (Join-Path $pfx 'Google\\Chrome\\Application\\chrome.exe')
 )
 $chromeExe = $chromePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
-if ($chromeExe) {
-    $desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
-    $link = Join-Path $desktop 'Google Chrome.lnk'
-    if (-not (Test-Path $link)) {
-        try {
-            $wsh = New-Object -ComObject WScript.Shell
-            $sc = $wsh.CreateShortcut($link)
-            $sc.TargetPath = $chromeExe
-            $sc.Save()
-        } catch {}
-    }
-    Set-Content -Path (Join-Path $env:SystemRoot 'bot-tele-chrome-ready') -Value 'ready' -Encoding Ascii
-    exit 0
+if (-not $chromeExe) { throw 'Chrome executable was not found after MSI install' }
+
+$desktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+$link = Join-Path $desktop 'Google Chrome.lnk'
+if (-not (Test-Path $link)) {
+    try {
+        $wsh = New-Object -ComObject WScript.Shell
+        $sc = $wsh.CreateShortcut($link)
+        $sc.TargetPath = $chromeExe
+        $sc.Save()
+    } catch {}
 }
-exit 1
+Set-Content -Path (Join-Path $env:SystemRoot 'bot-tele-chrome-ready') -Value 'ready' -Encoding Ascii
+Remove-Item -Force $outMsi -ErrorAction SilentlyContinue
 EOF_CHROME_PS1
     cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
@@ -413,6 +360,21 @@ if [ "$image_check_rc" -ne 0 ] && [ "$image_check_rc" -ne 63 ]; then
   echo __VPS_IMAGE_UNREACHABLE__
   exit 1
 fi
+${input.installChrome === true ? `
+CHROME_MSI_URL='https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
+rm -f /root/google-chrome-enterprise.msi
+if ! curl --silent --show-error --location --fail --retry 4 --retry-delay 2 --connect-timeout 15 --max-time 180 \\
+  -o /root/google-chrome-enterprise.msi "$CHROME_MSI_URL"; then
+  echo __VPS_CHROME_PACKAGE_UNREACHABLE__
+  exit 1
+fi
+chrome_size=$(wc -c < /root/google-chrome-enterprise.msi)
+if [ "$chrome_size" -lt 10485760 ]; then
+  echo __VPS_CHROME_PACKAGE_INVALID__
+  exit 1
+fi
+echo "[PATCH] Chrome MSI preloaded: $chrome_size bytes"
+` : ""}
 COMMIT=${quote(INSTALLER_COMMIT)}
 curl --connect-timeout 20 --max-time 180 -fLo /root/reinstall.sh "https://raw.githubusercontent.com/bin456789/reinstall/$COMMIT/reinstall.sh"
 sed -i "/^confhome=/s|/main$|/$COMMIT|" /root/reinstall.sh
@@ -496,11 +458,24 @@ EOF_PASSWORD_BAT
     bats="$bats windows-set-admin-password.bat"'''
 fix_bat_code = r'''    cat << 'EOF_RDP_FIX' > "$os_dir/windows-fix-rdp.bat"
 @echo off
+setlocal EnableExtensions
+set /a BOT_TELE_ATTEMPT=0
+:BOT_TELE_WAIT_SETUP
 if not exist "%SystemRoot%\\bot-tele-password-ready" (
     if exist "%SystemDrive%\\windows-set-admin-password.bat" call "%SystemDrive%\\windows-set-admin-password.bat"
 )
-if not exist "%SystemRoot%\\bot-tele-password-ready" exit /b 1
-if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" exit /b 1
+if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" (
+    if exist "%SystemDrive%\\windows-install-chrome.bat" call "%SystemDrive%\\windows-install-chrome.bat"
+)
+if exist "%SystemRoot%\\bot-tele-password-ready" (
+    if not exist "%SystemRoot%\\bot-tele-chrome-required" goto BOT_TELE_SETUP_READY
+    if exist "%SystemRoot%\\bot-tele-chrome-ready" goto BOT_TELE_SETUP_READY
+)
+set /a BOT_TELE_ATTEMPT+=1
+if %BOT_TELE_ATTEMPT% GEQ 30 exit /b 1
+timeout /t 10 /nobreak >nul 2>&1
+goto BOT_TELE_WAIT_SETUP
+:BOT_TELE_SETUP_READY
 rem Nonaktifkan keharusan tekan Ctrl+Alt+Del saat login
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System" /v DisableCAD /t REG_DWORD /d 1 /f
 reg add "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon" /v DisableCAD /t REG_DWORD /d 1 /f
@@ -820,6 +795,15 @@ EOF_WALLPAPER_INSTALL
 ${chromeBatPatch}
 
 for line in lines:
+    if line.strip() == 'download $confhome/windows-del-gpo.bat $os_dir/windows-del-gpo.bat':
+        new_lines.append(line)
+        new_lines.append(r'''        _gpo_guard=$(mktemp)
+        printf '%s\\n' '@if not exist "%SystemRoot%\\bot-tele-rdp-ready" exit /b 1' > "$_gpo_guard"
+        cat "$os_dir/windows-del-gpo.bat" >> "$_gpo_guard"
+        unix2dos "$_gpo_guard" 2>/dev/null || true
+        cat "$_gpo_guard" > "$os_dir/windows-del-gpo.bat"
+        rm -f "$_gpo_guard"''')
+        continue
     if not gpo_found and line.strip() == 'if $use_gpo; then':
         gpo_found = True
 ${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
@@ -844,7 +828,7 @@ python3 -c '
 with open("/root/reinstall.sh", "r", encoding="utf-8") as f:
     content = f.read()
 target = "chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh"
-replacement = target + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
+replacement = target + ${input.installChrome === true ? '"\\n    cp -f /root/google-chrome-enterprise.msi \\\"$initrd_dir/google-chrome-enterprise.msi\\\""' : '""'} + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
 if target in content:
     with open("/root/reinstall.sh", "w", encoding="utf-8") as f:
         f.write(content.replace(target, replacement, 1))
@@ -871,7 +855,11 @@ echo __VPS_PREPARED__
         const lines = sanitized.trim().split("\n").filter(Boolean);
         const errorDetail = sanitized.includes("__VPS_IMAGE_UNREACHABLE__")
             ? "Image Windows tidak dapat dijangkau dari VPS."
-            : lines.slice(-5).join(" | ").slice(0, 300);
+            : sanitized.includes("__VPS_CHROME_PACKAGE_UNREACHABLE__")
+                ? "Paket Google Chrome tidak dapat diunduh saat persiapan; disk Windows belum dijalankan."
+                : sanitized.includes("__VPS_CHROME_PACKAGE_INVALID__")
+                    ? "Paket Google Chrome yang diunduh tidak valid; disk Windows belum dijalankan."
+                    : lines.slice(-5).join(" | ").slice(0, 300);
         console.error(`[VPS:${input.orderId}] launchWindows failed (code: ${result.code}):\n${sanitized}`);
         return { state, ...(logUrl ? { logUrl } : {}), errorDetail, bootMode: input.bootMode, imageUrl };
     }
