@@ -42,11 +42,11 @@ test("reboot recovery keeps durable intent until scheduling is actually attempte
     assert.equal(order.stage, "monitoring"); assert.equal(writes[0]?.stage, "monitoring");
 });
 
-test("direct buyer VPS skips DigitalOcean creation and installs Windows with supplied SSH access", async () => {
+test("direct buyer VPS fast-path reaches reboot monitoring in one leased worker step", async () => {
     const order = orderFixture({ stage: "queued", accountId: null, dropletId: null, createAttemptedAt: null,
         sourceUsername: "ubuntu", sourcePasswordEncrypted: "encrypted-source", publicIp: "192.0.2.10",
         installerBootMode: null, installerImageUrl: null });
-    let providerCalls = 0; let sshChecks = 0; let installs = 0;
+    let providerCalls = 0; let sshChecks = 0; let installs = 0; let reboots = 0;
     const deps = dependencies({
         client: async () => { providerCalls++; throw new Error("DigitalOcean must not be used"); },
         sourceUsername: () => "ubuntu", sourcePassword: () => "synthetic-source-password",
@@ -65,15 +65,12 @@ test("direct buyer VPS skips DigitalOcean creation and installs Windows with sup
             assert.equal(input.bootMode, "efi"); assert.match(input.imageUrl, /windows2022-efi/);
             return { state: "prepared", bootMode: input.bootMode, imageUrl: input.imageUrl };
         },
+        scheduleInstallerReboot: async () => { reboots++; return "scheduled"; },
     });
 
     await advanceVpsOrder(order, deps);
-    assert.equal(order.stage, "ssh");
-    await advanceVpsOrder(order, deps);
-    assert.equal(order.stage, "installing");
-    await advanceVpsOrder(order, deps);
-    assert.equal(order.stage, "rebooting");
-    assert.equal(providerCalls, 0); assert.equal(sshChecks, 1); assert.equal(installs, 1);
+    assert.equal(order.stage, "monitoring");
+    assert.equal(providerCalls, 0); assert.equal(sshChecks, 1); assert.equal(installs, 1); assert.equal(reboots, 1);
 });
 
 test("persisted Windows image selection skips detection and resolution on retry", async () => {
@@ -91,7 +88,7 @@ test("persisted Windows image selection skips detection and resolution on retry"
         },
     }));
     assert.equal(launches, 1);
-    assert.equal(order.stage, "rebooting");
+    assert.equal(order.stage, "monitoring");
 });
 
 test("installer cannot launch until detected mode and image are durably saved", async () => {
