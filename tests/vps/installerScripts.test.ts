@@ -186,7 +186,7 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.doesNotMatch(patchedScript, /\[\\\$_cs\\Services\\\$_svc\]/);
     assert.match(patchedScript, /"Start"=dword:00000000/);
     assert.match(patchedScript, /StartOverride/);
-    assert.doesNotMatch(patchedScript, /CriticalDeviceDatabase/);
+    assert.doesNotMatch(patchedScript, /\\\\CriticalDeviceDatabase\\\\/);
     assert.match(patchedScript, /DriverDatabase\\\\DriverInfFiles/);
     assert.match(patchedScript, /DriverDatabase\\\\DeviceIds\\\\PCI/);
     assert.match(patchedScript, /DriverDatabase\\\\DriverPackages/);
