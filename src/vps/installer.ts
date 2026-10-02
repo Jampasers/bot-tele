@@ -254,13 +254,19 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; bootMode: WindowsBootMode; imageUrl: string; installChrome?: boolean; wallpaperPath?: string; }
+export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; bootMode: WindowsBootMode; imageUrl: string; installChrome?: boolean; wallpaperPath?: string; wallpaperBase64?: string; }
 export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; bootMode: WindowsBootMode; imageUrl: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
     if (os?.family !== "windows" || (input.bootMode !== "bios" && input.bootMode !== "efi")) throw new InstallerError("validation");
     const imageUrl = validateWindowsImageUrl(input.imageUrl);
     const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
+    const configuredWallpaper = (() => {
+        const value = input.wallpaperBase64?.trim();
+        if (!value || value.length > 5_600_000 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return null;
+        const decoded = Buffer.from(value, "base64");
+        return decoded.length <= 4 * 1024 * 1024 && decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff ? value : null;
+    })();
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
 chrome_bat_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
@@ -329,7 +335,7 @@ EOF_CHROME_INSTALL
     # every later startup script indefinitely.
 '''
 ` : "";
-    const wallpaperB64 = getWallpaperJpegBase64(input.wallpaperPath);
+    const wallpaperB64 = configuredWallpaper ?? getWallpaperJpegBase64(input.wallpaperPath);
     const wallpaperScript = wallpaperB64 ? `
 cat << 'EOF_WALLPAPER_B64' | base64 -d > /root/wallpaper.jpg
 ${wallpaperB64}
