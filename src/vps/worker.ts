@@ -103,38 +103,40 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   }
   if (order.stage === "queued") {
     if (order.service === "install" && order.publicIp && order.sourceUsername && order.sourcePasswordEncrypted) {
+      // Direct-install fast path: persist the SSH intent, then continue in the
+      // same leased worker execution instead of waiting for another poll.
       await stage("ssh", { evidence: "VPS pelanggan diterima. Menunggu koneksi SSH untuk instalasi Windows." });
+    } else {
+      if (order.createAttemptedAt) { await stage("creating"); return; }
+      if (order.service === "purchase" && !order.credentialId) {
+        const capacity = await deps.reserve();
+        if (!capacity) { await save({ lastError: "capacity_unavailable", evidence: "Menunggu kapasitas akun toko. Pesanan belum membuat droplet." }); return; }
+        Object.assign(order, capacity, { reservationActive: true });
+      }
+      const client = await api(); if (!client) return;
+      try {
+        const selected = await client.validateSelection({ region: order.snapshot.region, size: order.snapshot.size, os: order.snapshot.os }, deps.signal);
+        if (selected.size.memory !== order.snapshot.memory || selected.size.vcpus !== order.snapshot.vcpus || selected.size.disk !== order.snapshot.disk || selected.os.image !== order.snapshot.image) throw new DigitalOceanError("validation");
+      } catch (error) {
+        if (error instanceof DigitalOceanError && error.kind === "validation") {
+          await stage("failed", { lastError: "validation_failed", reservationActive: false, evidence: "Spek/region/image tidak tersedia sebelum create. Refund dijadwalkan." }); deps.clearToken(); return;
+        }
+        throw error;
+      }
+      // Name is persisted at checkout. Even a process crash after this write forbids
+      // blindly replaying POST, whether or not the request reached DigitalOcean.
+      await stage("creating", { createAttemptedAt: new Date(deps.now()), evidence: "Request pembuatan droplet sedang diproses." });
+      try {
+        const created = await client.createDroplet({ name: order.createName, region: order.snapshot.region, size: order.snapshot.size,
+          image: order.snapshot.image, userData: buildUserData(deps.password()) }, deps.signal);
+        await stage("droplet", { dropletId: created.id, publicIp: created.publicIp ?? null, reservationActive: false, evidence: "Droplet tercatat. Menunggu status aktif dan IP publik." });
+      } catch (error) {
+        if (error instanceof DigitalOceanError && !error.uncertain) {
+          await stage("failed", { createAttemptedAt: null, reservationActive: false, lastError: "create_rejected", evidence: "DigitalOcean menolak create secara definitif. Refund dijadwalkan." }); deps.clearToken();
+        } else await stage("review", { resumeStage: "creating", lastError: "create_uncertain", evidence: "Hasil create belum pasti. Rekonsiliasi droplet berjalan; tidak ada create ulang/refund otomatis." });
+      }
       return;
     }
-    if (order.createAttemptedAt) { await stage("creating"); return; }
-    if (order.service === "purchase" && !order.credentialId) {
-      const capacity = await deps.reserve();
-      if (!capacity) { await save({ lastError: "capacity_unavailable", evidence: "Menunggu kapasitas akun toko. Pesanan belum membuat droplet." }); return; }
-      Object.assign(order, capacity, { reservationActive: true });
-    }
-    const client = await api(); if (!client) return;
-    try {
-      const selected = await client.validateSelection({ region: order.snapshot.region, size: order.snapshot.size, os: order.snapshot.os }, deps.signal);
-      if (selected.size.memory !== order.snapshot.memory || selected.size.vcpus !== order.snapshot.vcpus || selected.size.disk !== order.snapshot.disk || selected.os.image !== order.snapshot.image) throw new DigitalOceanError("validation");
-    } catch (error) {
-      if (error instanceof DigitalOceanError && error.kind === "validation") {
-        await stage("failed", { lastError: "validation_failed", reservationActive: false, evidence: "Spek/region/image tidak tersedia sebelum create. Refund dijadwalkan." }); deps.clearToken(); return;
-      }
-      throw error;
-    }
-    // Name is persisted at checkout. Even a process crash after this write forbids
-    // blindly replaying POST, whether or not the request reached DigitalOcean.
-    await stage("creating", { createAttemptedAt: new Date(deps.now()), evidence: "Request pembuatan droplet sedang diproses." });
-    try {
-      const created = await client.createDroplet({ name: order.createName, region: order.snapshot.region, size: order.snapshot.size,
-        image: order.snapshot.image, userData: buildUserData(deps.password()) }, deps.signal);
-      await stage("droplet", { dropletId: created.id, publicIp: created.publicIp ?? null, reservationActive: false, evidence: "Droplet tercatat. Menunggu status aktif dan IP publik." });
-    } catch (error) {
-      if (error instanceof DigitalOceanError && !error.uncertain) {
-        await stage("failed", { createAttemptedAt: null, reservationActive: false, lastError: "create_rejected", evidence: "DigitalOcean menolak create secara definitif. Refund dijadwalkan." }); deps.clearToken();
-      } else await stage("review", { resumeStage: "creating", lastError: "create_uncertain", evidence: "Hasil create belum pasti. Rekonsiliasi droplet berjalan; tidak ada create ulang/refund otomatis." });
-    }
-    return;
   }
   if (order.stage === "creating") {
     const client = await api(); if (!client) return;
@@ -158,10 +160,17 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   const sourceUsername = order.service === "install" && order.sourceUsername ? (deps.sourceUsername?.() ?? order.sourceUsername) : "root";
   if (order.stage === "ssh") {
     if (await deps.testSsh({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal)) {
-      if (getOs(order.snapshot.os)?.family === "linux") { await stage("ready", { reservationActive: false, evidence: "Login SSH root berhasil diverifikasi." }); deps.clearToken(); }
-      else await stage("installing", { evidence: "SSH Linux berhasil; menyiapkan installer Windows." });
-    } else if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
-    return;
+      if (getOs(order.snapshot.os)?.family === "linux") {
+        await stage("ready", { reservationActive: false, evidence: "Login SSH root berhasil diverifikasi." });
+        deps.clearToken();
+        return;
+      }
+      // Persist before mutation, but do not burn another worker interval.
+      await stage("installing", { evidence: "SSH Linux berhasil; menyiapkan installer Windows." });
+    } else {
+      if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
+      return;
+    }
   }
   if (order.stage === "installing") {
     let bootMode = order.installerBootMode;
@@ -201,12 +210,17 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password,
       os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
-    if (result.state === "prepared") await stage("rebooting", { evidence: `Installer Windows ${bootMode === "efi" ? "UEFI" : "BIOS/Legacy"} disiapkan. Menjadwalkan reboot instalasi.` });
-    else if (result.state === "failed" || deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) {
-      const err = result.errorDetail ? ` (${result.errorDetail})` : "";
-      await stage("review", { resumeStage: "installing", evidence: `Persiapan installer memerlukan pemeriksaan${err}. Droplet tetap sama dan tidak diinstal ulang otomatis.` });
+    if (result.state === "prepared") {
+      // The reboot call is guarded by a durable remote marker, so it is safe
+      // to schedule it immediately after persisting the rebooting stage.
+      await stage("rebooting", { evidence: `Installer Windows ${bootMode === "efi" ? "UEFI" : "BIOS/Legacy"} disiapkan. Menjadwalkan reboot instalasi.` });
+    } else {
+      if (result.state === "failed" || deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) {
+        const err = result.errorDetail ? ` (${result.errorDetail})` : "";
+        await stage("review", { resumeStage: "installing", evidence: `Persiapan installer memerlukan pemeriksaan${err}. Droplet tetap sama dan tidak diinstal ulang otomatis.` });
+      }
+      return;
     }
-    return;
   }
   if (order.stage === "rebooting") {
     // Keep the persisted rebooting intent until the guarded remote call is attempted.
@@ -239,7 +253,7 @@ export class VpsWorker {
   constructor(private readonly api: Pick<Api, "sendMessage">) {}
   start(): void {
     assertVpsPlatform();
-    this.timer = setInterval(() => void runWithTenant(platformContext(), () => this.tick()), 10_000);
+    this.timer = setInterval(() => void runWithTenant(platformContext(), () => this.tick()), 5_000);
     this.timer.unref();
     void this.tick();
   }
@@ -362,7 +376,8 @@ export class VpsWorker {
       this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Step interrupted; persistent stage retained.`, error);
     } finally {
       clearInterval(heartbeat); clearTimeout(deadline); this.abort.signal.removeEventListener("abort", stop);
-      await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + (order.stage === "review" ? 60_000 : 10_000)) } });
+      const nextDelay = order.stage === "review" ? 60_000 : order.stage === "monitoring" ? 5_000 : 2_000;
+      await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + nextDelay) } });
     }
   }
   async stop(): Promise<void> {
