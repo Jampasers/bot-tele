@@ -589,8 +589,14 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
             virtio_scsi) _required_virtio=vioscsi ;;
             *) _required_virtio= ;;
         esac
-        _virtio_services=${_required_virtio:-"viostor vioscsi"}
-        echo "[PATCH] VirtIO storage preparation: target=${_storage_driver:-unknown}, service(s)=$_virtio_services"
+        if [ -n "$_required_virtio" ]; then
+            _virtio_services="$_required_virtio"
+            _storage_label="$_storage_driver"
+        else
+            _virtio_services="viostor vioscsi"
+            _storage_label="unknown"
+        fi
+        echo "[PATCH] VirtIO storage preparation: target=$_storage_label, service(s)=$_virtio_services"
 
         _virtio_reg=/tmp/bot-tele-virtio-storage.reg
         : > "$_virtio_reg"
