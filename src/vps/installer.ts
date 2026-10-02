@@ -263,8 +263,8 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
     const directory = stateDirectory(input.orderId);
     const chromeBatPatch = input.installChrome === true ? `
-chrome_bat_code = r'''    _chrome_dir=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-    _chrome_src="$_chrome_dir/google-chrome-enterprise.msi"
+chrome_bat_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
+    _chrome_src="$_bot_assets/google-chrome-enterprise.msi"
     _chrome_dst=$(get_path_in_correct_case "$os_dir/Windows/Temp/google-chrome-enterprise.msi")
     if [ ! -f "$_chrome_src" ]; then
         error_and_exit "Requested Chrome package is missing from installer initrd."
@@ -389,8 +389,15 @@ import sys
 
 trans_path = sys.argv[1]
 initrd_dir = os.path.dirname(trans_path)
+assets_dir = os.path.join(initrd_dir, 'configs', 'bot-tele')
+os.makedirs(assets_dir, exist_ok=True)
 if ${wallpaperB64 ? "True" : "False"} and os.path.exists('/root/wallpaper.jpg'):
-    shutil.copyfile('/root/wallpaper.jpg', os.path.join(initrd_dir, 'wallpaper.jpg'))
+    shutil.copyfile('/root/wallpaper.jpg', os.path.join(assets_dir, 'wallpaper.jpg'))
+if ${input.installChrome === true ? "True" : "False"}:
+    chrome_source = '/root/google-chrome-enterprise.msi'
+    if not os.path.exists(chrome_source):
+        raise SystemExit('Requested Chrome package is missing before initrd packing')
+    shutil.copyfile(chrome_source, os.path.join(assets_dir, 'google-chrome-enterprise.msi'))
 
 with open(trans_path, 'r', encoding='utf-8') as f:
     lines = f.read().splitlines()
@@ -398,11 +405,12 @@ with open(trans_path, 'r', encoding='utf-8') as f:
 new_lines = []
 bats_found = False
 gpo_found = False
-wallpaper_copy_code = r'''    _wp_dir=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
-    if [ -f "$_wp_dir/wallpaper.jpg" ]; then
+wallpaper_copy_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
+    _wp_src="$_bot_assets/wallpaper.jpg"
+    if [ -f "$_wp_src" ]; then
         wallpaper_win_dir=$(get_path_in_correct_case "$os_dir/Windows")
         if [ -d "$wallpaper_win_dir" ]; then
-            cp -f "$_wp_dir/wallpaper.jpg" "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
+            cp -f "$_wp_src" "$wallpaper_win_dir/wallpaper.jpg" 2>/dev/null || true
         fi
     fi'''
 password_bat_code = r'''    cat << 'EOF_PASSWORD_PS1' > "$os_dir/windows-set-admin-password.ps1"
@@ -825,7 +833,7 @@ python3 -c '
 with open("/root/reinstall.sh", "r", encoding="utf-8") as f:
     content = f.read()
 target = "chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh"
-replacement = target + ${input.installChrome === true ? '"\\n    cp -f /root/google-chrome-enterprise.msi \\\"$initrd_dir/google-chrome-enterprise.msi\\\""' : '""'} + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
+replacement = target + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
 if target in content:
     with open("/root/reinstall.sh", "w", encoding="utf-8") as f:
         f.write(content.replace(target, replacement, 1))
