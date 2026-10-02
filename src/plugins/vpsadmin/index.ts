@@ -7,12 +7,14 @@ import { VpsOrder } from "../../models/VpsOrder.js";
 import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "../vps/contracts.js";
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
+import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setVpsWallpaperJpeg } from "../../vps/wallpaper.js";
 
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
   .text("💰 Harga VPS / DO Buyer", "vpa_plans_0").row()
   .text("🛠 Harga Install VPS Buyer", `vpa_plan_${DIRECT_INSTALL_PLAN_ID}`).row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
+  .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
   .text("🔙 Admin", "adm_home");
 const known = (value: string | number | null | undefined): string => value === null || value === undefined || value === "" ? "belum diketahui" : String(value).slice(0, 400);
@@ -34,6 +36,7 @@ function shortText(value: string, max = 80): string {
 
 export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
   const deps: VpsUiDependencies = { ...vpsService, ...overrides };
+  const wallpaperUploads = new Map<string, number>();
   const actorOf = (ctx: Context): string => String(ctx.from!.id);
   function authorized(handler: (ctx: Context) => Promise<void>): (ctx: Context) => Promise<void> {
     return async ctx => {
@@ -54,8 +57,52 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   }
   async function home(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
+    wallpaperUploads.delete(actorOf(ctx));
     await vpsReply(ctx, `🖥️ Admin VPS DigitalOcean\n\nPemesanan baru: ${deps.enabled() ? "aktif" : "nonaktif (VPS_ENABLED)"}\n\nAtur token toko dan harga dari database. Token buyer hanya berada sementara di memori dan tidak ditampilkan pada admin.\n\nPemeriksaan akun menggunakan GET tanpa membuat droplet percobaan.`, homeKeyboard());
   }
+  async function wallpaperMenu(ctx: Context): Promise<void> {
+    const status = await getVpsWallpaperStatus();
+    const source = status.custom ? "Custom dari admin" : "Default bawaan bot (Wallpaper.png)";
+    const updated = status.custom && status.updatedAt ? `\nTerakhir diubah: ${vpsDate(status.updatedAt)}` : "";
+    const size = status.custom ? `\nUkuran tersimpan: ${Math.max(1, Math.round(status.bytes / 1024))} KB` : "";
+    const keyboard = new InlineKeyboard()
+      .text("📤 Ganti wallpaper", "vpa_wallpaper_set").row();
+    if (status.custom) keyboard.text("↩️ Pakai wallpaper default", "vpa_wallpaper_reset").row();
+    keyboard.text("🔙 Admin VPS", "vpa_home");
+    await vpsReply(ctx, `🖼 Wallpaper Windows\n\nAktif: ${source}${size}${updated}\n\nWallpaper ini dipakai untuk instalasi Windows berikutnya. Jika custom belum diatur, bot otomatis memakai Wallpaper.png bawaan repo.\n\nDisarankan kirim foto landscape 16:9, misalnya 1920×1080.`, keyboard);
+  }
+
+  async function beginWallpaperUpload(ctx: Context): Promise<void> {
+    const actor = actorOf(ctx);
+    wallpaperUploads.set(actor, Date.now() + 10 * 60_000);
+    await vpsReply(ctx, `📤 Ganti Wallpaper Windows\n\nKirim gambar sebagai <b>Foto</b> ke chat ini dalam 10 menit. Telegram akan mengirim versi JPEG yang sudah dikompres.\n\nMaksimal ${Math.floor(MAX_VPS_WALLPAPER_BYTES / 1024 / 1024)} MB. Disarankan landscape 16:9.\n\nWallpaper baru hanya berlaku untuk proses install Windows yang dimulai setelah pengaturan disimpan.`, new InlineKeyboard().text("Batal", "vpa_wallpaper"));
+  }
+
+  async function saveWallpaperPhoto(ctx: Context): Promise<void> {
+    const photos = ctx.message?.photo;
+    const photo = photos?.[photos.length - 1];
+    if (!photo) throw new Error("Wallpaper photo unavailable");
+    if (photo.file_size && photo.file_size > MAX_VPS_WALLPAPER_BYTES) throw new Error("Wallpaper is too large");
+
+    const telegramFile = await ctx.api.getFile(photo.file_id);
+    if (!telegramFile.file_path) throw new Error("Telegram file path unavailable");
+    const token = process.env.BOT_TOKEN?.trim();
+    if (!token) throw new Error("BOT_TOKEN unavailable");
+
+    const response = await fetch(`https://api.telegram.org/file/bot${token}/${telegramFile.file_path}`, {
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error("Telegram file download failed");
+    const declaredSize = Number(response.headers.get("content-length") || "0");
+    if (declaredSize > MAX_VPS_WALLPAPER_BYTES) throw new Error("Wallpaper is too large");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > MAX_VPS_WALLPAPER_BYTES) throw new Error("Wallpaper is too large");
+
+    await setVpsWallpaperJpeg(buffer);
+    await ctx.reply("✅ Wallpaper Windows custom tersimpan. Install Windows berikutnya akan memakai wallpaper ini.");
+    await wallpaperMenu(ctx);
+  }
+
   async function credentialDetail(ctx: Context, id: string): Promise<void> {
     const credential = await deps.getCredential(actorOf(ctx), id);
     if (!credential) throw new Error("Credential unavailable");
@@ -289,14 +336,62 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
 
   return {
     name: "vpsadmin", version: "1.0.0", internalOnly: true,
-    commands: [{ command: "vpsadmin", description: "[Admin] Token DigitalOcean dan harga VPS" }],
+    commands: [
+      { command: "vpsadmin", description: "[Admin] Token DigitalOcean dan harga VPS" },
+      { command: "vpswallpaper", description: "[Admin] Wallpaper instalasi Windows" },
+    ],
     register(bot: Bot<Context>): void {
       bot.command("vpsadmin", authorized(home));
+      bot.command("vpswallpaper", authorized(async ctx => {
+        const action = ctx.message?.text?.trim().split(/\s+/)[1]?.toLowerCase();
+        if (action === "reset" || action === "default") {
+          wallpaperUploads.delete(actorOf(ctx));
+          await resetVpsWallpaper();
+          await ctx.reply("✅ Wallpaper Windows dikembalikan ke default bawaan bot.");
+          await wallpaperMenu(ctx);
+          return;
+        }
+        if (action === "set" || action === "ganti") {
+          await beginWallpaperUpload(ctx);
+          return;
+        }
+        await wallpaperMenu(ctx);
+      }));
+      bot.on("message:photo", async (ctx, next) => {
+        if (!ctx.from) return next();
+        const actor = String(ctx.from.id);
+        const expiresAt = wallpaperUploads.get(actor);
+        if (!expiresAt) return next();
+        if (!isVpsPlatform() || !isAdmin(ctx) || ctx.chat?.type !== "private") {
+          wallpaperUploads.delete(actor);
+          return next();
+        }
+        if (expiresAt <= Date.now()) {
+          wallpaperUploads.delete(actor);
+          await ctx.reply("Waktu upload wallpaper habis. Buka /vpswallpaper lalu pilih Ganti wallpaper lagi.");
+          return;
+        }
+        wallpaperUploads.delete(actor);
+        try {
+          await saveWallpaperPhoto(ctx);
+        } catch {
+          await ctx.reply("Wallpaper gagal disimpan. Kirim sebagai Foto JPEG/Telegram photo dengan ukuran maksimal 4 MB, lalu coba lagi.", { reply_markup: new InlineKeyboard().text("Coba lagi", "vpa_wallpaper_set").text("Kembali", "vpa_wallpaper") });
+        }
+      });
       bot.callbackQuery(/^vpa_/, authorized(async ctx => {
         const data = ctx.callbackQuery!.data!;
         const actor = actorOf(ctx);
         clearVpsInput(actor);
+        wallpaperUploads.delete(actor);
         if (data === "vpa_home") { await home(ctx); return; }
+        if (data === "vpa_wallpaper") { await wallpaperMenu(ctx); return; }
+        if (data === "vpa_wallpaper_set") { await beginWallpaperUpload(ctx); return; }
+        if (data === "vpa_wallpaper_reset") {
+          await resetVpsWallpaper();
+          await ctx.reply("✅ Wallpaper Windows dikembalikan ke default bawaan bot.");
+          await wallpaperMenu(ctx);
+          return;
+        }
         if (data === "vpa_catalog") { await catalogHome(ctx); return; }
         if (data === "vpa_addregion" || data === "vpa_addsize" || data === "vpa_addos") { await addCatalog(ctx, data === "vpa_addregion" ? "region" : data === "vpa_addsize" ? "size" : "os"); return; }
         if (data === "vpa_addtoken") { await addToken(ctx); return; }
