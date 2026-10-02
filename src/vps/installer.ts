@@ -843,7 +843,7 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
         esac
     done
     bats="windows-fix-rdp.bat$_bot_tele_after"
-    echo "[PATCH] Windows startup order: $bats"''')
+    echo "[PATCH] Windows startup order: $bats" >&2''')
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
