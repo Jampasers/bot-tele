@@ -108,7 +108,8 @@ for (const installChrome of [false, true]) {
         assert.match(batch, /bot-tele-chrome-required/);
         assert.match(batch, /BOT_TELE_WAIT_SETUP/);
         assert.match(batch, /windows-set-admin-password\.bat/);
-        assert.match(batch, /windows-install-chrome\.bat/);
+        if (installChrome) assert.match(batch, /windows-install-chrome\.bat/);
+        else assert.doesNotMatch(batch, /windows-install-chrome\.bat/);
         assert.match(batch, /timeout \/t 10/);
         assert.doesNotMatch(batch, /SetDankaWallpaper|Add-Type/);
         const passwordBatch = readFileSync(path.join(directory, "os", "windows-set-admin-password.bat"), "utf8");
@@ -177,6 +178,7 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.match(script, /timeout 20s cloud-init status --wait/);
     const patch = script.match(/cat << 'EOF_PATCH_PY' > \/root\/patch_trans\.py\r?\n([\s\S]*?)\r?\nEOF_PATCH_PY/)?.[1];
     assert.ok(patch);
+    writeFileSync(path.join(directory, "google-chrome-enterprise.msi"), "synthetic-msi");
     const patched = patchFixture(directory, patch);
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
     const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], { cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true });
