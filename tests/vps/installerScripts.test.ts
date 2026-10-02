@@ -196,6 +196,10 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /VEN_1AF4&DEV_1004&SUBSYS_00081AF4&REV_00/);
     assert.match(patchedScript, /VEN_1AF4&DEV_1048&SUBSYS_11001AF4&REV_01/);
     assert.match(patchedScript, /"Configuration"="\$_drv_conf"/);
+    assert.match(patchedScript, /\\\\DriverDatabase\\\\DriverPackages\\\\\$_drv_label\\\\Descriptors\\\\PCI/);
+    assert.match(patchedScript, /\\\\DriverDatabase\\\\DriverPackages\\\\\$_drv_label\\\\Configurations/);
+    assert.match(patchedScript, /\\\\DriverDatabase\\\\DeviceIds\\\\PCI\\\\\$_pci/);
+    assert.doesNotMatch(patchedScript, /\[\\DriverDatabase\\DriverPackages\\\$_drv_label/);
     assert.match(patchedScript, /bootstat\.dat/);
     assert.match(patchedScript, /missing boot-critical \$_svc\.sys/);
     assert.match(patchedScript, /-maxdepth 1 -type d -iname "\$_svc\.inf_\*"/);

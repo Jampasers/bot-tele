@@ -678,26 +678,32 @@ EOF_VIRTIO_SERVICE
             fi
 
             cat >> "$_virtio_reg" <<EOF_VIRTIO_DDB_BASE
-[\\DriverDatabase\\DriverInfFiles\\$_drv_inf]
+[\\\\DriverDatabase\\\\DriverInfFiles\\\\$_drv_inf]
 @=hex(7):67,00,75,00,65,00,73,00,74,00,6f,00,72,00,2e,00,69,00,6e,00,66,00,5f,00,74,00,6d,00,70,00,00,00,00,00
 "Active"="$_drv_label"
 "Configurations"=hex(7):67,00,75,00,65,00,73,00,74,00,6f,00,72,00,5f,00,63,00,6f,00,6e,00,66,00,00,00,00,00
 
-[\\DriverDatabase\\DriverPackages\\$_drv_label]
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label]
 "Version"=hex:00,ff,09,00,00,00,00,00,7b,e9,36,4d,25,e3,ce,11,bf,c1,08,00,2b,e1,03,18,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
 
-[\\DriverDatabase\\DriverPackages\\$_drv_label\\Configurations\\$_drv_conf]
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label\\\\Configurations]
+
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label\\\\Configurations\\\\$_drv_conf]
 "ConfigFlags"=dword:00000000
 "Service"="$_svc"
+
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label\\\\Descriptors]
+
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label\\\\Descriptors\\\\PCI]
 
 EOF_VIRTIO_DDB_BASE
 
             for _pci in $_pci_ids; do
                 cat >> "$_virtio_reg" <<EOF_VIRTIO_DDB_DEVICE
-[\\DriverDatabase\\DeviceIds\\PCI\\$_pci]
+[\\\\DriverDatabase\\\\DeviceIds\\\\PCI\\\\$_pci]
 "$_drv_inf"=hex:01,ff,00,00
 
-[\\DriverDatabase\\DriverPackages\\$_drv_label\\Descriptors\\PCI\\$_pci]
+[\\\\DriverDatabase\\\\DriverPackages\\\\$_drv_label\\\\Descriptors\\\\PCI\\\\$_pci]
 "Configuration"="$_drv_conf"
 
 EOF_VIRTIO_DDB_DEVICE
