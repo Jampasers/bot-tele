@@ -249,8 +249,49 @@ export class VpsWorker {
   private readonly abort = new AbortController();
   private ticking = false;
   private readonly warnings = new ThrottledWarningLogger();
-  private readonly concurrency = boundedEnv("VPS_CONCURRENCY", 2, 1, 5);
+  private readonly concurrency = boundedEnv("VPS_CONCURRENCY", 4, 1, 8);
+  private paymentReconciliation: Promise<void> | null = null;
   constructor(private readonly api: Pick<Api, "sendMessage">) {}
+
+  private kickPaymentReconciliation(): void {
+    if (this.paymentReconciliation || this.abort.signal.aborted) return;
+    const job = reconcileVpsPayments({ signal: this.abort.signal })
+      .catch(error => this.warnings.warn("vps-payments", "[VPS] Payment reconciliation deferred; provisioning continues.", error));
+    this.paymentReconciliation = job;
+    void job.finally(() => {
+      if (this.paymentReconciliation === job) this.paymentReconciliation = null;
+    });
+  }
+
+  private async leaseOrder(leaseId: string, priorityOnly: boolean): Promise<IVpsOrder | null> {
+    const now = new Date();
+    const update = { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } };
+    const options = { sort: { nextRunAt: 1, createdAt: 1 }, returnDocument: "after" as const };
+
+    if (priorityOnly) {
+      return VpsOrder.findOneAndUpdate({
+        tenantId: "platform",
+        paymentStatus: "paid",
+        nextRunAt: { $lte: now },
+        stage: { $in: ["queued", "ssh", "installing", "rebooting"] },
+        $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }],
+      }, update, options).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
+    }
+
+    return VpsOrder.findOneAndUpdate({
+      tenantId: "platform",
+      paymentStatus: "paid",
+      nextRunAt: { $lte: now },
+      $and: [
+        { $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }] },
+        { $or: [
+          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
+          { rebootState: { $in: ["requested", "submitting", "running"] } },
+        ] },
+      ],
+    }, update, options).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
+  }
+
   start(): void {
     assertVpsPlatform();
     this.timer = setInterval(() => void runWithTenant(platformContext(), () => this.tick()), 5_000);
@@ -263,15 +304,15 @@ export class VpsWorker {
     this.ticking = true;
     try {
       buyerTokens.sweep();
-      await reconcileVpsPayments({ signal: this.abort.signal });
+      // Payment polling can involve slow external merchant APIs. Never block
+      // already-paid provisioning behind reconciliation of unrelated invoices.
+      this.kickPaymentReconciliation();
+
       while (this.tasks.size < this.concurrency && !this.abort.signal.aborted) {
         const leaseId = randomUUID();
-        const order = await VpsOrder.findOneAndUpdate({ tenantId: "platform", paymentStatus: "paid", nextRunAt: { $lte: new Date() },
-          $and: [ { $or: [{ lockUntil: null }, { lockUntil: { $lt: new Date() } }] }, { $or: [
-            { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
-            { rebootState: { $in: ["requested", "submitting", "running"] } },
-          ] } ],
-        }, { $set: { lockOwner: leaseId, lockUntil: new Date(Date.now() + 120_000) } }, { sort: { nextRunAt: 1 }, returnDocument: "after" }).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
+        // First reserve capacity for user-visible provisioning stages so a new
+        // paid order cannot be starved by frequent monitoring/review polling.
+        const order = await this.leaseOrder(leaseId, true) ?? await this.leaseOrder(leaseId, false);
         if (!order) break;
         const task = this.process(order).catch(error => { this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Worker step deferred`, error); });
         this.tasks.add(task); void task.finally(() => this.tasks.delete(task));
@@ -385,6 +426,8 @@ export class VpsWorker {
     if (this.timer) clearInterval(this.timer);
     this.abort.abort(); buyerTokens.clear();
     while (this.ticking) await new Promise(resolve => setTimeout(resolve, 25));
-    await Promise.allSettled(this.tasks); buyerTokens.clear();
+    await Promise.allSettled(this.tasks);
+    if (this.paymentReconciliation) await Promise.allSettled([this.paymentReconciliation]);
+    buyerTokens.clear();
   }
 }
