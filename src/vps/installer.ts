@@ -573,6 +573,328 @@ EOF_RDP_FIX
     unix2dos "$os_dir/windows-fix-rdp.bat" 2>/dev/null || true
     bats="$bats windows-fix-rdp.bat"'''
 
+# A Hyper-V-built DD image can contain VirtIO packages in DriverStore without
+# having the boot-critical storage service enabled. The target KVM then falls
+# into WinRE before any Windows startup batch can run. Prime both storage
+# drivers offline while the DD image is mounted, and fail before reboot if the
+# target explicitly needs a driver that is absent from the image.
+virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/Windows/System32/config/SYSTEM")
+    if [ -f "$_system_hive" ]; then
+        _virtio_store=$(get_path_in_correct_case "$os_dir/Windows/System32/DriverStore/FileRepository")
+        _virtio_drivers=$(get_path_in_correct_case "$os_dir/Windows/System32/drivers")
+        _storage_driver=$(get_drivers "/sys/block/$xda" 2>/dev/null | grep -E '^(virtio_blk|virtio_scsi)
+# customization must not abort SetupComplete before the VPS has networking.
+wallpaper_bat_code = r'''    cat << 'EOF_WALLPAPER_PS1' > "$os_dir/danka-wallpaper.ps1"
+$ErrorActionPreference = 'Stop'
+$wallpaper = Join-Path $env:SystemRoot 'wallpaper.jpg'
+if (-not (Test-Path -LiteralPath $wallpaper)) { exit 0 }
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name Wallpaper -Value $wallpaper
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name WallpaperStyle -Value '10'
+Set-ItemProperty -LiteralPath 'HKCU:\\Control Panel\\Desktop' -Name TileWallpaper -Value '0'
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public class DankaWallpaper {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SystemParametersInfo(int action, int param, string value, int flags);
+}
+'@
+[DankaWallpaper]::SystemParametersInfo(0x0014, 0, $wallpaper, 3) | Out-Null
+EOF_WALLPAPER_PS1
+    cat << 'EOF_WALLPAPER_INSTALL' > "$os_dir/windows-set-wallpaper.bat"
+@echo off
+rem ========================================================
+rem PASANG WALLPAPER KUSTOM (DANKA STORE)
+rem ========================================================
+if exist "%SystemRoot%\\wallpaper.jpg" (
+    copy /y "%SystemRoot%\\wallpaper.jpg" "%SystemDrive%\\Wallpaper.jpg" >nul 2>&1
+    takeown /f "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" /a >nul 2>&1
+    icacls "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" /grant Administrators:F >nul 2>&1
+    copy /y "%SystemRoot%\\wallpaper.jpg" "%SystemRoot%\\Web\\Wallpaper\\Windows\\img0.jpg" >nul 2>&1
+    del /f /q "%SystemRoot%\\Web\\4K\\Wallpaper\\Windows\\*.*" >nul 2>&1
+
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v DesktopImagePath /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v DesktopImageUrl /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v LockScreenImagePath /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PersonalizationCSP" /v LockScreenImageUrl /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+
+    reg load HKU\\DefaultUser "%SystemDrive%\\Users\\Default\\NTUSER.DAT" >nul 2>&1
+    if not errorlevel 1 (
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v Wallpaper /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v WallpaperStyle /t REG_SZ /d "10" /f >nul 2>&1
+        reg add "HKU\\DefaultUser\\Control Panel\\Desktop" /v TileWallpaper /t REG_SZ /d "0" /f >nul 2>&1
+        reg unload HKU\\DefaultUser >nul 2>&1
+    )
+
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v Wallpaper /t REG_SZ /d "%SystemRoot%\\wallpaper.jpg" /f >nul 2>&1
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v WallpaperStyle /t REG_SZ /d "10" /f >nul 2>&1
+    reg add "HKU\\.DEFAULT\\Control Panel\\Desktop" /v TileWallpaper /t REG_SZ /d "0" /f >nul 2>&1
+
+    reg add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce" /v SetDankaWallpaper /t REG_SZ /d "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File %SystemDrive%\\danka-wallpaper.ps1" /f >nul 2>&1
+)
+
+del "%~f0"
+EOF_WALLPAPER_INSTALL
+    unix2dos "$os_dir/danka-wallpaper.ps1" 2>/dev/null || true
+    unix2dos "$os_dir/windows-set-wallpaper.bat" 2>/dev/null || true
+    bats="$bats windows-set-wallpaper.bat"'''
+
+${chromeBatPatch}
+
+for line in lines:
+    if not gpo_found and line.strip() == 'if $use_gpo; then':
+        gpo_found = True
+${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
+${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
+    new_lines.append(line)
+    if not bats_found and line.strip() == 'bats=':
+        bats_found = True
+        new_lines.append(virtio_boot_fix_code)
+        new_lines.append(password_bat_code)
+        new_lines.append(fix_bat_code)
+
+if not bats_found or not gpo_found:
+    raise SystemExit('Windows setup hook not found; refusing incomplete installer patch')
+
+with open(trans_path, 'w', encoding='utf-8') as f:
+    f.write('\\n'.join(new_lines) + '\\n')
+print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', gpo=' + str(gpo_found))
+EOF_PATCH_PY
+
+python3 -c '
+with open("/root/reinstall.sh", "r", encoding="utf-8") as f:
+    content = f.read()
+target = "chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh"
+replacement = target + "\\n    python3 /root/patch_trans.py \\\"$initrd_dir/trans.sh\\\""
+if target in content:
+    with open("/root/reinstall.sh", "w", encoding="utf-8") as f:
+        f.write(content.replace(target, replacement, 1))
+    print("[PATCH] Hook patch_trans.py aktif di reinstall.sh")
+else:
+    raise SystemExit("Target hook string not found in reinstall.sh")
+'
+
+bash /root/reinstall.sh dd \\
+  --img ${quote(imageUrl)} \\
+  --username administrator \\
+  --rdp-port 3389 \\
+  --password ${quote(input.windowsPassword)} </dev/null
+touch "$state/prepared"
+trap - EXIT
+echo __VPS_PREPARED__
+`;
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root", command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s", stdin: script, timeoutMs: 15 * 60_000, mutation: true }, signal);
+    const sanitized = redactInstallerOutput(result.output, [input.password, input.windowsPassword, passwordBase64, imageUrl]);
+    const logUrl = extractInstallerLogUrl(sanitized, input.ip);
+    const state = result.code === 0 && sanitized.includes("__VPS_PREPARED__") ? "prepared"
+        : result.code === 0 && sanitized.includes("__VPS_RUNNING__") ? "running" : "failed";
+    if (state === "failed") {
+        const lines = sanitized.trim().split("\n").filter(Boolean);
+        const errorDetail = sanitized.includes("__VPS_IMAGE_UNREACHABLE__")
+            ? "Image Windows tidak dapat dijangkau dari VPS."
+            : lines.slice(-5).join(" | ").slice(0, 300);
+        console.error(`[VPS:${input.orderId}] launchWindows failed (code: ${result.code}):\n${sanitized}`);
+        return { state, ...(logUrl ? { logUrl } : {}), errorDetail, bootMode: input.bootMode, imageUrl };
+    }
+    return { state, ...(logUrl ? { logUrl } : {}), bootMode: input.bootMode, imageUrl };
+}
+
+export async function scheduleInstallerReboot(input: { ip: string; password: string; username?: string; orderId: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<"scheduled" | "already_scheduled" | "failed"> {
+    const directory = stateDirectory(input.orderId);
+    const script = `set -eu
+state=${quote(directory)}
+test -f "$state/prepared" || { echo __VPS_REBOOT_FAILED__; exit 1; }
+if ! mkdir "$state/reboot-requested" 2>/dev/null; then
+  if [ -f "$state/reboot-failed" ]; then echo __VPS_REBOOT_FAILED__; else echo __VPS_REBOOT_ALREADY__; fi
+  exit 0
+fi
+if (sleep 2 && reboot) >/dev/null 2>&1 & then echo __VPS_REBOOT_SCHEDULED__;
+elif shutdown -r +1; then echo __VPS_REBOOT_SCHEDULED__;
+else touch "$state/reboot-failed"; echo __VPS_REBOOT_FAILED__; exit 1; fi
+`;
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.password, username: input.username ?? "root", command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s", stdin: script, timeoutMs: 20_000, mutation: true }, signal);
+    if (result.code === 0 && result.output.includes("__VPS_REBOOT_SCHEDULED__")) return "scheduled";
+    if (result.code === 0 && result.output.includes("__VPS_REBOOT_ALREADY__")) return "already_scheduled";
+    return "failed";
+}
+
+export async function checkTcpPort(ip: string, port: number, signal?: AbortSignal): Promise<boolean> {
+    validIp(ip);
+    return new Promise((resolve) => {
+        if (signal?.aborted) { resolve(false); return; }
+        let finished = false;
+        const socket = createConnection({ host: ip, port });
+        const finish = (open: boolean): void => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); socket.destroy(); resolve(open); };
+        const abort = () => finish(false), timer = setTimeout(() => finish(false), 5000);
+        signal?.addEventListener("abort", abort, { once: true });
+        socket.once("error", () => finish(false));
+        if (port === 3389) {
+            socket.once("connect", () => {
+                const pdu = Buffer.from([
+                    0x03, 0x00, 0x00, 0x13, 0x0e, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00, 0x03, 0x00, 0x00, 0x00
+                ]);
+                socket.write(pdu);
+            });
+            socket.on("data", (chunk: Buffer) => {
+                if (chunk.length >= 4 && chunk[0] === 0x03 && chunk[1] === 0x00) finish(true);
+                else if (chunk.length > 0) finish(true);
+            });
+        } else {
+            socket.once("connect", () => finish(true));
+        }
+    });
+}
+async function discoverInstallerLogUrl(input: { ip: string; windowsPassword: string }, signal: AbortSignal | undefined, deps: InstallerDependencies): Promise<string | undefined> {
+    const result = await (deps.ssh ?? executeSsh)({ ip: input.ip, password: input.windowsPassword, username: "administrator",
+        command: "tr ' ' '\\n' < /proc/cmdline | grep -E '^extra_web_(path|port)='", timeoutMs: 5000 }, signal);
+    const path = result.output.match(/^extra_web_path=['"]?(\/[A-Za-z0-9]{8})['"]?\s*$/m)?.[1];
+    const port = result.output.match(/^extra_web_port=['"]?(\d+)['"]?\s*$/m)?.[1] ?? "80";
+    return result.code === 0 && path ? extractInstallerLogUrl(`http://IP:${port}${path}`, input.ip) : undefined;
+}
+async function checkInstallerLogPage(url: string, signal: AbortSignal | undefined, deps: InstallerDependencies): Promise<boolean> {
+    const controller = new AbortController(), abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, 5000);
+    try {
+        if (signal?.aborted) return false;
+        const response = await (deps.fetch ?? fetch)(url, { redirect: "error", signal: controller.signal });
+        if (!response.ok || !response.body) { void response.body?.cancel().catch(() => {}); return false; }
+        const reader = response.body.getReader(); let body = "";
+        try {
+            for (;;) {
+                const part = await reader.read(); if (part.done) return false;
+                body += Buffer.from(part.value).toString("utf8");
+                if (body.includes("<title>Reinstall Logs</title>")) return true;
+                if (body.length > 65536) return false;
+            }
+        } finally { await reader.cancel().catch(() => {}); }
+    } catch { return false; }
+    finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+}
+export interface WindowsInspection { rdpOpen: boolean; loginVerified: false; logState: "ready" | "unavailable"; logUrl?: string; detail: string; }
+/** One bounded poll; the persistent worker owns intervals, consecutive successes, and timeout/recovery policy. */
+export async function inspectWindows(input: { ip: string; windowsPassword: string; logUrl?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInspection> {
+    validIp(input.ip);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    let logUrl = input.logUrl ? extractInstallerLogUrl(input.logUrl, input.ip) : undefined;
+    let logReady = logUrl ? await checkInstallerLogPage(logUrl, signal, deps) : false;
+    if (!logUrl && !logReady) {
+        try {
+            const discovered = await discoverInstallerLogUrl(input, signal, deps);
+            if (discovered) {
+                logUrl = discovered;
+                logReady = await checkInstallerLogPage(logUrl, signal, deps);
+            }
+        } catch { /* Installer SSH can disappear during reboot. */ }
+    }
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    if (logReady) {
+        return {
+            rdpOpen: false,
+            loginVerified: false,
+            logState: "ready",
+            ...(logUrl ? { logUrl } : {}),
+            detail: "Viewer log installer tersedia; instalasi Windows masih dipantau.",
+        };
+    }
+    const rdpOpen = await (deps.tcp ?? checkTcpPort)(input.ip, 3389, signal);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    return {
+        rdpOpen,
+        loginVerified: false,
+        logState: "unavailable",
+        ...(logUrl ? { logUrl } : {}),
+        detail: rdpOpen
+            ? "Port TCP RDP terbuka (NLA & Ctrl+Alt+Del dinonaktifkan otomatis). Login Windows belum diverifikasi."
+            : "RDP belum terjangkau dan viewer log belum tersedia; hasil instalasi belum diketahui.",
+    };
+}
+ | head -n1 || true)
+        case "$_storage_driver" in
+            virtio_blk) _required_virtio=viostor ;;
+            virtio_scsi) _required_virtio=vioscsi ;;
+            *) _required_virtio= ;;
+        esac
+
+        _virtio_reg=/tmp/bot-tele-virtio-storage.reg
+        : > "$_virtio_reg"
+        _virtio_patched=
+        apk add hivex-perl >/dev/null
+
+        for _svc in viostor vioscsi; do
+            _drv=$(get_path_in_correct_case "$_virtio_drivers/$_svc.sys")
+            if [ ! -f "$_drv" ] && [ -d "$_virtio_store" ]; then
+                _staged=$(find "$_virtio_store" -type f -iname "$_svc.sys" -print -quit 2>/dev/null || true)
+                if [ -n "$_staged" ] && [ -f "$_staged" ]; then
+                    cp -f "$_staged" "$_virtio_drivers/$_svc.sys"
+                    _drv="$_virtio_drivers/$_svc.sys"
+                fi
+            fi
+
+            if [ ! -f "$_drv" ]; then
+                if [ "$_required_virtio" = "$_svc" ]; then
+                    apk del hivex-perl >/dev/null 2>&1 || true
+                    error_and_exit "Custom Windows image is missing boot-critical $_svc.sys for target storage driver $_storage_driver."
+                fi
+                continue
+            fi
+
+            if [ "$_svc" = viostor ]; then
+                _bus=00000001
+                _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,74,00,6f,00,72,00,2e,00,73,00,79,00,73,00,00,00'
+                _devices='1001 1042'
+            else
+                _bus=0000000a
+                _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,63,00,73,00,69,00,2e,00,73,00,79,00,73,00,00,00'
+                _devices='1004 1048'
+            fi
+
+            for _cs in ControlSet001 ControlSet002; do
+                if ! hivexregedit --export "$_system_hive" "$_cs" >/dev/null 2>&1; then
+                    continue
+                fi
+                cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
+[\\$_cs\\Services\\$_svc]
+"Type"=dword:00000001
+"Start"=dword:00000000
+"ErrorControl"=dword:00000001
+"Group"="SCSI miniport"
+"ImagePath"=hex(2):$_image_hex
+
+[\\$_cs\\Services\\$_svc\\Parameters]
+"BusType"=dword:$_bus
+"DmaRemappingCompatible"=dword:00000000
+
+[\\$_cs\\Services\\$_svc\\Parameters\\PnpInterface]
+"5"=dword:00000001
+
+[\\$_cs\\Services\\$_svc\\StartOverride]
+"0"=dword:00000000
+
+EOF_VIRTIO_SERVICE
+                for _dev in $_devices; do
+                    cat >> "$_virtio_reg" <<EOF_VIRTIO_DEVICE
+[\\$_cs\\Control\\CriticalDeviceDatabase\\PCI#VEN_1AF4&DEV_$_dev]
+"ClassGUID"="{4D36E97B-E325-11CE-BFC1-08002BE10318}"
+"Service"="$_svc"
+
+EOF_VIRTIO_DEVICE
+                done
+            done
+            _virtio_patched="$_virtio_patched $_svc"
+        done
+
+        if [ -s "$_virtio_reg" ]; then
+            hivexregedit --merge "$_system_hive" "$_virtio_reg"
+        fi
+        apk del hivex-perl >/dev/null 2>&1 || true
+
+        _bootstat=$(get_path_in_correct_case "$os_dir/Windows/bootstat.dat")
+        if [ -f "$_bootstat" ]; then
+            rm -f "$_bootstat"
+        fi
+        echo "[PATCH] VirtIO storage boot drivers prepared:$_virtio_patched target:$_storage_driver"
+    fi'''
+
 # Keep cosmetic setup after the upstream network scripts. A failed optional
 # customization must not abort SetupComplete before the VPS has networking.
 wallpaper_bat_code = r'''    cat << 'EOF_WALLPAPER_PS1' > "$os_dir/danka-wallpaper.ps1"
