@@ -603,9 +603,11 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
         _virtio_patched=
         apk add hivex-perl >/dev/null
 
-        _current_cs=$(hivexget "$_system_hive" '\\Select' Current 2>/dev/null | tr -cd '0-9' || true)
-        [ -n "$_current_cs" ] || _current_cs=1
-        _cs="ControlSet$(printf '%03d' "$_current_cs")"
+        # Avoid reading SYSTEM\\Select with hivexget here. Some full Server
+        # images can make that offline read block for minutes on ntfs-3g.
+        # Upstream reinstall also targets ControlSet001 for offline driver
+        # injection; Windows normally boots that set for this captured image.
+        _cs="ControlSet001"
         echo "[PATCH] VirtIO registry control set: $_cs"
 
         for _svc in $_virtio_services; do

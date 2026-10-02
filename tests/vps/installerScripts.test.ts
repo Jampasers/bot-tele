@@ -188,6 +188,8 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /bootstat\.dat/);
     assert.match(patchedScript, /missing boot-critical \$_svc\.sys/);
     assert.match(patchedScript, /-maxdepth 1 -type d -iname "\$_svc\.inf_\*"/);
+    assert.doesNotMatch(patchedScript, /hivexget .*Select.*Current/);
+    assert.match(patchedScript, /_cs="ControlSet001"/);
     assert.match(patchedScript, /timeout 60s hivexregedit --merge/);
     assert.match(patchedScript, /VirtIO registry merge complete/);
 });
