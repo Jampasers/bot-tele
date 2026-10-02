@@ -641,10 +641,9 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
                 _image_hex='53,00,79,00,73,00,74,00,65,00,6d,00,33,00,32,00,5c,00,64,00,72,00,69,00,76,00,65,00,72,00,73,00,5c,00,76,00,69,00,6f,00,73,00,63,00,73,00,69,00,2e,00,73,00,79,00,73,00,00,00'
             fi
 
-            # The VirtIO package was already staged inside the captured Windows image.
-            # For modern Windows Server we only need to make its storage service boot-critical.
-            # Do not create the legacy per-device boot mapping here: Server 2019 images
-            # may not contain that parent key and hivexregedit refuses to create nested parents.
+            # The VirtIO package is already staged in the captured Windows image.
+            # Make the storage service boot-critical, then add the modern Windows
+            # DriverDatabase association for the target VirtIO PCI IDs.
             cat >> "$_virtio_reg" <<EOF_VIRTIO_SERVICE
 [\\\\$_cs\\\\Services\\\\$_svc]
 "Type"=dword:00000001
@@ -664,6 +663,45 @@ virtio_boot_fix_code = r'''    _system_hive=$(get_path_in_correct_case "$os_dir/
 "0"=dword:00000000
 
 EOF_VIRTIO_SERVICE
+
+            # Windows 8+/Server 2012+ uses SYSTEM\\DriverDatabase instead of
+            # CriticalDeviceDatabase for boot-critical PnP association. Mirror
+            # the virt-v2v/libguestfs approach so Windows can bind the target
+            # VirtIO controller before the system volume is mounted.
+            _drv_inf="guestor.inf"
+            _drv_label="guestor.inf_tmp"
+            _drv_conf="guestor_conf"
+            if [ "$_svc" = viostor ]; then
+                _pci_ids='VEN_1AF4&DEV_1001&SUBSYS_00021AF4&REV_00 VEN_1AF4&DEV_1042&SUBSYS_11001AF4&REV_01'
+            else
+                _pci_ids='VEN_1AF4&DEV_1004&SUBSYS_00081AF4&REV_00 VEN_1AF4&DEV_1048&SUBSYS_11001AF4&REV_01'
+            fi
+
+            cat >> "$_virtio_reg" <<EOF_VIRTIO_DDB_BASE
+[\\DriverDatabase\\DriverInfFiles\\$_drv_inf]
+@=hex(7):67,00,75,00,65,00,73,00,74,00,6f,00,72,00,2e,00,69,00,6e,00,66,00,5f,00,74,00,6d,00,70,00,00,00,00,00
+"Active"="$_drv_label"
+"Configurations"=hex(7):67,00,75,00,65,00,73,00,74,00,6f,00,72,00,5f,00,63,00,6f,00,6e,00,66,00,00,00,00,00
+
+[\\DriverDatabase\\DriverPackages\\$_drv_label]
+"Version"=hex:00,ff,09,00,00,00,00,00,7b,e9,36,4d,25,e3,ce,11,bf,c1,08,00,2b,e1,03,18,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+
+[\\DriverDatabase\\DriverPackages\\$_drv_label\\Configurations\\$_drv_conf]
+"ConfigFlags"=dword:00000000
+"Service"="$_svc"
+
+EOF_VIRTIO_DDB_BASE
+
+            for _pci in $_pci_ids; do
+                cat >> "$_virtio_reg" <<EOF_VIRTIO_DDB_DEVICE
+[\\DriverDatabase\\DeviceIds\\PCI\\$_pci]
+"$_drv_inf"=hex:01,ff,00,00
+
+[\\DriverDatabase\\DriverPackages\\$_drv_label\\Descriptors\\PCI\\$_pci]
+"Configuration"="$_drv_conf"
+
+EOF_VIRTIO_DDB_DEVICE
+            done
             _virtio_patched="$_virtio_patched $_svc"
         done
 
