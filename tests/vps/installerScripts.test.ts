@@ -112,7 +112,11 @@ for (const installChrome of [false, true]) {
         assert.match(batch, /bot-tele-chrome-required/);
         assert.match(batch, /BOT_TELE_WAIT_SETUP/);
         assert.match(batch, /windows-set-netconf-\*\.bat/);
-        assert.match(batch, /bot-tele netconf/);
+        assert.match(batch, /Get-NetAdapter/);
+        assert.match(batch, /netsh interface ipv4 set address/);
+        assert.match(batch, /bot-tele fast netconf/);
+        assert.doesNotMatch(batch, /call "%%~fF"/);
+        assert.doesNotMatch(batch, /Get-WmiObject|Get-CimInstance|wmic/i);
         assert.match(batch, /windows-set-admin-password\.bat/);
         if (installChrome) assert.match(batch, /windows-install-chrome\.bat/);
         else assert.doesNotMatch(batch, /windows-install-chrome\.bat/);
