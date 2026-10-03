@@ -10,6 +10,7 @@
 const BASE_URL = "https://smsbower.page/stubs/handler_api.php";
 
 import { SmsConfig } from "../models/SmsConfig.js";
+import { setTimeout as delay } from "node:timers/promises";
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -116,6 +117,39 @@ async function get(params: Record<string, string>): Promise<string> {
     );
   }
   return res.text();
+}
+
+/** Retry only read-only catalog requests; renting numbers must never be retried. */
+async function getCatalog(action: "getServicesList" | "getCountries"): Promise<string> {
+  const url = buildUrl({ action });
+  const timeoutMs = 15000;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let retryable = false;
+    let httpStatus: number | undefined;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) {
+        httpStatus = response.status;
+        retryable = response.status === 429 || response.status >= 500;
+        await response.body?.cancel();
+        throw new Error(`SMSBower ${action}: HTTP ${response.status}`);
+      }
+      return await response.text();
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "";
+      retryable ||= name === "TimeoutError" || name === "AbortError" || name === "TypeError";
+      if (!retryable || attempt === 3) {
+        // Do not log fetch errors or request URLs, which can contain the API key.
+        const reason = name === "TimeoutError" || name === "AbortError"
+          ? `request timed out after ${timeoutMs / 1000}s`
+          : httpStatus !== undefined ? `HTTP ${httpStatus}` : "network failure";
+        throw new Error(`SMSBower ${action}: ${reason} (${attempt} attempt(s)).`);
+      }
+      console.warn(`   ⚠️  SMSBower ${action}: temporary failure; retrying (${attempt + 1}/3).`);
+      await delay(500 * attempt);
+    }
+  }
+  throw new Error(`SMSBower ${action}: catalog request failed.`);
 }
 
 // ── Provider Data Parser for getPricesV3 ─────────────────────────────────────
@@ -302,116 +336,118 @@ export class SMSBowerService {
     // ── Step 2: Fetch + filter Services ───────────────────────────────────────
     // Actual API response: { "status": "success", "services": [{code, name}, ...] }
     // services[] sits directly at the root level — no nested "data" wrapper.
-    try {
-      const apiKey = process.env["SMSBOWER_API_KEY"];
-      if (!apiKey) throw new Error("SMSBOWER_API_KEY is not set.");
+    const loadServices = async (): Promise<void> => {
+      try {
+        const svcText = await getCatalog("getServicesList");
 
-      const svcUrl = `${BASE_URL}?` + new URLSearchParams({
-        api_key: apiKey,
-        action:  "getServicesList",
-      }).toString();
+        const parsed = JSON.parse(svcText) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== "object") throw new Error("Services: invalid API response shape.");
 
-      const svcRes  = await fetch(svcUrl, { signal: AbortSignal.timeout(8000) });
-      const svcText = await svcRes.text();
-      console.log(`   📄  Raw services response (first 200 chars): ${svcText.substring(0, 200)}`);
+        let raw: CachedService[] = [];
 
-      const parsed = JSON.parse(svcText) as Record<string, unknown>;
+        /** Type guard: checks an unknown value has {code:string, name:string} */
+        const isSvcObj = (v: unknown): v is CachedService =>
+          typeof v === "object" && v !== null &&
+          typeof (v as Record<string, unknown>)["code"] === "string" &&
+          typeof (v as Record<string, unknown>)["name"] === "string";
 
-      let raw: CachedService[] = [];
+        // ─ Primary shape: { status:"success", services:[{code,name},...] } ───────
+        if (parsed["status"] === "success" && Array.isArray(parsed["services"])) {
+          raw = (parsed["services"] as unknown[])
+            .filter(isSvcObj)
+            .map((v) => ({ code: v.code, name: v.name }));
 
-      /** Type guard: checks an unknown value has {code:string, name:string} */
-      const isSvcObj = (v: unknown): v is CachedService =>
-        typeof v === "object" && v !== null &&
-        typeof (v as Record<string, unknown>)["code"] === "string" &&
-        typeof (v as Record<string, unknown>)["name"] === "string";
+        // ─ Legacy shape: { status:"success", data:{ services:{code:name,...} } } ─
+        } else if (
+          parsed["status"] === "success" &&
+          typeof parsed["data"] === "object" && parsed["data"] !== null
+        ) {
+          const data   = parsed["data"] as Record<string, unknown>;
+          const svcMap = data["services"];
 
-      // ─ Primary shape: { status:"success", services:[{code,name},...] } ───────
-      if (parsed["status"] === "success" && Array.isArray(parsed["services"])) {
-        raw = (parsed["services"] as unknown[])
-          .filter(isSvcObj)
-          .map((v) => ({ code: v.code, name: v.name }));
+          if (Array.isArray(svcMap)) {
+            raw = (svcMap as unknown[]).filter(isSvcObj).map((v) => ({ code: v.code, name: v.name }));
+          } else if (typeof svcMap === "object" && svcMap !== null) {
+            raw = Object.entries(svcMap as Record<string, unknown>)
+              .filter(([, v]) => typeof v === "string")
+              .map(([code, name]) => ({ code, name: name as string }));
+          }
 
-      // ─ Legacy shape: { status:"success", data:{ services:{code:name,...} } } ─
-      } else if (
-        parsed["status"] === "success" &&
-        typeof parsed["data"] === "object" && parsed["data"] !== null
-      ) {
-        const data   = parsed["data"] as Record<string, unknown>;
-        const svcMap = data["services"];
+        // ─ Bare array fallback: [{code,name},...] ─────────────────────────────
+        } else if (Array.isArray(parsed)) {
+          raw = (parsed as unknown[]).filter(isSvcObj).map((v) => ({ code: v.code, name: v.name }));
 
-        if (Array.isArray(svcMap)) {
-          raw = (svcMap as unknown[]).filter(isSvcObj).map((v) => ({ code: v.code, name: v.name }));
-        } else if (typeof svcMap === "object" && svcMap !== null) {
-          raw = Object.entries(svcMap as Record<string, unknown>)
-            .filter(([, v]) => typeof v === "string")
-            .map(([code, name]) => ({ code, name: name as string }));
+        } else {
+          throw new Error("Services: unrecognised API response shape.");
         }
 
-      // ─ Bare array fallback: [{code,name},...] ─────────────────────────────
-      } else if (Array.isArray(parsed)) {
-        raw = (parsed as unknown[]).filter(isSvcObj).map((v) => ({ code: v.code, name: v.name }));
+        if (raw.length === 0) throw new Error("Services: API returned an empty or invalid catalog.");
 
-      } else {
-        console.error("   ⚠️  Services: unrecognised API response shape. Raw:", svcText.substring(0, 300));
+        // Store ALL services for the admin panel BEFORE whitelist filtering.
+        SMSBowerService.allServices = [...raw].sort((a, b) => a.name.localeCompare(b.name));
+
+        // Whitelist filter + DB-order sort (public user cache)
+        SMSBowerService.cachedServices = raw
+          .filter((s) => allowedSvc.includes(s.code))
+          .sort((a, b) => allowedSvc.indexOf(a.code) - allowedSvc.indexOf(b.code));
+
+        console.log(`   ✅  Services: ${SMSBowerService.cachedServices.length} active / ${raw.length} total from API`);
+      } catch (err) {
+        console.warn("   ⚠️  Failed to load services:", err instanceof SyntaxError ? "Invalid JSON response." : err instanceof Error ? err.message : "Catalog request failed.");
+        SMSBowerService.cachedServices = SMSBowerService.allServices
+          .filter((s) => allowedSvc.includes(s.code))
+          .sort((a, b) => allowedSvc.indexOf(a.code) - allowedSvc.indexOf(b.code));
+        console.warn(`   SMSBower: ${SMSBowerService.allServices.length ? "using previous services catalog" : "services unavailable; reload after API connectivity recovers"}.`);
       }
-
-      // Store ALL services for the admin panel BEFORE whitelist filtering.
-      SMSBowerService.allServices = [...raw].sort((a, b) => a.name.localeCompare(b.name));
-
-      // Whitelist filter + DB-order sort (public user cache)
-      SMSBowerService.cachedServices = raw
-        .filter((s) => allowedSvc.includes(s.code))
-        .sort((a, b) => allowedSvc.indexOf(a.code) - allowedSvc.indexOf(b.code));
-
-      console.log(`   ✅  Services: ${SMSBowerService.cachedServices.length} active / ${raw.length} total from API`);
-    } catch (err) {
-      console.error("   ⚠️  Failed to load services:", err);
-    }
+    };
 
     // ── Step 3: Fetch + filter Countries ──────────────────────────────────────
     // Expected response shape (object keyed by country code):
     // { "0": { "id": 0, "eng": "Russia", ... }, "6": { "id": 6, "eng": "Indonesia", ... }, ... }
-    try {
-      const apiKey = process.env["SMSBOWER_API_KEY"];
-      if (!apiKey) throw new Error("SMSBOWER_API_KEY is not set.");
+    const loadCountries = async (): Promise<void> => {
+      try {
+        const ctrJson: unknown = JSON.parse(await getCatalog("getCountries"));
+        if (!ctrJson || typeof ctrJson !== "object") throw new Error("Countries: invalid API response shape.");
 
-      const ctrUrl = `${BASE_URL}?` + new URLSearchParams({
-        api_key: apiKey,
-        action:  "getCountries",
-      }).toString();
+        // The API returns either an object or an array — handle both.
+        const entries: Array<[string, unknown]> =
+          Array.isArray(ctrJson)
+            ? ctrJson.map((item, i) => [String(i), item])
+            : Object.entries(ctrJson as Record<string, unknown>);
 
-      const ctrRes  = await fetch(ctrUrl, { signal: AbortSignal.timeout(8000) });
-      const ctrJson = await ctrRes.json() as unknown;
-
-      // The API returns either an object or an array — handle both.
-      const entries: Array<[string, unknown]> =
-        Array.isArray(ctrJson)
-          ? ctrJson.map((item, i) => [String(i), item])
-          : Object.entries(ctrJson as Record<string, unknown>);
-
-      const mapped: CachedCountry[] = [];
-      for (const [, value] of entries) {
-        const v = value as Record<string, unknown>;
-        if (
-          (typeof v["id"]  === "number" || typeof v["id"]  === "string") &&
-          typeof v["eng"] === "string"
-        ) {
-          mapped.push({ id: String(v["id"]), name: v["eng"] as string });
+        const mapped: CachedCountry[] = [];
+        for (const [, value] of entries) {
+          if (!value || typeof value !== "object") continue;
+          const v = value as Record<string, unknown>;
+          if (
+            (typeof v["id"]  === "number" || typeof v["id"]  === "string") &&
+            typeof v["eng"] === "string"
+          ) {
+            mapped.push({ id: String(v["id"]), name: v["eng"] as string });
+          }
         }
+
+        if (mapped.length === 0) throw new Error("Countries: API returned an empty or invalid catalog.");
+
+        // Store ALL countries for the admin panel BEFORE whitelist filtering.
+        SMSBowerService.allCountries = [...mapped].sort((a, b) => a.name.localeCompare(b.name));
+
+        // Whitelist filter + DB-order sort (public user cache)
+        SMSBowerService.cachedCountries = mapped
+          .filter((c) => allowedCtr.includes(c.id))
+          .sort((a, b) => allowedCtr.indexOf(a.id) - allowedCtr.indexOf(b.id));
+
+        console.log(`   ✅  Countries: ${SMSBowerService.cachedCountries.length} active / ${mapped.length} total from API`);
+      } catch (err) {
+        console.warn("   ⚠️  Failed to load countries:", err instanceof SyntaxError ? "Invalid JSON response." : err instanceof Error ? err.message : "Catalog request failed.");
+        SMSBowerService.cachedCountries = SMSBowerService.allCountries
+          .filter((c) => allowedCtr.includes(c.id))
+          .sort((a, b) => allowedCtr.indexOf(a.id) - allowedCtr.indexOf(b.id));
+        console.warn(`   SMSBower: ${SMSBowerService.allCountries.length ? "using previous countries catalog" : "countries unavailable; reload after API connectivity recovers"}.`);
       }
+    };
 
-      // Store ALL countries for the admin panel BEFORE whitelist filtering.
-      SMSBowerService.allCountries = [...mapped].sort((a, b) => a.name.localeCompare(b.name));
-
-      // Whitelist filter + DB-order sort (public user cache)
-      SMSBowerService.cachedCountries = mapped
-        .filter((c) => allowedCtr.includes(c.id))
-        .sort((a, b) => allowedCtr.indexOf(a.id) - allowedCtr.indexOf(b.id));
-
-      console.log(`   ✅  Countries: ${SMSBowerService.cachedCountries.length} active / ${mapped.length} total from API`);
-    } catch (err) {
-      console.error("   ⚠️  Failed to load countries:", err);
-    }
+    await Promise.all([loadServices(), loadCountries()]);
 
     // Clear price cache so stale per-country prices are refetched on next use.
     SMSBowerService.priceCache.clear();
