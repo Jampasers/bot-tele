@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Client } from "ssh2";
 import { DigitalOceanClient, DigitalOceanError, type FetchLike } from "../../src/vps/digitalOcean.js";
 import { buildUserData, detectWindowsBootMode, generatePassword, getOs, getWallpaperJpegBase64, inspectWindows, INSTALLER_COMMIT, launchWindows, OS_CATALOG,
-    extractInstallerLogUrl, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "../../src/vps/installer.js";
+    extractInstallerLogUrl, inspectSsh, InstallerError, scheduleInstallerReboot, testSsh, type SshExecutor, type SshRunInput } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 const account = (uuid = "user-one", team = "shared-team") => ({ account: { uuid, team: { uuid: team, name: "Shop" }, status: "active", status_message: "", droplet_limit: 2 } });
@@ -261,6 +262,68 @@ test("Linux readiness proves authenticated root command; TCP RDP never claims Wi
         tcp: async () => true, ssh: async () => { throw new Error("SSH should not be tried after RDP opens"); },
     });
     assert.equal(result.rdpOpen, true); assert.equal(result.loginVerified, false); assert.match(result.detail, /RDP merespons dari luar/);
+});
+
+test("SSH diagnostics distinguish routing, TCP, authentication and handshake failures without leaking raw errors", async () => {
+    const cases = [
+        [{ code: "ENETUNREACH" }, "network_unreachable"],
+        [{ code: "EHOSTUNREACH" }, "network_unreachable"],
+        [{ code: "EADDRNOTAVAIL" }, "network_unreachable"],
+        [{ code: "ECONNREFUSED" }, "connection_refused"],
+        [{ code: "ETIMEDOUT" }, "connection_timeout"],
+        [{ code: "ECONNRESET" }, "connection_reset"],
+        [{ code: "EPIPE" }, "connection_reset"],
+        [{ level: "client-authentication" }, "authentication"],
+        [{ level: "client-timeout" }, "handshake_timeout"],
+        [{ code: "UNKNOWN", level: "client-ssh" }, "ssh"],
+    ] as const;
+    for (const [metadata, reason] of cases) {
+        const result = await inspectSsh({ ip: "203.0.113.10", password: fakePassword }, undefined, { ssh: async () => {
+            throw Object.assign(new Error(`unsafe server output: ${fakePassword} dop_v1_private_test_token`), metadata);
+        } });
+        assert.equal(result.ready, false);
+        if (!result.ready) assert.equal(result.reason, reason);
+        assert.doesNotMatch(JSON.stringify(result), /unsafe server output|dop_v1_private_test_token/);
+        assert.ok(!JSON.stringify(result).includes(fakePassword));
+    }
+    const sanitized = await inspectSsh({ ip: "203.0.113.10", password: fakePassword }, undefined, {
+        ssh: async () => { throw new InstallerError("ssh", false, "network_unreachable"); },
+    });
+    assert.equal(sanitized.ready, false);
+    if (!sanitized.ready) assert.equal(sanitized.reason, "network_unreachable");
+});
+
+test("SSH permission failures omit remote output and cancelled probes remain cancelled", async () => {
+    const result = await inspectSsh({ ip: "203.0.113.10", password: fakePassword }, undefined, {
+        ssh: async () => ({ code: 1, output: `permission denied ${fakePassword}` }),
+    });
+    assert.equal(result.ready, false);
+    if (!result.ready) assert.equal(result.reason, "permission");
+    assert.ok(!JSON.stringify(result).includes(fakePassword));
+    const abort = new AbortController(); abort.abort();
+    await assert.rejects(inspectSsh({ ip: "203.0.113.10", password: fakePassword }, abort.signal, {
+        ssh: async () => { throw new Error("aborted check must not connect"); },
+    }), (error: unknown) => error instanceof InstallerError && error.kind === "cancelled");
+    const interrupted = new AbortController();
+    await assert.rejects(inspectSsh({ ip: "203.0.113.10", password: fakePassword }, interrupted.signal, {
+        ssh: async () => { interrupted.abort(); return { code: 0, output: "__VPS_SSH_READY__" }; },
+    }), (error: unknown) => error instanceof InstallerError && error.kind === "cancelled");
+});
+
+test("real SSH executor distinguishes a pre-connect timeout from a timeout after TCP connects", async t => {
+    let tcpConnected = false;
+    t.mock.method(Client.prototype, "connect", function(this: Client) {
+        if (tcpConnected) this.emit("connect");
+        this.emit("error", Object.assign(new Error("unsafe timeout data"), { level: "client-timeout" }));
+        return this;
+    });
+    const before = await inspectSsh({ ip: "203.0.113.10", password: fakePassword });
+    assert.equal(before.ready, false);
+    if (!before.ready) assert.equal(before.reason, "connection_timeout");
+    tcpConnected = true;
+    const after = await inspectSsh({ ip: "203.0.113.10", password: fakePassword });
+    assert.equal(after.ready, false);
+    if (!after.ready) assert.equal(after.reason, "handshake_timeout");
 });
 
 test("installer log discovery reads only random path metadata, restricts host and confirms viewer title", async () => {
