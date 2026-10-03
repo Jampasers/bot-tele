@@ -9,6 +9,7 @@ export interface VpsUiPlan {
   sizeSlug: string;
   regions: string[];
   globalPrice?: number | null;
+  serviceGlobalPrice?: number | null;
   sourceMode?: "digitalocean" | "direct";
   osPrices: { os: string; label: string; price: number | null; family?: "linux" | "windows" }[];
   priceMatrix?: { region: string; os: string; price: number }[];

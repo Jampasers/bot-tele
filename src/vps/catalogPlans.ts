@@ -13,6 +13,8 @@ export function catalogPlanId(service: VpsServiceType, size: string): string {
 }
 
 export const DIRECT_INSTALL_PLAN_ID = catalogPlanId("install", "__buyer-owned-vps__");
+export const INSTALL_DO_GLOBAL_PRICE_ID = catalogPlanId("install", "__service-global-do__");
+export const INSTALL_DIRECT_GLOBAL_PRICE_ID = catalogPlanId("install", "__service-global-direct__");
 
 export function supportsWindows(size: PlanCatalog["sizes"][number]): boolean {
   const ram = /^(\d+(?:\.\d+)?)\s*(GB|MB)$/i.exec(size.ram.trim());
@@ -56,6 +58,7 @@ export function catalogPlans(catalog: PlanCatalog, serviceType?: VpsServiceType)
   const services: VpsServiceType[] = serviceType ? [serviceType] : ["purchase", "install"];
   return services.flatMap(service => catalog.sizes.map(size => ({
     id: catalogPlanId(service, size.slug), name: `${size.cpu} vCPU · ${size.ram}`, serviceType: service,
+    ...(service === "install" ? { sourceMode: "digitalocean" as const } : {}),
     sizeSlug: size.slug, sizeLabel: `${size.cpu} vCPU · ${size.ram} RAM · ${size.disk} SSD`,
     providerPrice: size.price, transfer: size.transfer,
     regions: catalog.regions.map(region => region.slug),
@@ -68,11 +71,11 @@ export function catalogPlans(catalog: PlanCatalog, serviceType?: VpsServiceType)
 export function planPrice(plan: Pick<VpsUiPlan, "osPrices" | "priceMatrix" | "catalogManaged" | "globalPrice">, region: string, os: string): number | undefined {
   if (!plan.osPrices.some(item => item.os === os)) return undefined;
   const amount = plan.priceMatrix?.find(item => item.region === region && item.os === os)?.price
-    ?? (plan.catalogManaged ? undefined : plan.osPrices.find(item => item.os === os)?.price) ?? plan.globalPrice;
+    ?? plan.serviceGlobalPrice ?? (plan.catalogManaged ? undefined : plan.osPrices.find(item => item.os === os)?.price) ?? plan.globalPrice;
   return typeof amount === "number" && Number.isSafeInteger(amount) && amount > 0 ? amount : undefined;
 }
 
-export function mergeCatalogPrices(plan: VpsUiPlan, saved?: Pick<VpsUiPlan, "enabled" | "priceMatrix" | "globalPrice">): VpsUiPlan {
-  return { ...plan, globalPrice: saved?.globalPrice ?? null, enabled: saved?.enabled ?? true, priceMatrix: (saved?.priceMatrix ?? [])
+export function mergeCatalogPrices(plan: VpsUiPlan, saved?: Pick<VpsUiPlan, "enabled" | "priceMatrix" | "globalPrice">, serviceGlobalPrice?: number | null): VpsUiPlan {
+  return { ...plan, globalPrice: saved?.globalPrice ?? null, serviceGlobalPrice: serviceGlobalPrice ?? null, enabled: saved?.enabled ?? true, priceMatrix: (saved?.priceMatrix ?? [])
     .filter(item => plan.regions.includes(item.region) && plan.osPrices.some(os => os.os === item.os)) };
 }

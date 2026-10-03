@@ -2,7 +2,7 @@ import { Bot, Context, InlineKeyboard } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
 import { isAdmin } from "../../core/admin.js";
 import { vpsService } from "../../vps/service.js";
-import { DIRECT_INSTALL_PLAN_ID, planPrice } from "../../vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, planPrice } from "../../vps/catalogPlans.js";
 import { VpsOrder } from "../../models/VpsOrder.js";
 import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "../vps/contracts.js";
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
@@ -12,6 +12,8 @@ import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setV
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
   .text("💰 Harga VPS / DO Buyer", "vpa_plans_0").row()
+  .text("💰 Global Jasa Install DO", `vpa_global_service_${INSTALL_DO_GLOBAL_PRICE_ID}`).row()
+  .text("💰 Global Jasa Install VPS Buyer", `vpa_global_service_${INSTALL_DIRECT_GLOBAL_PRICE_ID}`).row()
   .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
@@ -135,8 +137,10 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   }
   async function planDetail(ctx: Context, id: string): Promise<void> {
     const plan = await getPlan(id);
+    const serviceGlobalId = plan.serviceType === "install" ? (plan.sourceMode === "direct" ? INSTALL_DIRECT_GLOBAL_PRICE_ID : INSTALL_DO_GLOBAL_PRICE_ID) : null;
+    const displayedGlobal = serviceGlobalId ? plan.serviceGlobalPrice : plan.globalPrice;
     const keyboard = new InlineKeyboard()
-      .text(`Harga global: ${plan.globalPrice ? vpsPrice(plan.globalPrice) : "Belum diatur"}`, `vpa_global_${id}`).row();
+      .text(`Harga global: ${displayedGlobal ? vpsPrice(displayedGlobal) : "Belum diatur"}`, serviceGlobalId ? `vpa_global_service_${serviceGlobalId}` : `vpa_global_${id}`).row();
     if (plan.id === DIRECT_INSTALL_PLAN_ID) {
       plan.osPrices.forEach((os, index) => {
         const price = planPrice(plan, "external", os.os);
@@ -149,7 +153,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     }
     plan.regions.forEach((region, index) => keyboard.text(plan.regionLabels?.[region] ?? region, `vpa_os_${id}_${index}_0`).row());
     keyboard.text(plan.enabled ? "Nonaktifkan spek" : "Aktifkan spek", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Spek & layanan", plan.sourceMode === "direct" ? "vpa_plans_direct_0" : "vpa_plans_0");
-    await vpsReply(ctx, `💰 ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\n\nHarga global berlaku untuk semua region dan OS pada spek ini. Harga khusus region/OS tetap diprioritaskan. Pilih region untuk mengatur pengecualian.`, keyboard);
+    await vpsReply(ctx, `💰 ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\n\n${serviceGlobalId ? "Harga global layanan berlaku untuk semua spek, region, dan OS." : "Harga global berlaku untuk semua region dan OS pada spek ini."} Harga khusus region/OS tetap diprioritaskan.`, keyboard);
   }
   async function osPrices(ctx: Context, id: string, regionIndex: number, offset: number): Promise<void> {
     const plan = await getPlan(id), region = plan.regions[regionIndex];
@@ -530,6 +534,18 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
             await planDetail(priceCtx, plan.id);
           });
           await vpsReply(ctx, `Kirim harga global Rupiah untuk ${plan.sizeLabel ?? plan.name}. Berlaku untuk semua region dan OS. Angka bulat 1-100000000.`, new InlineKeyboard().text("Batal", `vpa_plan_${plan.id}`));
+          return;
+        }
+        const globalService = /^vpa_global_service_([A-Za-z0-9-]{1,40})$/.exec(data);
+        if (globalService) {
+          const id = globalService[1]!;
+          if (id !== INSTALL_DO_GLOBAL_PRICE_ID && id !== INSTALL_DIRECT_GLOBAL_PRICE_ID) throw new Error("Invalid service price");
+          input(actor, async (priceCtx, value) => {
+            await deps.updatePlan(actor, id, { globalPrice: numeric(value, 1, 100_000_000) });
+            await priceCtx.reply("Harga global jasa install tersimpan untuk semua spek, region, dan OS.");
+            await home(priceCtx);
+          });
+          await vpsReply(ctx, `Kirim harga global ${id === INSTALL_DO_GLOBAL_PRICE_ID ? "Jasa Install DO Buyer" : "Jasa Install VPS Buyer"}. Harga ini berlaku untuk semua spek, region, dan OS.`, new InlineKeyboard().text("Batal", "vpa_home"));
           return;
         }
         const pricePage = /^vpa_os_([A-Za-z0-9-]{1,40})_(\d{1,3})_(\d{1,3})$/.exec(data);

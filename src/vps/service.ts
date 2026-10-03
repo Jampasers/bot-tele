@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
 import { defaultVpsCatalog, getVpsCatalog } from "./catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, directInstallPlans, supportsWindows, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, catalogPlans, directInstallPlan, directInstallPlans, supportsWindows, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
@@ -49,8 +49,11 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (existing) return orderDto(existing);
   const catalog = await getVpsCatalog();
   const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType, enabled: true }).lean();
+  const serviceGlobal = plan?.serviceType === "install"
+    ? await VpsPlan.findOne({ _id: input.direct ? INSTALL_DIRECT_GLOBAL_PRICE_ID : INSTALL_DO_GLOBAL_PRICE_ID, tenantId: "platform" }).lean()
+    : null;
   const os = getOs(input.os);
-  const price = plan ? vpsPlanPrice({ ...plan, osPrices: plan.osPrices.map(item => ({ ...item, price: item.price ?? null })) }, input.region, input.os) : undefined;
+  const price = plan ? vpsPlanPrice({ ...plan, serviceGlobalPrice: serviceGlobal?.globalPrice ?? null, osPrices: plan.osPrices.map(item => ({ ...item, price: item.price ?? null })) }, input.region, input.os) : undefined;
   if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket, region, atau harga tidak tersedia.");
   const directPlan = directInstallPlans(catalog).some(item => item.id === plan._id) || plan._id === DIRECT_INSTALL_PLAN_ID;
   if (Boolean(input.direct) !== directPlan) throw new Error("Sumber VPS tidak sesuai paket.");
@@ -223,9 +226,10 @@ export const vpsService: VpsUiDependencies = {
     assertVpsPlatform();
     const catalog = await getVpsCatalog();
     const saved = await VpsPlan.find({ tenantId: "platform", ...(serviceType ? { serviceType } : {}),
-      $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }] }).lean();
+      $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }, { _id: INSTALL_DO_GLOBAL_PRICE_ID }, { _id: INSTALL_DIRECT_GLOBAL_PRICE_ID }] }).lean();
+    const servicePrice = { doPrice: saved.find(row => row._id === INSTALL_DO_GLOBAL_PRICE_ID)?.globalPrice ?? null, directPrice: saved.find(row => row._id === INSTALL_DIRECT_GLOBAL_PRICE_ID)?.globalPrice ?? null };
     const plans = [...catalogPlans(catalog, serviceType), ...(!serviceType || serviceType === "install" ? directInstallPlans(catalog) : [])]
-      .map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)));
+      .map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id), plan.sourceMode === "direct" ? servicePrice.directPrice : plan.sourceMode === "digitalocean" ? servicePrice.doPrice : null));
     return plans.filter(plan => includeDisabled || plan.enabled);
   },
   acceptBuyerToken,
@@ -321,6 +325,15 @@ export const vpsService: VpsUiDependencies = {
     }
     const catalog = await getVpsCatalog();
 
+    if (id === INSTALL_DO_GLOBAL_PRICE_ID || id === INSTALL_DIRECT_GLOBAL_PRICE_ID) {
+      if (input.globalPrice === undefined) throw new Error("Harga global layanan wajib diisi.");
+      await VpsPlan.updateOne({ _id: id, tenantId: "platform" }, { $set: {
+        name: id === INSTALL_DIRECT_GLOBAL_PRICE_ID ? "Global Jasa Install VPS Buyer" : "Global Jasa Install DO Buyer",
+        serviceType: "install", sizeSlug: id === INSTALL_DIRECT_GLOBAL_PRICE_ID ? "__service-global-direct__" : "__service-global-do__",
+        regions: ["*"], osPrices: [], priceMatrix: [], globalPrice: input.globalPrice, catalogManaged: false, enabled: true,
+      } }, { upsert: true, runValidators: true });
+      return;
+    }
     if (id === DIRECT_INSTALL_PLAN_ID) {
       const stored = await VpsPlan.findOne({ _id: DIRECT_INSTALL_PLAN_ID, tenantId: "platform", serviceType: "install" }).lean();
       const plan = directInstallPlan(catalog, stored ? {

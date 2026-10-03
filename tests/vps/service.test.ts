@@ -7,7 +7,7 @@ import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans } from "../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, catalogPlans, directInstallPlans } from "../../src/vps/catalogPlans.js";
 import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
 import { getOs } from "../../src/vps/installer.js";
 import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
@@ -164,7 +164,7 @@ test("VPS schemas expose no buyer token persistence field; backup exports encryp
 test("service menu derives DO specs plus a separate buyer-owned install service", async t => {
   env(t);
   t.mock.method(VpsPlan, "find", (filter: Record<string, unknown>) => {
-    assert.deepEqual(filter.$or, [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }]);
+    assert.deepEqual(filter.$or, [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }, { _id: INSTALL_DO_GLOBAL_PRICE_ID }, { _id: INSTALL_DIRECT_GLOBAL_PRICE_ID }]);
     return query(() => [{ _id: "old-id", name: "Old custom package", enabled: true, priceMatrix: [] }]);
   });
   const plans = await platform(() => vpsService.listPlans("install"));
