@@ -16,6 +16,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install offline registry test tools
+        run: sudo apt-get update && sudo apt-get install -y libwin-hivex-perl
       - run: npm ci
       - run: npm run build
       - run: npm test

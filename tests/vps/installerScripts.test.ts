@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
 import { InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
@@ -22,6 +23,9 @@ const powershell = process.platform === "win32" ? interpreter([
     path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
 ], ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output PS_PARSER_READY"], /PS_PARSER_READY/) : undefined;
 const scriptSkip = !python ? "Python 3 is required to execute the generated installer patch" : !bash ? "Bash is required to emit the Windows setup files" : false;
+// hivexregedit prints its help successfully with exit code 1.
+const hivexProbe = spawnSync("hivexregedit", ["--help"], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+const hivexregedit = /Usage:[\s\S]*hivexregedit --merge/.test(`${hivexProbe.stdout}${hivexProbe.stderr}`) ? "hivexregedit" : undefined;
 
 // These are the upstream setup hooks and batch registration sequence. Nothing
 // from the real installer (downloads, disks, network or registry) is executed.
@@ -257,6 +261,119 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /bot-tele-rdp-ready/);
     assert.match(patchedScript, /Windows startup order:/);
     assert.match(patchedScript, /bats="windows-fix-rdp\.bat\$_bot_tele_after"/);
+});
+
+test("LocalGPO startup registration merges into an empty SOFTWARE hive and preserves existing keys on retry", {
+    skip: !python ? "Python 3 is required" : !hivexregedit ? "hivexregedit is required for the offline registry regression" : false,
+}, async t => {
+    const directory = temporaryDirectory(t);
+    const fixture = transFixture.replace('    bats="$bats windows-del-gpo.bat"',
+        '    bats="$bats windows-del-gpo.bat"\n    download $confhome/windows-del-gpo.bat $os_dir/windows-del-gpo.bat');
+    const patched = patchFixture(directory, await installerPatch(directory, false, false), fixture);
+    assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+    const registry = readFileSync(path.join(directory, "trans.sh"), "utf8")
+        .match(/cat > "\$_gpo_reg" <<'EOF_BOT_GPO_REG'\r?\n([\s\S]*?)\r?\nEOF_BOT_GPO_REG/)?.[1];
+    assert.ok(registry, "the patched upstream GPO hook must emit its registry payload");
+    const hive = path.join(directory, "SOFTWARE");
+    writeFileSync(hive, Buffer.from(readFileSync(new URL("./fixtures/minimal-software-hive.base64", import.meta.url), "utf8"), "base64"));
+    const importRegistry = (name: string, content: string): void => {
+        const file = path.join(directory, name);
+        writeFileSync(file, content);
+        const result = spawnSync(hivexregedit!, ["--merge", hive, file], {
+            encoding: "utf8", timeout: 10_000, windowsHide: true,
+        });
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    };
+    const exportRegistry = (): string => {
+        const result = spawnSync(hivexregedit!, ["--export", hive, "\\", "--unsafe-printable-strings"], {
+            encoding: "utf8", timeout: 10_000, windowsHide: true,
+        });
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        return result.stdout;
+    };
+
+    // No Microsoft, Policies, or startup parents exist in this hive.
+    importRegistry("startup.reg", registry);
+    const registered = exportRegistry();
+    for (const startup of [
+        "\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\\0\\0",
+        "\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup\\0\\0",
+        "\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup\\0\\0",
+    ]) {
+        assert.ok(registered.includes(`[${startup}]`), `missing startup entry ${startup}`);
+    }
+    assert.equal((registered.match(/^"Script"=str\(1\):"C:\\windows-fix-rdp\.bat"$/gm) ?? []).length, 3);
+    assert.equal((registered.match(/^"FileSysPath"=str\(1\):"C:\\Windows\\System32\\GroupPolicy\\Machine"$/gm) ?? []).length, 3);
+    assert.equal((registered.match(/"GpNetworkStartTimeoutPolicyValue"=dword:00000001/g) ?? []).length, 2);
+    importRegistry("existing.reg", String.raw`[\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup]
+"ExistingSetting"="keep-parent-value"
+
+[\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\7]
+"Script"="keep-other-script"
+
+[\Unrelated]
+"Setting"=dword:12345678
+`);
+    const beforeRetry = exportRegistry();
+    importRegistry("startup.reg", registry);
+    assert.equal(exportRegistry(), beforeRetry, "retry must preserve parent values and unrelated startup entries");
+
+    // Reproduce the old halted installer: missing ancestors and unescaped paths.
+    const oldRegistry = registry.split(/\n\s*\n/)
+        .filter(section => section.trim().split(/\r?\n/).length > 1)
+        .join("\n\n").replaceAll("\\\\", "\\");
+    const stopped = path.join(directory, "stopped-trans.sh");
+    writeFileSync(stopped, readFileSync(path.join(directory, "trans.sh"), "utf8").replace(registry, oldRegistry));
+    const recovered = spawnSync(python!, [
+        fileURLToPath(new URL("../../scripts/repair-windows-gpo.py", import.meta.url)), stopped,
+    ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    assert.equal(recovered.status, 0, `${recovered.stdout}\n${recovered.stderr}`);
+    const recoveredRegistry = readFileSync(stopped, "utf8")
+        .match(/cat > "\$_gpo_reg" <<'EOF_BOT_GPO_REG'\r?\n([\s\S]*?)\r?\nEOF_BOT_GPO_REG/)?.[1];
+    assert.ok(recoveredRegistry);
+    writeFileSync(hive, Buffer.from(readFileSync(new URL("./fixtures/minimal-software-hive.base64", import.meta.url), "utf8"), "base64"));
+    importRegistry("recovered.reg", recoveredRegistry);
+    assert.equal(exportRegistry(), registered, "recovery must produce the same registry values as a newly generated installer");
+});
+
+test("stopped installer recovery changes only the GPO payload and keeps its original backup on retry", {
+    skip: !python && "Python 3 is required",
+}, t => {
+    const directory = temporaryDirectory(t);
+    const script = path.join(directory, "trans.sh");
+    const original = String.raw`#!/bin/sh
+echo keep-before
+cat > "$_gpo_reg" <<'EOF_BOT_GPO_REG'
+[\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0]
+"FileSysPath"="C:\Windows\System32\GroupPolicy\Machine"
+
+[\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup\0\0]
+"Script"="C:\windows-fix-rdp.bat"
+EOF_BOT_GPO_REG
+echo keep-after
+`;
+    writeFileSync(script, original, { mode: 0o700 });
+    const runRepair = () => spawnSync(python!, [
+        fileURLToPath(new URL("../../scripts/repair-windows-gpo.py", import.meta.url)), script,
+    ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+    const first = runRepair();
+    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+    const repaired = readFileSync(script, "utf8");
+    assert.ok(repaired.startsWith("#!/bin/sh\necho keep-before\n"));
+    assert.ok(repaired.endsWith("EOF_BOT_GPO_REG\necho keep-after\n"));
+    assert.ok(repaired.includes(String.raw`[\Microsoft]`));
+    assert.ok(repaired.includes(String.raw`[\Microsoft\Windows\CurrentVersion\Group Policy\Scripts\Startup]`));
+    assert.ok(repaired.includes(String.raw`"Script"="C:\\windows-fix-rdp.bat"`));
+    assert.ok(repaired.includes(String.raw`"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"`));
+    assert.equal(readFileSync(script + ".bot-tele-gpo.bak", "utf8"), original);
+    const second = runRepair();
+    assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+    assert.equal(readFileSync(script, "utf8"), repaired);
+    assert.equal(readFileSync(script + ".bot-tele-gpo.bak", "utf8"), original);
+
+    writeFileSync(script, "echo unmatched-installer\n");
+    assert.notEqual(runRepair().status, 0);
+    assert.equal(readFileSync(script, "utf8"), "echo unmatched-installer\n");
 });
 
 test("wallpaper and Chrome asset lookup is POSIX-safe across initrd switch_root", { skip: !python && "Python 3 is required" }, async t => {
