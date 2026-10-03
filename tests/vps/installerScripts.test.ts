@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -34,7 +35,11 @@ set -eu
 os_dir="$PWD/os"
 win_dir=Windows
 use_gpo=false
+distro=fixture
 unix2dos() { :; }
+sync() { :; }
+reboot() { :; }
+error_and_exit() { printf '%s\\n' "$*" >&2; exit 1; }
 get_path_in_correct_case() { printf '%s\\n' "$1"; }
 bats=
 cat << 'EOF_NETWORK' > "$os_dir/windows-set-netconf-eth0.bat"
@@ -47,6 +52,10 @@ if $use_gpo; then
 fi
 printf '%s\\n' "$bats"
 printf '%s\\n' "$win_dir" > "$PWD/win-dir.txt"
+# swapoff -a
+# umount ?
+sync
+reboot
 `;
 
 function temporaryDirectory(t: TestContext): string {
@@ -151,7 +160,75 @@ for (const installChrome of [false, true]) {
     });
 }
 
-for (const anchor of ["bats=\n", "if $use_gpo; then\n"]) {
+test("Windows CMD adapter lookup selects the MAC match and active hardware fallback", {
+    skip: scriptSkip || (process.platform !== "win32" && "Native CMD adapter regression requires Windows"),
+}, async t => {
+    const { directory } = await emitWindowsFiles(t, true, false);
+    const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
+    const commands = batch.split(/\r?\n/).filter(line => /^\s*for \/f %%I in \('powershell\.exe /.test(line));
+    assert.equal(commands.length, 2);
+    // Keep the generated CMD -> PowerShell boundary intact. Only the adapter
+    // provider is replaced, so no real network interface is read or changed.
+    const adapterStub = "function Get-NetAdapter { [CmdletBinding()] param([string[]]$Name,[switch]$IncludeHidden) " +
+        "@([pscustomobject]@{MacAddress='AA-BB-CC-DD-EE-FF';HardwareInterface=$true;Status='Up';ifIndex=17}," +
+        "[pscustomobject]@{MacAddress='00-11-22-33-44-01';HardwareInterface=$true;Status='Disabled';ifIndex=1}," +
+        "[pscustomobject]@{MacAddress='00-11-22-33-44-02';HardwareInterface=$false;Status='Up';ifIndex=2}," +
+        "[pscustomobject]@{MacAddress='00-11-22-33-44-05';HardwareInterface=$true;Status='Up';ifIndex=5}) }; ";
+    const cmd = process.env.ComSpec ?? path.join(process.env.SystemRoot!, "System32", "cmd.exe");
+    for (const [index, expected] of [17, 5].entries()) {
+        const command = commands[index]!.replace('-Command "', `-Command "${adapterStub}`);
+        assert.notEqual(command, commands[index]);
+        const probe = ["@echo off", "setlocal EnableExtensions", 'set "mac_addr=aa:bb:cc:dd:ee:ff"',
+            'set "BOT_TELE_IFINDEX="', command, "echo __IFINDEX=%BOT_TELE_IFINDEX%__", ""].join("\r\n");
+        writeFileSync(path.join(directory, "adapter-probe.bat"), probe);
+        const result = spawnSync(cmd, ["/d", "/c", "adapter-probe.bat"], {
+            cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        });
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        assert.equal(result.stderr, "");
+        assert.equal(result.stdout.trim(), `__IFINDEX=${expected}__`);
+    }
+});
+
+test("Windows CMD logs missing network prerequisites for each incomplete configuration", {
+    skip: scriptSkip || (process.platform !== "win32" && "Native CMD netconf regression requires Windows"),
+}, async t => {
+    const { directory } = await emitWindowsFiles(t, false, false);
+    const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
+    const start = batch.indexOf('set "BOT_TELE_NETCONF_READY="');
+    const end = batch.indexOf("set /a BOT_TELE_ATTEMPT=0", start);
+    assert.ok(start >= 0 && end > start);
+    const networkBlock = batch.slice(start, end);
+    assert.equal((networkBlock.match(/\bnetsh interface ipv4\b/g) ?? []).length, 3);
+    // Echo the generated netsh commands into the fixture log instead of
+    // executing them. The real conditional logic and log redirection remain.
+    const harmlessBlock = networkBlock.replace(/\bnetsh interface ipv4\b/g, "echo __NETSH__ interface ipv4");
+    const config: Record<string, string> = { BOT_TELE_IFINDEX: "17", ipv4_addr: "192.0.2.10/24", ipv4_gateway: "192.0.2.1" };
+    const cmd = process.env.ComSpec ?? path.join(process.env.SystemRoot!, "System32", "cmd.exe");
+    for (const missing of [...Object.keys(config), null]) {
+        const log = `netconf-${missing ?? "complete"}.log`;
+        const probe = ["@echo off", "setlocal EnableExtensions", `set "BOT_TELE_LOG=${log}"`,
+            ...Object.entries(config).map(([key, value]) => `set "${key}=${key === missing ? "" : value}"`),
+            'set "ipv4_dns1="', 'set "ipv4_dns2="', harmlessBlock, ""].join("\r\n");
+        writeFileSync(path.join(directory, "netconf-probe.bat"), probe);
+        const result = spawnSync(cmd, ["/d", "/c", "netconf-probe.bat"], {
+            cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        });
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        assert.equal(result.stderr, "");
+        const output = readFileSync(path.join(directory, log), "utf8");
+        if (missing) {
+            assert.match(output, /could not resolve target adapter\/config; continuing setup/);
+            assert.doesNotMatch(output, /__NETSH__/);
+        } else {
+            assert.match(output, /fast netconf ifIndex=17 ip=192\.0\.2\.10\/24/);
+            assert.match(output, /__NETSH__ interface ipv4 set address name=17 static 192\.0\.2\.10\/24/);
+            assert.doesNotMatch(output, /could not resolve/);
+        }
+    }
+});
+
+for (const anchor of ["bats=\n", "if $use_gpo; then\n", "# swapoff -a\n# umount ?\nsync\nreboot\n"]) {
     test(`installer refuses an upstream script missing ${anchor.trim()}`, { skip: !python && "Python 3 is required to execute the generated installer patch" }, async t => {
         const directory = temporaryDirectory(t);
         const original = transFixture.replace(anchor, "");
@@ -228,6 +305,132 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.match(script, /Policies[\\\\/]+Microsoft[\\\\/]+Windows[\\\\/]+System[\\\\/]+Scripts[\\\\/]+Startup[\\\\/]+0[\\\\/]+0/);
     assert.match(script, /GpNetworkStartTimeoutPolicyValue/);
     assert.match(script, /Registering LocalGPO startup bootstrap/);
+});
+
+test("Chrome checksum survives initrd packing and copying into Windows", { skip: scriptSkip }, async t => {
+    const { directory } = await emitWindowsFiles(t, true, false);
+    const expected = createHash("sha256").update(readFileSync(path.join(directory, "source-chrome.msi"))).digest("hex");
+    for (const root of [path.join(directory, "configs", "bot-tele"), path.join(directory, "os", "Windows", "Temp")]) {
+        assert.equal(readFileSync(path.join(root, "google-chrome-enterprise.sha256"), "utf8"), `${expected}\n`);
+        assert.equal(createHash("sha256").update(readFileSync(path.join(root, "google-chrome-enterprise.msi"))).digest("hex"), expected);
+    }
+});
+
+for (const damage of ["package", "manifest"] as const) {
+    test(`Chrome ${damage} corruption in initrd stops before copying to Windows`, { skip: scriptSkip }, async t => {
+        const directory = temporaryDirectory(t);
+        const patched = patchFixture(directory, await installerPatch(directory, true, false));
+        assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+        writeFileSync(path.join(directory, "configs", "bot-tele", damage === "package"
+            ? "google-chrome-enterprise.msi" : "google-chrome-enterprise.sha256"), damage === "package" ? "damaged-msi!!" : "invalid-hash");
+        const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], {
+            cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+            env: { ...process.env, BOT_TELE_CONFIG_ROOT: path.join(directory, "configs", "bot-tele") },
+        });
+        assert.notEqual(emitted.status, 0);
+        assert.match(emitted.stderr, damage === "package" ? /initrd checksum verification/ : /checksum manifest is invalid/);
+        assert.equal(existsSync(path.join(directory, "os", "Windows", "Temp", "google-chrome-enterprise.msi")), false);
+    });
+}
+
+test("Windows rejects a same-size Chrome MSI with valid header and a zeroed tail before installation", {
+    skip: scriptSkip || (!powershell && "Native Windows PowerShell is required"),
+}, async t => {
+    const { directory } = await emitWindowsFiles(t, true, false);
+    const chromePs = readFileSync(path.join(directory, "os", "windows-install-chrome.ps1"), "utf8");
+    assert.ok(chromePs.indexOf("Get-FileHash") < chromePs.indexOf("Start-Service msiserver"));
+    assert.match(chromePs, /\/L\*V!/);
+    const msiPath = path.join(directory, "os", "Windows", "Temp", "google-chrome-enterprise.msi");
+    const manifestPath = path.join(directory, "os", "Windows", "Temp", "google-chrome-enterprise.sha256");
+    const original = Buffer.alloc(10485760 + 204800, 0x5a);
+    Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(original);
+    writeFileSync(msiPath, original);
+    writeFileSync(manifestPath, createHash("sha256").update(original).digest("hex") + "\n");
+    const integrityScript = path.join(directory, "chrome-integrity.ps1");
+    writeFileSync(integrityScript, chromePs.slice(0, chromePs.indexOf("Start-Service msiserver")) + "Write-Output CHROME_INTEGRITY_VALIDATED\n");
+    const run = () => spawnSync(powershell!, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", integrityScript], {
+        cwd: directory, encoding: "utf8", timeout: 15_000, windowsHide: true,
+        env: { ...process.env, WINDIR: path.join(directory, "os", "Windows") },
+    });
+    const intact = run();
+    assert.equal(intact.status, 0, `${intact.stdout}\n${intact.stderr}`);
+    assert.match(intact.stdout, /CHROME_INTEGRITY_VALIDATED/);
+    const damaged = Buffer.from(original);
+    damaged.fill(0, damaged.length - 204800);
+    assert.equal(damaged.length, original.length);
+    assert.deepEqual(damaged.subarray(0, 8), original.subarray(0, 8));
+    writeFileSync(msiPath, damaged);
+    // Guard all real installer entry points; a bad package must fail before
+    // reaching either stub, and cannot create a successful readiness marker.
+    writeFileSync(integrityScript, "function Start-Service { throw 'UNEXPECTED_SERVICE_START' }\nfunction Start-Process { throw 'UNEXPECTED_MSI_START' }\n" + chromePs);
+    const rejected = run();
+    assert.notEqual(rejected.status, 0);
+    assert.match(rejected.stderr, /Preloaded Chrome MSI checksum mismatch/);
+    assert.doesNotMatch(rejected.stderr, /UNEXPECTED_SERVICE_START|UNEXPECTED_MSI_START/);
+    assert.equal(existsSync(path.join(directory, "os", "Windows", "bot-tele-chrome-ready")), false);
+});
+
+type FinalizeScenario = "success" | "unmount-failure" | "reopen-failure" | "persisted-corruption" | "linux";
+async function runDiskFinalization(t: TestContext, installChrome: boolean, scenario: FinalizeScenario) {
+    const directory = temporaryDirectory(t);
+    // These stubs record ordering and model post-unmount disk corruption; no
+    // mount, unmount, reboot, or device operation is performed by this test.
+    const stubs = `test_scenario='${scenario}'
+test_unmounts=0
+sync() { printf '%s\\n' sync >> "$PWD/finalize-trace"; }
+reboot() { printf '%s\\n' reboot >> "$PWD/finalize-trace"; }
+findmnt() { printf '%s\\n' findmnt >> "$PWD/finalize-trace"; printf '%s\\n' '/dev/vps-fixture[/captured-root]'; }
+sha256sum() { printf '%s\\n' sha256sum >> "$PWD/finalize-trace"; command sha256sum "$@"; }
+umount() {
+    printf '%s\\n' umount >> "$PWD/finalize-trace"
+    test_unmounts=$((test_unmounts + 1))
+    if [ "$test_scenario" = unmount-failure ]; then return 1; fi
+}
+mount() {
+    printf '%s\\n' "mount $*" >> "$PWD/finalize-trace"
+    if [ "$test_scenario" = reopen-failure ]; then return 1; fi
+    if [ "$test_scenario" = persisted-corruption ]; then
+        printf '%s' damaged > "$os_dir/Windows/Temp/google-chrome-enterprise.msi"
+    fi
+}
+`;
+    const fixture = transFixture.replace("distro=fixture", `distro=${scenario === "linux" ? "linux" : "dd"}`)
+        .replace("bats=\n", stubs + "bats=\n");
+    const patched = patchFixture(directory, await installerPatch(directory, installChrome, false), fixture);
+    assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+    const result = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], {
+        cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        env: { ...process.env, BOT_TELE_CONFIG_ROOT: path.join(directory, "configs", "bot-tele") },
+    });
+    const trace = readFileSync(path.join(directory, "finalize-trace"), "utf8").trim().split(/\r?\n/);
+    return { result, trace };
+}
+
+for (const installChrome of [false, true]) {
+    test(`Windows DD closes the filesystem and verifies persisted assets before reboot, Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
+        const { result, trace } = await runDiskFinalization(t, installChrome, "success");
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        const finalTrace = trace.slice(trace.indexOf("findmnt"));
+        assert.deepEqual(finalTrace.map(entry => entry.startsWith("mount ") ? "mount" : entry),
+            ["findmnt", "sync", "umount", "mount", ...(installChrome ? ["sha256sum"] : []), "umount", "sync", "reboot"]);
+        assert.match(finalTrace[3]!, /^mount -o ro \/dev\/vps-fixture /);
+    });
+}
+
+for (const scenario of ["unmount-failure", "reopen-failure", "persisted-corruption"] as const) {
+    test(`Windows DD ${scenario} preserves recovery access and refuses reboot`, { skip: scriptSkip }, async t => {
+        const { result, trace } = await runDiskFinalization(t, true, scenario);
+        assert.notEqual(result.status, 0);
+        assert.equal(trace.includes("reboot"), false);
+        assert.match(result.stderr, scenario === "unmount-failure" ? /Cannot cleanly unmount/
+            : scenario === "reopen-failure" ? /Cannot reopen/ : /Persisted Chrome package failed checksum/);
+    });
+}
+
+test("Windows finalization leaves the upstream Linux reboot path unchanged", { skip: scriptSkip }, async t => {
+    const { result, trace } = await runDiskFinalization(t, false, "linux");
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.deepEqual(trace, ["sync", "reboot"]);
 });
 
 test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {

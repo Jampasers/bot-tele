@@ -271,22 +271,47 @@ export async function launchWindows(input: WindowsInstallInput, signal?: AbortSi
     const chromeBatPatch = input.installChrome === true ? `
 chrome_bat_code = r'''    _bot_assets=\${BOT_TELE_CONFIG_ROOT:-/configs/bot-tele}
     _chrome_src="$_bot_assets/google-chrome-enterprise.msi"
+    _chrome_manifest="$_bot_assets/google-chrome-enterprise.sha256"
     _chrome_dst=$(get_path_in_correct_case "$os_dir/Windows/Temp/google-chrome-enterprise.msi")
-    if [ ! -f "$_chrome_src" ]; then
+    _chrome_dst_manifest=$(get_path_in_correct_case "$os_dir/Windows/Temp/google-chrome-enterprise.sha256")
+    if [ ! -f "$_chrome_src" ] || [ ! -f "$_chrome_manifest" ]; then
         error_and_exit "Requested Chrome package is missing from installer initrd."
+    fi
+    _bot_tele_chrome_expected=$(cat "$_chrome_manifest")
+    if ! printf '%s\\n' "$_bot_tele_chrome_expected" | grep -Eq '^[0-9a-f]{64}$'; then
+        error_and_exit "Requested Chrome checksum manifest is invalid."
+    fi
+    _chrome_hash=$(sha256sum < "$_chrome_src") || error_and_exit "Cannot read requested Chrome package."
+    if [ "\${_chrome_hash%% *}" != "$_bot_tele_chrome_expected" ]; then
+        error_and_exit "Requested Chrome package failed initrd checksum verification."
     fi
     mkdir -p "$(dirname "$_chrome_dst")"
     cp -f "$_chrome_src" "$_chrome_dst"
+    cp -f "$_chrome_manifest" "$_chrome_dst_manifest"
+    sync
+    _chrome_hash=$(sha256sum < "$_chrome_dst") || error_and_exit "Cannot read copied Chrome package."
+    if [ "\${_chrome_hash%% *}" != "$_bot_tele_chrome_expected" ]; then
+        error_and_exit "Copied Chrome package failed checksum verification."
+    fi
+    _bot_tele_chrome_file=$_chrome_dst
+    _bot_tele_chrome_manifest=$_chrome_dst_manifest
 
     cat << 'EOF_CHROME_PS1' > "$os_dir/windows-install-chrome.ps1"
 $ErrorActionPreference = 'Stop'
 $outMsi = Join-Path $env:WINDIR 'Temp\\google-chrome-enterprise.msi'
 if (-not (Test-Path $outMsi)) { throw 'Preloaded Chrome MSI is missing' }
 if ((Get-Item $outMsi).Length -lt 10485760) { throw 'Preloaded Chrome MSI is incomplete' }
+$manifest = Join-Path $env:WINDIR 'Temp\\google-chrome-enterprise.sha256'
+if (-not (Test-Path $manifest)) { throw 'Preloaded Chrome MSI checksum manifest is missing' }
+$expectedHash = (Get-Content -LiteralPath $manifest -Raw).Trim()
+if ($expectedHash -notmatch '^[0-9a-f]{64}$') { throw 'Preloaded Chrome MSI checksum manifest is invalid' }
+if ((Get-FileHash -LiteralPath $outMsi -Algorithm SHA256).Hash -ne $expectedHash) {
+    throw 'Preloaded Chrome MSI checksum mismatch'
+}
 
 Start-Service msiserver -ErrorAction SilentlyContinue
 $log = Join-Path $env:TEMP 'chrome-msi-install.log'
-$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /log \`"$log\`"" -PassThru
+$proc = Start-Process msiexec.exe -ArgumentList "/i \`"$outMsi\`" /qn /norestart /L*V! \`"$log\`"" -PassThru
 if (-not $proc.WaitForExit(90000)) {
     try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
     throw 'Chrome MSI timed out after 90 seconds'
@@ -316,6 +341,7 @@ if (-not (Test-Path $link)) {
 }
 Set-Content -Path (Join-Path $env:SystemRoot 'bot-tele-chrome-ready') -Value 'ready' -Encoding Ascii
 Remove-Item -Force $outMsi -ErrorAction SilentlyContinue
+Remove-Item -Force $manifest -ErrorAction SilentlyContinue
 EOF_CHROME_PS1
     cat << 'EOF_CHROME_INSTALL' > "$os_dir/windows-install-chrome.bat"
 @echo off
@@ -396,6 +422,7 @@ sed -i 's/command curl --insecure /command curl /' /root/reinstall.sh
 chmod 700 /root/reinstall.sh
 ${wallpaperScript}
 cat << 'EOF_PATCH_PY' > /root/patch_trans.py
+import hashlib
 import os
 import shutil
 import sys
@@ -410,7 +437,19 @@ if ${input.installChrome === true ? "True" : "False"}:
     chrome_source = '/root/google-chrome-enterprise.msi'
     if not os.path.exists(chrome_source):
         raise SystemExit('Requested Chrome package is missing before initrd packing')
-    shutil.copyfile(chrome_source, os.path.join(assets_dir, 'google-chrome-enterprise.msi'))
+    def chrome_sha256(file_path):
+        digest = hashlib.sha256()
+        with open(file_path, 'rb') as package:
+            for chunk in iter(lambda: package.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+    chrome_expected = chrome_sha256(chrome_source)
+    chrome_asset = os.path.join(assets_dir, 'google-chrome-enterprise.msi')
+    shutil.copyfile(chrome_source, chrome_asset)
+    if chrome_sha256(chrome_asset) != chrome_expected:
+        raise SystemExit('Chrome package failed checksum verification before initrd packing')
+    with open(os.path.join(assets_dir, 'google-chrome-enterprise.sha256'), 'w', encoding='ascii', newline='\\n') as manifest:
+        manifest.write(chrome_expected + '\\n')
 
 with open(trans_path, 'r', encoding='utf-8') as f:
     lines = f.read().splitlines()
@@ -496,14 +535,18 @@ if defined BOT_TELE_NETCONF_FILE (
 )
 
 set "BOT_TELE_IFINDEX="
+rem Pipes inside the quoted PowerShell command must remain unescaped; CMD
+rem preserves a caret there and PowerShell treats it as a positional argument.
 if defined mac_addr (
-    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$m=('%mac_addr%' -replace '[:-]','').ToUpperInvariant(); Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue ^| Where-Object { (($_.MacAddress -replace '[:-]','').ToUpperInvariant()) -eq $m } ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
+    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$m=('%mac_addr%' -replace '[:-]','').ToUpperInvariant(); Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { (($_.MacAddress -replace '[:-]','').ToUpperInvariant()) -eq $m } | Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
 )
 if not defined BOT_TELE_IFINDEX (
-    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-NetAdapter -ErrorAction SilentlyContinue ^| Where-Object { $_.HardwareInterface -and $_.Status -ne 'Disabled' } ^| Sort-Object ifIndex ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
+    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.HardwareInterface -and $_.Status -ne 'Disabled' } | Sort-Object ifIndex | Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
 )
 
-if defined BOT_TELE_IFINDEX if defined ipv4_addr if defined ipv4_gateway (
+set "BOT_TELE_NETCONF_READY="
+if defined BOT_TELE_IFINDEX if defined ipv4_addr if defined ipv4_gateway set "BOT_TELE_NETCONF_READY=1"
+if defined BOT_TELE_NETCONF_READY (
     echo [%date% %time%] bot-tele fast netconf ifIndex=%BOT_TELE_IFINDEX% ip=%ipv4_addr%>>"%BOT_TELE_LOG%"
     netsh interface ipv4 set address name=%BOT_TELE_IFINDEX% static %ipv4_addr% gateway=%ipv4_gateway% gwmetric=0 >>"%BOT_TELE_LOG%" 2>&1
     if defined ipv4_dns1 netsh interface ipv4 set dnsservers name=%BOT_TELE_IFINDEX% static %ipv4_dns1% primary validate=no >>"%BOT_TELE_LOG%" 2>&1
@@ -979,6 +1022,7 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
     new_lines.append(line)
     if not bats_found and line.strip() == 'bats=':
         bats_found = True
+        new_lines.append('    _bot_tele_windows_mount="$os_dir"')
         new_lines.append(virtio_boot_fix_code)
         new_lines.append(password_bat_code)
         new_lines.append(fix_bat_code)
@@ -986,8 +1030,46 @@ ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" :
 if not bats_found or not gpo_found:
     raise SystemExit('Windows setup hook not found; refusing incomplete installer patch')
 
+patched_trans = '\\n'.join(new_lines) + '\\n'
+reboot_tail = '# swapoff -a\\n# umount ?\\nsync\\nreboot\\n'
+if patched_trans.count(reboot_tail) != 1 or not patched_trans.rstrip().endswith(reboot_tail.rstrip()):
+    raise SystemExit('Windows disk finalization hook not found; refusing incomplete installer patch')
+windows_reboot_tail = r'''# Flush and close the Windows DD filesystem before reboot. A checksum while
+# still mounted may only verify page-cache data rather than persisted bytes.
+if [ "$distro" = dd ] && [ -n "\${_bot_tele_windows_mount:-}" ]; then
+    _bot_tele_windows_device=$(findmnt -n -o SOURCE --mountpoint "$_bot_tele_windows_mount")
+    # findmnt may append a filesystem root such as [/subpath] to SOURCE.
+    _bot_tele_windows_device=\${_bot_tele_windows_device%%\\[*}
+    case "$_bot_tele_windows_device" in
+        /dev/*) ;;
+        *) error_and_exit "Cannot locate mounted Windows DD partition before reboot." ;;
+    esac
+    sync
+    if ! umount "$_bot_tele_windows_mount"; then
+        error_and_exit "Cannot cleanly unmount Windows DD partition; refusing reboot."
+    fi
+    if ! mount -o ro "$_bot_tele_windows_device" "$_bot_tele_windows_mount"; then
+        error_and_exit "Cannot reopen Windows DD partition for persisted verification."
+    fi
+    if [ -n "\${_bot_tele_chrome_expected:-}" ]; then
+        _bot_tele_persisted_hash=$(sha256sum < "$_bot_tele_chrome_file") || error_and_exit "Cannot read persisted Chrome package."
+        if [ "\${_bot_tele_persisted_hash%% *}" != "$_bot_tele_chrome_expected" ] ||
+            [ "$(cat "$_bot_tele_chrome_manifest")" != "$_bot_tele_chrome_expected" ]; then
+            error_and_exit "Persisted Chrome package failed checksum verification; refusing reboot."
+        fi
+    fi
+    if ! umount "$_bot_tele_windows_mount"; then
+        error_and_exit "Cannot close verified Windows DD partition; refusing reboot."
+    fi
+    echo "[PATCH] Windows DD partition cleanly unmounted and persisted assets verified"
+fi
+sync
+reboot
+'''
+patched_trans = patched_trans.replace(reboot_tail, windows_reboot_tail, 1)
+
 with open(trans_path, 'w', encoding='utf-8') as f:
-    f.write('\\n'.join(new_lines) + '\\n')
+    f.write(patched_trans)
 print('[PATCH] trans.sh patched: bats=' + str(bats_found) + ', gpo=' + str(gpo_found))
 EOF_PATCH_PY
 
