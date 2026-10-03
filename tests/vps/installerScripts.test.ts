@@ -252,6 +252,11 @@ test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip:
     assert.match(patchedScript, /bot-tele-rdp-ready/);
     assert.match(patchedScript, /Windows startup order:/);
     assert.match(patchedScript, /bats="windows-fix-rdp\.bat\$_bot_tele_after"/);
+    assert.match(patchedScript, /Group Policy\\\\Scripts\\\\Startup\\\\0\\\\0/);
+    assert.match(patchedScript, /Group Policy\\\\State\\\\Machine\\\\Scripts\\\\Startup\\\\0\\\\0/);
+    assert.match(patchedScript, /Policies\\\\Microsoft\\\\Windows\\\\System\\\\Scripts\\\\Startup\\\\0\\\\0/);
+    assert.match(patchedScript, /GpNetworkStartTimeoutPolicyValue/);
+    assert.match(patchedScript, /Registering LocalGPO startup bootstrap/);
 });
 
 test("wallpaper and Chrome asset lookup is POSIX-safe across initrd switch_root", { skip: !python && "Python 3 is required" }, async t => {
