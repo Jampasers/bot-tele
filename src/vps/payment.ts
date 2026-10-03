@@ -12,8 +12,8 @@ export type VpsBalanceResult =
   | { status: "paid"; orderId: string; remainingBalance: number }
   | { status: "insufficient"; orderId: string; currentBalance: number; requiredAmount: number; methodLocked: boolean };
 export type VpsPaymentResult = { orderId: string; status: "unpaid" | "pending" | "expired" | "paid" | "refunding" | "refunded" | "cancelled" };
-export type VpsRefundReason = "cancelled_before_create" | "create_rejected" | "validation_failed" | "capacity_unavailable";
-const refundReasons = new Set<string>(["cancelled_before_create", "create_rejected", "validation_failed", "capacity_unavailable"]);
+export type VpsRefundReason = "cancelled_before_create" | "create_rejected" | "validation_failed" | "capacity_unavailable" | "ssh_retry_exhausted";
+const refundReasons = new Set<string>(["cancelled_before_create", "create_rejected", "validation_failed", "capacity_unavailable", "ssh_retry_exhausted"]);
 const INVOICE_LIFETIME_MS = 15 * 60_000;
 const INVOICE_LEASE_MS = 60_000;
 
@@ -242,8 +242,7 @@ export async function checkVpsPayment(orderId: string, buyerId?: string, signal?
   return { orderId, status: invoice.expiresAt.getTime() <= Date.now() ? "expired" : "pending" };
 }
 
-/** Only terminal, confirmed no-create outcomes can enter refunding. A create
- * timeout/unknown result, existing droplet, or notification failure never qualifies.
+/** Only terminal outcomes with no remaining droplet or uncertain create can enter refunding.
  * QRIS refunds are credited to platform balance, including the unique amount. */
 export async function refundVpsOrder(orderId: string, reason: VpsRefundReason): Promise<{ orderId: string; status: "refunded" }> {
   if (!refundReasons.has(reason)) throw new Error("Alasan refund VPS tidak valid.");
@@ -252,8 +251,15 @@ export async function refundVpsOrder(orderId: string, reason: VpsRefundReason): 
   if (!["failed", "cancelled"].includes(order.stage) || order.createAttemptedAt !== null || order.dropletId !== null) {
     throw new Error("Refund VPS ditolak: hasil create belum pasti atau droplet sudah ada.");
   }
+  const sshFailure = reason === "ssh_retry_exhausted";
+  if (sshFailure && (order.stage !== "failed" || order.lastError !== reason || order.provisionAttempt !== 3 || order.sshAttempts !== 3
+    || order.sourceUsername || new Set(order.deletedDropletIds ?? []).size !== 3)) {
+    throw new Error("Refund VPS ditolak: penghapusan semua percobaan SSH belum terkonfirmasi.");
+  }
   if (order.paymentStatus === "paid") {
-    await VpsOrder.updateOne({ ...scope(orderId, order.buyerId), paymentStatus: "paid", stage: { $in: ["failed", "cancelled"] }, createAttemptedAt: null, dropletId: null }, {
+    await VpsOrder.updateOne({ ...scope(orderId, order.buyerId), paymentStatus: "paid", stage: { $in: ["failed", "cancelled"] }, createAttemptedAt: null, dropletId: null,
+      ...(sshFailure ? { lastError: reason, provisionAttempt: 3, sshAttempts: 3, sourceUsername: null, "deletedDropletIds.2": { $exists: true } } : {}),
+    }, {
       $set: { paymentStatus: "refunding", refundReason: reason },
     });
     order = await loadOrder(orderId);

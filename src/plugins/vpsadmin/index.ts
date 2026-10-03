@@ -319,6 +319,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       (order.paymentPaidAt ? `Waktu bayar: ${vpsDate(order.paymentPaidAt)}\n` : "") +
       (order.paymentInvoice?.matchedTransactionId ? `ID Tx GoPay: ${order.paymentInvoice.matchedTransactionId}\n` : "") +
       `Tahap Proses: ${order.stage}\n` +
+      (!isDirect ? `Percobaan VPS: ${order.provisionAttempt ?? 1}/3 · SSH: ${order.sshAttempts ?? 0}/3\n` : "") +
       `IP Publik: ${order.publicIp || "belum tersedia"}\n` +
       (order.dropletId ? `Droplet ID: ${order.dropletId}\n` : "") +
       (order.lastError ? `Last Error: ${order.lastError}\n` : "") +

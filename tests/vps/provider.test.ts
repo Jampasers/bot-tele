@@ -110,6 +110,31 @@ test("DO cancellation before create issues no request", async () => {
     assert.equal(calls, 0);
 });
 
+test("DO delete targets one droplet and accepts empty 204 responses", async () => {
+    const calls: { url: string; method?: string; body?: BodyInit | null }[] = [];
+    const client = new DigitalOceanClient("isolated-delete-token", { fetch: async (url, init) => {
+        calls.push({ url, method: init.method, body: init.body });
+        return new Response(null, { status: 204 });
+    } });
+    await client.deleteDroplet(123);
+    assert.equal(calls.length, 1); assert.equal(calls[0]!.method, "DELETE");
+    assert.equal(calls[0]!.url, "https://api.digitalocean.com/v2/droplets/123"); assert.equal(calls[0]!.body, undefined);
+    await assert.rejects(client.deleteDroplet(-1), DigitalOceanError);
+    assert.equal(calls.length, 1);
+});
+
+test("DO delete timeout remains uncertain and permission errors cannot confirm deletion", async () => {
+    let calls = 0;
+    const uncertain = new DigitalOceanClient("isolated-delete-token", { fetch: async () => { calls++; throw new Error("connection interrupted"); } });
+    await assert.rejects(uncertain.deleteDroplet(123), (error: unknown) => error instanceof DigitalOceanError && error.uncertain);
+    assert.equal(calls, 1);
+    const denied = new DigitalOceanClient("isolated-delete-token", { fetch: async () => Response.json({}, { status: 403 }) });
+    await assert.rejects(denied.deleteDroplet(123), (error: unknown) => error instanceof DigitalOceanError && error.kind === "permission" && !error.uncertain);
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(uncertain.deleteDroplet(123, controller.signal), DigitalOceanError);
+    assert.equal(calls, 1);
+});
+
 test("OS reference catalog preserves Linux and four Windows bootstrap choices", () => {
     assert.equal(Object.values(OS_CATALOG).filter((os) => os.family === "linux").length, 14);
     const win = Object.values(OS_CATALOG).filter((os) => os.family === "windows");

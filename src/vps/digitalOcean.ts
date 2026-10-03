@@ -99,6 +99,7 @@ export class DigitalOceanClient {
                     : response.status === 400 || response.status === 422 ? "validation" : "api";
                 throw new DigitalOceanError(kind, mutation && (response.status >= 500 || response.status === 408), response.status);
             }
+            if (method === "DELETE" && response.status === 204) return {};
             // Bound both response bytes and time; unknown bodies never reach logs.
             const reader = response.body?.getReader();
             if (!reader) throw new DigitalOceanError("api", mutation);
@@ -157,6 +158,9 @@ export class DigitalOceanClient {
     }
     async getDroplet(id: number, signal?: AbortSignal): Promise<DoDroplet> {
         return parseDroplet((await this.request(`/droplets/${positive(id)}`, "GET", undefined, signal)).droplet);
+    }
+    async deleteDroplet(id: number, signal?: AbortSignal): Promise<void> {
+        await this.request(`/droplets/${positive(id)}`, "DELETE", undefined, signal);
     }
     async regions(signal?: AbortSignal): Promise<DoRegion[]> {
         return (await this.list("/regions", "regions", signal)).map((value) => {

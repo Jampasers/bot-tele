@@ -66,6 +66,7 @@ export function vpsOrderText(order: VpsUiOrder): string {
   return `🖥️ ${serviceLabel(order.serviceType)}\n\nOrder: ${order._id}\nPaket: ${order.planName}\nSpek: ${order.sizeSlug}\nOS: ${order.os}\nRegion: ${order.region}\n${order.serviceType === "install" ? "Harga jasa" : "Harga checkout"}: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP publik: ${order.ip || "belum tersedia"}`
     + (order.vcpus !== undefined && order.memory !== undefined && order.disk !== undefined ? `\nCPU: ${order.vcpus} vCPU · RAM: ${order.memory} MB · Disk: ${order.disk} GB` : "")
     + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "")
+    + (order.provisionAttempt ? `\nPercobaan VPS: ${order.provisionAttempt}/3 · SSH: ${order.sshAttempts ?? 0}/3` : "")
     + chrome
     + (order.needsToken || order.stage === "needs_token" ? "\n\nToken sementara tidak tersedia. Kirim ulang token akun/team yang sama untuk melanjutkan order ini." : "")
     + (order.serviceType === "install" ? `\n\n${feeNotice}` : "");

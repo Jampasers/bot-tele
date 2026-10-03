@@ -27,6 +27,8 @@ export interface VpsUiOrder {
   paymentStatus: string;
   paymentMethod?: "balance" | "qris" | null;
   stage: string;
+  provisionAttempt?: number;
+  sshAttempts?: number;
   price: number;
   planName: string;
   sizeSlug: string;

@@ -1544,6 +1544,7 @@ export class ActivityLogService {
     else if (data.reason === "create_rejected") reasonText = "Pembuatan droplet ditolak oleh provider";
     else if (data.reason === "validation_failed") reasonText = "Validasi spek/region tidak terpenuhi";
     else if (data.reason === "capacity_unavailable") reasonText = "Kapasitas akun toko tidak tersedia";
+    else if (data.reason === "ssh_retry_exhausted") reasonText = "SSH gagal 9 kali pada 3 VPS; semua droplet telah dihapus";
     else if (data.reason) reasonText = data.reason;
 
     const planLine = data.planName ? `📦 <b>Paket:</b> <b>${escapeHtml(data.planName)}</b>\n` : "";

@@ -11,6 +11,16 @@ Urutan pekerjaan dan batas verifikasi:
 
 Tidak ada token nyata, droplet berbayar, deployment atau migrasi database produksi dalam pengujian. Installer remote dan login Windows hanya dapat dinyatakan terverifikasi setelah bukti runtime di lingkungan yang diotorisasi.
 
+## Percobaan SSH dan penggantian VPS DO
+
+VPS DO dari akun toko dan Jasa Install dari akun DO buyer memakai maksimal tiga percobaan login SSH per droplet. Satu percobaan SSH dibatasi 20 detik, dengan jeda pemantauan 10 detik antarpercobaan. Setelah tiga kegagalan, worker menyimpan tahap `replacing`, memeriksa identitas droplet, lalu menghapus hanya droplet milik order tersebut. VPS pengganti memakai spek, region, image, dan pembayaran order yang sama, dengan nama baru untuk rekonsiliasi create.
+
+Batas keseluruhan adalah tiga droplet (VPS awal dan dua pengganti), atau maksimal sembilan percobaan SSH gagal. Jika droplet ketiga juga gagal, worker memastikan ketiga droplet sudah terhapus, menandai order `failed` dengan alasan `ssh_retry_exhausted`, dan mengembalikan pembayaran ke saldo buyer. Pembayaran QRIS dikembalikan beserta kode uniknya. Refund menggunakan bukti wallet yang sama agar aman saat restart atau dipanggil ulang.
+
+Token akun toko dan DO buyer perlu izin `droplet:read`, `droplet:create`, dan `droplet:delete`. Respons DELETE yang terputus, izin yang tidak cukup, atau penghapusan yang belum terkonfirmasi mempertahankan tahap penghapusan; worker belum membuat VPS tambahan atau memberikan refund. Jika token buyer hilang setelah restart, tombol kirim ulang token melanjutkan percobaan dan target penghapusan yang tersimpan. [API penghapusan droplet DigitalOcean](https://docs.digitalocean.com/products/droplets/reference/api/droplets/) memakai DELETE berdasarkan ID droplet; worker mengonfirmasi bahwa ID tersebut sudah tidak ditemukan sebelum melanjutkan.
+
+VPS yang sudah dimiliki buyer melalui Direct SSH tetap mengikuti alur pemantauan sebelumnya. Penggantian otomatis hanya berlaku sebelum instalasi Windows dimulai. Jumlah percobaan, alasan kegagalan, dan hasil refund diperbarui melalui pesan status order yang sama.
+
 ## Pemulihan Windows setelah perubahan wallpaper
 
 Perintah `SetDankaWallpaper` pada versi awal wallpaper menyisipkan kode C# ke dalam blok `if` CMD dengan kutip bertingkat. Reproduksi lokal menghasilkan `]public was unexpected at this time.` dan menghentikan pemanggil `SetupComplete.cmd` sebelum batch konfigurasi jaringan bawaan installer dijalankan. Windows dapat mencapai layar login tetapi belum memiliki konfigurasi jaringan untuk RDP.

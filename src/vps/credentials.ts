@@ -86,7 +86,7 @@ export async function checkAllCredentials(actor: string): Promise<void> {
 }
 
 export const ACTIVE_VPS_STAGES = [
-  "queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "needs_token", "review",
+  "queued", "creating", "droplet", "ssh", "replacing", "installing", "rebooting", "monitoring", "needs_token", "review",
 ] as const;
 
 export const ACTIVE_VPS_REBOOTS = [

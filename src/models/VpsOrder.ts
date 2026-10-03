@@ -10,11 +10,15 @@ export interface IVpsOrder {
   statusMessageId?: number | null;
   paymentInvoice?: { reference: string; merchantId: string; amount: number; createdAt: Date; expiresAt: Date; matchedTransactionId?: string; paidAt?: Date };
   paymentInvoiceLeaseUntil: Date | null; refundReason: string | null; refundedAt: Date | null;
-  stage: "queued" | "creating" | "droplet" | "ssh" | "installing" | "rebooting" | "monitoring" | "ready" | "needs_token" | "review" | "failed" | "cancelled";
+  stage: "queued" | "creating" | "droplet" | "ssh" | "replacing" | "installing" | "rebooting" | "monitoring" | "ready" | "needs_token" | "review" | "failed" | "cancelled";
   resumeStage: string | null; credentialId: string | null; accountId: string | null;
   dropletId: number | null; publicIp: string | null; createName: string;
   sourceUsername?: string | null; sourcePasswordEncrypted?: string | null;
   createAttemptedAt: Date | null; reservationActive: boolean;
+  provisionAttempt?: number;
+  sshAttempts?: number;
+  replacementDeleteRequestedAt?: Date | null;
+  deletedDropletIds?: number[];
   passwordEncrypted: string; lastError: string | null; evidence: string;
   installerLogUrl: string | null; installerBootMode: WindowsBootMode | null; installerImageUrl: string | null;
   stageStartedAt: Date; rdpSuccesses: number;
@@ -32,11 +36,13 @@ const schema = new Schema<IVpsOrder>({
   paymentMethod: { type: String, enum: ["balance", "qris", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
   statusMessageId: { type: Number, default: null },
   paymentInvoiceLeaseUntil: { type: Date, default: null }, refundReason: { type: String, default: null }, refundedAt: { type: Date, default: null },
-  stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },
+  stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "replacing", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },
   resumeStage: { type: String, default: null }, credentialId: { type: String, default: null }, accountId: { type: String, default: null },
   dropletId: { type: Number, default: null }, publicIp: { type: String, default: null }, createName: { type: String, required: true, unique: true },
   sourceUsername: { type: String, default: null }, sourcePasswordEncrypted: { type: String, default: null, select: false },
   createAttemptedAt: { type: Date, default: null }, reservationActive: { type: Boolean, default: false }, passwordEncrypted: { type: String, required: true, select: false },
+  provisionAttempt: { type: Number, default: 1, min: 1, max: 3 }, sshAttempts: { type: Number, default: 0, min: 0, max: 3 },
+  replacementDeleteRequestedAt: { type: Date, default: null }, deletedDropletIds: { type: [Number], default: [] },
   lastError: { type: String, default: null }, evidence: { type: String, default: "Belum diperiksa" }, installerLogUrl: { type: String, default: null },
   installerBootMode: { type: String, enum: ["bios", "efi", null], default: null }, installerImageUrl: { type: String, default: null },
   stageStartedAt: { type: Date, default: Date.now }, rdpSuccesses: { type: Number, default: 0 }, lockOwner: { type: String, default: null }, lockUntil: { type: Date, default: null }, nextRunAt: { type: Date, default: Date.now },

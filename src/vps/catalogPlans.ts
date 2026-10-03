@@ -68,7 +68,7 @@ export function catalogPlans(catalog: PlanCatalog, serviceType?: VpsServiceType)
   })));
 }
 
-export function planPrice(plan: Pick<VpsUiPlan, "osPrices" | "priceMatrix" | "catalogManaged" | "globalPrice">, region: string, os: string): number | undefined {
+export function planPrice(plan: Pick<VpsUiPlan, "osPrices" | "priceMatrix" | "catalogManaged" | "globalPrice" | "serviceGlobalPrice">, region: string, os: string): number | undefined {
   if (!plan.osPrices.some(item => item.os === os)) return undefined;
   const amount = plan.priceMatrix?.find(item => item.region === region && item.os === os)?.price
     ?? plan.serviceGlobalPrice ?? (plan.catalogManaged ? undefined : plan.osPrices.find(item => item.os === os)?.price) ?? plan.globalPrice;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { IVpsOrder } from "../../src/models/VpsOrder.js";
 import { advanceVpsOrder, type VpsStepDependencies } from "../../src/vps/worker.js";
-import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
+import { DigitalOceanClient, DigitalOceanError } from "../../src/vps/digitalOcean.js";
 import { InstallerError } from "../../src/vps/installer.js";
 import { getOs } from "../../src/vps/installer.js";
 
@@ -23,6 +23,7 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
     return {
         save: async () => {}, client: async () => { throw new Error("API must not be used in this step"); },
         reserve: async () => { throw new Error("No new capacity may be reserved"); }, password: () => "MockPassword123!xyz",
+        releaseCapacity: async () => {}, refund: async () => { throw new Error("No refund expected in this step"); },
         testSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
         detectWindowsBootMode: async () => { throw new Error("Boot detection must not be repeated"); },
         resolveWindowsDdImageCandidates: () => { throw new Error("Image candidates must not be resolved again"); },
@@ -268,4 +269,199 @@ test("worker monitoring trusts stable external RDP even if an old installer view
     }));
     assert.equal(order.stage, "ready");
     assert.equal(order.rdpSuccesses, 2);
+});
+
+function retryProvider(order: IVpsOrder, options: { uncertainDelete?: boolean; refuseDelete?: boolean; holdDeletion?: boolean; uncertainCreateOnAttempt?: number } = {}) {
+    const live = new Map<number, { id: number; name: string; status: string; size_slug: string; region: { slug: string }; networks: { v4: { type: string; ip_address: string }[] } }>();
+    const creates: Record<string, unknown>[] = [], deletes: number[] = [];
+    let uncertainDelete = options.uncertainDelete;
+    const client = new DigitalOceanClient("isolated-retry-token", { fetch: async (url, init) => {
+        if (url.includes("/regions")) return Response.json({ regions: [{ slug: order.snapshot.region, name: "Region", available: true, sizes: [order.snapshot.size] }] });
+        if (url.includes("/sizes")) return Response.json({ sizes: [{ slug: order.snapshot.size, available: true, regions: [order.snapshot.region], memory: order.snapshot.memory, vcpus: order.snapshot.vcpus, disk: order.snapshot.disk }] });
+        if (url.includes("/images")) return Response.json({ images: [{ id: 1, slug: getOs(order.snapshot.os)!.image, name: "Image", regions: [order.snapshot.region], min_disk_size: 25 }] });
+        if (init.method === "POST") {
+            assert.equal(live.size, 0, "replacement cannot overlap a live previous VPS");
+            const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+            creates.push(body);
+            const id = 100 + creates.length;
+            const droplet = { id, name: String(body.name), status: "active", size_slug: String(body.size), region: { slug: String(body.region) }, networks: { v4: [{ type: "public", ip_address: `203.0.113.${id}` }] } };
+            live.set(id, droplet);
+            if (creates.length === options.uncertainCreateOnAttempt) throw new Error("create accepted but response interrupted");
+            return Response.json({ droplet });
+        }
+        if (url.includes("/droplets?")) return Response.json({ droplets: [...live.values()] });
+        const id = Number(url.split("/").at(-1));
+        if (init.method === "DELETE") {
+            deletes.push(id);
+            if (options.refuseDelete) return Response.json({}, { status: 403 });
+            if (!options.holdDeletion) live.delete(id);
+            if (uncertainDelete) { uncertainDelete = false; throw new Error("response interrupted after deletion"); }
+            return new Response(null, { status: 204 });
+        }
+        const droplet = live.get(id);
+        return droplet ? Response.json({ droplet }) : Response.json({}, { status: 404 });
+    } });
+    return { client, live, creates, deletes };
+}
+
+for (const service of ["purchase", "install"] as const) {
+    test(`${service} DO retries SSH 3 times on each of 3 VPS then deletes and refunds`, async () => {
+        const order = orderFixture({ service, stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null, credentialId: service === "purchase" ? "shop-token" : null,
+            installerBootMode: null, installerImageUrl: null });
+        const provider = retryProvider(order);
+        let sshChecks = 0, refunds = 0, cleared = 0, releases = 0, reservations = 0;
+        const perDroplet = new Map<number, number>();
+        const deps = dependencies({ client: async () => provider.client,
+            reserve: async () => { reservations++; return { credentialId: "shop-token", accountId: "team:one" }; },
+            releaseCapacity: async () => { releases++; },
+            testSsh: async () => { sshChecks++; perDroplet.set(order.dropletId!, (perDroplet.get(order.dropletId!) ?? 0) + 1); return false; },
+            refund: async reason => {
+                assert.equal(reason, "ssh_retry_exhausted"); assert.equal(order.stage, "failed");
+                assert.equal(provider.live.size, 0); assert.equal(order.dropletId, null); assert.equal(order.createAttemptedAt, null);
+                refunds++;
+            }, clearToken: () => { cleared++; },
+        });
+        for (let step = 0; step < 30 && order.paymentStatus !== "refunded"; step++) await advanceVpsOrder(order, deps);
+        assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded");
+        assert.equal(sshChecks, 9); assert.deepEqual([...perDroplet.values()], [3, 3, 3]);
+        assert.equal(provider.creates.length, 3); assert.deepEqual(provider.deletes, [101, 102, 103]);
+        assert.equal(new Set(provider.creates.map(body => body.name)).size, 3);
+        assert.ok(provider.creates.every(body => body.region === order.snapshot.region && body.size === order.snapshot.size && body.image === order.snapshot.image));
+        assert.deepEqual(order.deletedDropletIds, [101, 102, 103]); assert.equal(order.provisionAttempt, 3);
+        assert.equal(refunds, 1); assert.equal(cleared, 1); assert.ok(releases >= 3);
+        assert.equal(reservations, service === "purchase" ? 2 : 0);
+        assert.match(order.evidence, /SSH.*9 percobaan/); assert.match(order.evidence, /dikembalikan ke saldo/);
+        await advanceVpsOrder(order, deps);
+        assert.equal(provider.creates.length, 3); assert.equal(refunds, 1);
+    });
+}
+
+test("successful SSH on a replacement keeps that VPS and proceeds without refund", async () => {
+    const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null,
+        snapshot: { ...orderFixture().snapshot, os: "ubuntu24" } });
+    const provider = retryProvider(order); let checks = 0;
+    const deps = dependencies({ client: async () => provider.client, testSsh: async () => ++checks === 6 });
+    for (let step = 0; step < 20 && order.stage !== "ready"; step++) await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ready"); assert.equal(order.paymentStatus, "paid");
+    assert.equal(provider.creates.length, 2); assert.deepEqual(provider.deletes, [101]); assert.equal(provider.live.size, 1);
+    assert.equal(order.dropletId, 102); assert.equal(checks, 6);
+});
+
+test("SSH retry count survives restart and never attempts a fourth login on the same VPS", async () => {
+    const order = orderFixture({ stage: "ssh", sshAttempts: 2, provisionAttempt: 1 });
+    let checks = 0;
+    await advanceVpsOrder(order, dependencies({ testSsh: async () => { checks++; return false; } }));
+    assert.equal(order.stage, "replacing"); assert.equal(order.sshAttempts, 3); assert.equal(checks, 1);
+    const resumed = structuredClone(order);
+    await advanceVpsOrder(resumed, dependencies({ client: async () => undefined }));
+    assert.equal(resumed.stage, "needs_token"); assert.equal(resumed.resumeStage, "replacing");
+    assert.equal(checks, 1); assert.equal(resumed.dropletId, 42);
+});
+
+test("shutdown during an SSH check never counts a failure or deletes the VPS", async () => {
+    const order = orderFixture({ stage: "ssh", sshAttempts: 2 });
+    const abort = new AbortController();
+    await advanceVpsOrder(order, dependencies({ signal: abort.signal, testSsh: async () => { abort.abort(); return false; } }));
+    assert.equal(order.stage, "ssh"); assert.equal(order.sshAttempts, 2); assert.equal(order.dropletId, 42);
+});
+
+test("existing buyer VPS is never deleted or recreated after SSH failures", async () => {
+    const order = orderFixture({ stage: "ssh", sourceUsername: "root", sourcePasswordEncrypted: "buyer-source", dropletId: null, createAttemptedAt: null });
+    const deps = dependencies({ testSsh: async () => false });
+    for (let step = 0; step < 12; step++) await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ssh"); assert.equal(order.paymentStatus, "paid"); assert.equal(order.sshAttempts, undefined);
+});
+
+test("replacement refuses to delete a droplet whose identity differs from the order", async () => {
+    const order = orderFixture({ stage: "replacing", sshAttempts: 3 }); let deletes = 0;
+    const client = new DigitalOceanClient("isolated-token", { fetch: async (_url, init) => {
+        if (init.method === "DELETE") deletes++;
+        return Response.json({ droplet: { id: 42, name: "another-buyers-vps", status: "active" } });
+    } });
+    await advanceVpsOrder(order, dependencies({ client: async () => client }));
+    assert.equal(order.stage, "review"); assert.equal(order.dropletId, 42); assert.equal(deletes, 0);
+    assert.equal(order.lastError, "droplet_identity_mismatch");
+});
+
+for (const failure of ["permission", "confirmation"] as const) {
+    test(`replacement waits for confirmed deletion after ${failure} failure`, async () => {
+        const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
+        const provider = retryProvider(order, { refuseDelete: failure === "permission", holdDeletion: failure === "confirmation" });
+        const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
+        for (let step = 0; step < 10; step++) await advanceVpsOrder(order, deps);
+        assert.equal(order.stage, "replacing"); assert.equal(order.paymentStatus, "paid");
+        assert.equal(provider.creates.length, 1); assert.equal(provider.live.size, 1); assert.equal(order.dropletId, 101);
+    });
+}
+
+test("uncertain delete recovers by observing absence before creating a replacement", async () => {
+    const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
+    const provider = retryProvider(order, { uncertainDelete: true });
+    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
+    for (let step = 0; step < 5; step++) await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "replacing");
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "replacing"); assert.equal(order.dropletId, 101); assert.equal(provider.live.size, 0);
+    assert.equal(provider.creates.length, 1);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "queued"); assert.equal(order.provisionAttempt, 2);
+    await advanceVpsOrder(order, deps);
+    assert.equal(provider.creates.length, 2); assert.deepEqual(provider.deletes, [101]);
+});
+
+test("delete intent must persist before any DELETE request", async () => {
+    const order = orderFixture({ stage: "replacing", sshAttempts: 3 }); let deletes = 0;
+    const client = new DigitalOceanClient("isolated-token", { fetch: async (_url, init) => {
+        if (init.method === "DELETE") deletes++;
+        return Response.json({ droplet: { id: 42, name: order.createName, status: "active" } });
+    } });
+    await assert.rejects(advanceVpsOrder(order, dependencies({ client: async () => client, save: async () => { throw new Error("persistence unavailable"); } })));
+    assert.equal(deletes, 0); assert.equal(order.stage, "replacing");
+});
+
+test("refund interruption resumes a terminal failure without another delete or create", async () => {
+    const order = orderFixture({ stage: "replacing", provisionAttempt: 3, sshAttempts: 3, deletedDropletIds: [1, 2] });
+    let refunds = 0, deletes = 0;
+    const client = new DigitalOceanClient("isolated-token", { fetch: async (_url, init) => {
+        if (init.method === "DELETE") deletes++;
+        return Response.json({}, { status: 404 });
+    } });
+    const deps = dependencies({ client: async () => client, refund: async reason => {
+        assert.equal(reason, "ssh_retry_exhausted");
+        if (++refunds === 1) throw new Error("interrupted wallet recovery");
+    } });
+    await assert.rejects(advanceVpsOrder(order, deps), /wallet/);
+    assert.equal(order.stage, "failed"); assert.equal(order.lastError, "ssh_retry_exhausted"); assert.equal(order.dropletId, null);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.paymentStatus, "refunded"); assert.deepEqual(order.deletedDropletIds, [1, 2, 42]);
+    assert.equal(refunds, 2); assert.equal(deletes, 0);
+});
+
+test("restart after deleting a droplet preserves the next attempt and does not replay DELETE", async () => {
+    const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
+    const provider = retryProvider(order);
+    let failReset = true;
+    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false,
+        save: async patch => { if (failReset && patch.stage === "queued" && patch.provisionAttempt === 2) { failReset = false; throw new Error("restart after deletion"); } },
+    });
+    for (let step = 0; step < 5; step++) await advanceVpsOrder(order, deps);
+    await assert.rejects(advanceVpsOrder(order, deps), /restart/);
+    assert.equal(order.stage, "replacing"); assert.equal(order.dropletId, 101); assert.equal(provider.live.size, 0);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "queued"); assert.equal(order.provisionAttempt, 2); assert.equal(order.sshAttempts, 0);
+    assert.deepEqual(order.deletedDropletIds, [101]); assert.deepEqual(provider.deletes, [101]);
+    await advanceVpsOrder(order, deps);
+    assert.equal(provider.creates.length, 2);
+});
+
+test("ambiguous replacement create reconciles the new name without making a third VPS", async () => {
+    const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
+    const provider = retryProvider(order, { uncertainCreateOnAttempt: 2 });
+    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
+    for (let step = 0; step < 7; step++) await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "creating");
+    assert.equal(provider.creates.length, 2); assert.equal(order.provisionAttempt, 2);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "droplet"); assert.equal(order.dropletId, 102);
+    assert.equal(provider.creates.length, 2); assert.deepEqual(order.deletedDropletIds, [101]);
 });

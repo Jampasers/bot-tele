@@ -26,6 +26,7 @@ export function orderDto(order: IVpsOrder): VpsUiOrder {
     price: order.snapshot.price, planName: order.snapshot.planName, sizeSlug: order.snapshot.size, os: order.snapshot.os,
     region: order.snapshot.region, installChrome: order.snapshot.installChrome === true, ip: order.publicIp, dropletId: order.dropletId, needsToken: order.stage === "needs_token",
     evidence: order.evidence, createdAt: order.createdAt, vcpus: order.snapshot.vcpus, memory: order.snapshot.memory, disk: order.snapshot.disk,
+    provisionAttempt: order.provisionAttempt ?? 1, sshAttempts: order.sshAttempts ?? 0,
     installerLogUrl: order.installerLogUrl };
 }
 export const vpsPlanPrice = planPrice;

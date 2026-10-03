@@ -3,6 +3,8 @@ import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { User } from "../../src/models/User.js";
 import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsAccount } from "../../src/models/VpsCredential.js";
+import { VpsWorker } from "../../src/vps/worker.js";
 import { BalanceLog } from "../../src/models/BalanceLog.js";
 import { PaymentAmountReservation, PaymentSettlementClaim } from "../../src/models/PaymentLedger.js";
 import { GopayMerchant } from "../../src/services/payment/gopay-merchant.js";
@@ -23,6 +25,7 @@ function matches(row: Row, filter: Row): boolean {
         if (operator === "$ne") return Array.isArray(actual) ? !actual.includes(value) : actual !== value;
         if (operator === "$in") return value.includes(actual);
         if (operator === "$gte") return actual >= value;
+        if (operator === "$gt") return actual > value;
         if (operator === "$lte") return actual <= value;
         if (operator === "$exists") return (actual !== undefined) === value;
         throw new Error(`Unexpected mock operator: ${operator}`);
@@ -148,6 +151,51 @@ test("refund interruption and retries credit once; unsafe provisioning states ca
   await Promise.all(Array.from({ length: 8 }, () => platform(() => refundVpsOrder(order._id, "create_rejected"))));
   assert.equal(db.users[0]!.balance, 100_000);
   assert.equal(order.paymentStatus, "refunded");
+});
+
+test("exhausted SSH retries refund balance once only after all three droplets are deleted", async t => {
+  const db = database(t); const order = db.addOrder();
+  await platform(() => payVpsFromBalance(order._id, "101"));
+  Object.assign(order, { stage: "failed", provisionAttempt: 3, sshAttempts: 3, lastError: "ssh_retry_exhausted", deletedDropletIds: [101, 102], dropletId: 103, createAttemptedAt: new Date() });
+  await assert.rejects(platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted")), /refund/i);
+  assert.equal(db.users[0]!.balance, 75_000);
+  Object.assign(order, { dropletId: null, createAttemptedAt: null });
+  await assert.rejects(platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted")), /penghapusan/);
+  order.deletedDropletIds.push(103); db.failRefunded();
+  await assert.rejects(platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted")), /interruption/);
+  assert.equal(db.users[0]!.balance, 100_000); assert.equal(order.paymentStatus, "refunding");
+  await Promise.all(Array.from({ length: 8 }, () => platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted"))));
+  assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded"); assert.equal(order.refundReason, "ssh_retry_exhausted");
+  assert.equal(db.users[0]!.balance, 100_000);
+  assert.equal(db.audit.filter(row => row.type === "REFUND").length, 1);
+});
+
+test("exhausted SSH retries refund a settled QRIS invoice to buyer balance including unique code", async t => {
+  const db = database(t); const order = db.addOrder({ stage: "failed", paymentStatus: "paid", paymentMethod: "qris", provisionAttempt: 3, sshAttempts: 3,
+    lastError: "ssh_retry_exhausted", deletedDropletIds: [101, 102, 103], sourceUsername: null,
+    paymentInvoice: { amount: 25_007, matchedTransactionId: "settled-ssh-retry-invoice" } });
+  await Promise.all([platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted")), platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted"))]);
+  assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded"); assert.equal(db.users[0]!.balance, 125_007);
+});
+
+test("worker publishes failed SSH reason and completed refund by editing the existing status message", async t => {
+  const db = database(t);
+  const order = db.addOrder();
+  await platform(() => payVpsFromBalance(order._id, "101"));
+  Object.assign(order, { stage: "failed", provisionAttempt: 3, sshAttempts: 3,
+    lastError: "ssh_retry_exhausted", deletedDropletIds: [101, 102, 103], sourceUsername: null,
+    chatId: "101", service: "purchase", statusMessageId: 99, lockOwner: "refund-worker", lockUntil: new Date(Date.now() + 120000),
+    rebootState: "idle", evidence: "Failed: SSH gagal 9 kali pada 3 VPS. Semua VPS telah dihapus." });
+  t.mock.method(VpsAccount, "updateMany", async () => ({ matchedCount: 0 } as never));
+  const edits: { messageId: number; text: string }[] = [];
+  let sends = 0;
+  const worker = new VpsWorker({ sendMessage: async () => { sends++; throw new Error("Must not send another status message"); },
+    editMessageText: async (_chatId: unknown, messageId: number, text: string) => { edits.push({ messageId, text }); return true; },
+  } as never);
+  await platform(() => (worker as any).process(structuredClone(order)));
+  assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded");
+  assert.equal(sends, 0); assert.equal(edits.length, 1); assert.equal(edits[0]!.messageId, 99);
+  assert.match(edits[0]!.text, /SSH gagal 9 kali/); assert.match(edits[0]!.text, /dikembalikan ke saldo buyer/);
 });
 
 test("payment entry points enforce platform and buyer ownership before touching a wallet", async t => {

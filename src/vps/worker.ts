@@ -12,13 +12,15 @@ import { buildUserData, detectWindowsBootMode, getOs, inspectWindows, InstallerE
 import { resolveWindowsDdImageCandidates } from "./windowsImages.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
 import { providerForCredential, releaseCapacityTicket, reserveStoreCapacity } from "./credentials.js";
-import { reconcileVpsPayments, refundVpsOrder } from "./payment.js";
+import { reconcileVpsPayments, refundVpsOrder, type VpsRefundReason } from "./payment.js";
 import { resolveVpsWallpaperBase64 } from "./wallpaper.js";
 
 export interface VpsStepDependencies {
   save(patch: Partial<IVpsOrder>): Promise<void>;
   client(): Promise<DigitalOceanClient | undefined>;
   reserve(): Promise<{ credentialId: string; accountId: string } | null>;
+  releaseCapacity(): Promise<void>;
+  refund(reason: VpsRefundReason): Promise<void>;
   password(): string;
   sourcePassword?(): string;
   sourceUsername?(): string;
@@ -59,6 +61,76 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     }
   };
   if (deps.signal.aborted || order.paymentStatus !== "paid") return;
+  const directInstall = order.service === "install" && !!order.sourceUsername;
+  const provisionAttempt = order.provisionAttempt ?? 1;
+  const refundTerminal = async () => {
+    const reason: VpsRefundReason = order.stage === "cancelled" ? "cancelled_before_create"
+      : order.lastError === "ssh_retry_exhausted" ? "ssh_retry_exhausted"
+      : order.lastError === "create_rejected" ? "create_rejected" : "validation_failed";
+    await deps.releaseCapacity();
+    await deps.refund(reason);
+    await save({ paymentStatus: "refunded", refundReason: reason,
+      evidence: `${order.evidence}\nPembayaran telah dikembalikan ke saldo buyer.` });
+    deps.clearToken();
+  };
+  if (["failed", "cancelled"].includes(order.stage) && !order.dropletId && !order.createAttemptedAt) {
+    await refundTerminal();
+    return;
+  }
+
+  if (order.stage === "replacing") {
+    if (directInstall || !order.dropletId) {
+      await stage("review", { lastError: "replacement_target_invalid", evidence: "VPS pengganti tidak dapat diproses: identitas droplet DO belum valid." });
+      return;
+    }
+    const client = await api(); if (!client) return;
+    const dropletId = order.dropletId;
+    const missing = (error: unknown) => error instanceof DigitalOceanError && error.httpStatus === 404;
+    let deleted = false;
+    try {
+      let droplet;
+      try { droplet = await client.getDroplet(dropletId, deps.signal); }
+      catch (error) { if (!missing(error)) throw error; deleted = true; }
+      if (droplet) {
+        if (droplet.id !== dropletId || droplet.name !== order.createName
+          || (droplet.region && droplet.region !== order.snapshot.region) || (droplet.size && droplet.size !== order.snapshot.size)) {
+          await stage("review", { lastError: "droplet_identity_mismatch", evidence: "Identitas droplet berbeda dari pesanan; penghapusan dan create ulang dihentikan." });
+          return;
+        }
+        // Persist the exact target before DELETE. Recovery observes this same ID;
+        // an interrupted request never authorizes another create or a refund.
+        await save({ replacementDeleteRequestedAt: new Date(deps.now()) });
+        try { await client.deleteDroplet(dropletId, deps.signal); }
+        catch (error) { if (!missing(error)) throw error; }
+        try { await client.getDroplet(dropletId, deps.signal); }
+        catch (error) { if (!missing(error)) throw error; deleted = true; }
+      }
+    } catch (error) {
+      if (deps.signal.aborted) throw error;
+      const reason = error instanceof DigitalOceanError && error.kind === "permission" ? "Token DO tidak memiliki izin menghapus VPS. " : "";
+      await save({ lastError: "replacement_delete_pending", evidence: `${reason}SSH gagal 3 kali. Penghapusan VPS belum terkonfirmasi; create ulang dan refund menunggu penghapusan selesai.` });
+      return;
+    }
+    if (!deleted) {
+      await save({ evidence: "Menunggu konfirmasi penghapusan VPS sebelum melanjutkan percobaan berikutnya." });
+      return;
+    }
+    await deps.releaseCapacity();
+    const deletedDropletIds = [...new Set([...(order.deletedDropletIds ?? []), dropletId])];
+    const reset: Partial<IVpsOrder> = { deletedDropletIds, dropletId: null, publicIp: null, createAttemptedAt: null,
+      reservationActive: false, replacementDeleteRequestedAt: null, installerBootMode: null, installerImageUrl: null, installerLogUrl: null, rdpSuccesses: 0, resumeStage: null };
+    if (provisionAttempt >= 3) {
+      await stage("failed", { ...reset, provisionAttempt: 3, sshAttempts: 3, lastError: "ssh_retry_exhausted",
+        evidence: "Failed: SSH timeout/koneksi gagal pada 3 VPS (3 percobaan per VPS, total 9 percobaan). Semua VPS telah dihapus. Refund ke saldo buyer diproses." });
+      await refundTerminal();
+    } else {
+      await stage("queued", { ...reset, provisionAttempt: provisionAttempt + 1, sshAttempts: 0, lastError: null,
+        createName: `bt-vps-${order._id}-try${provisionAttempt + 1}`,
+        ...(order.service === "purchase" ? { credentialId: null, accountId: null } : {}),
+        evidence: `SSH gagal 3 kali pada VPS ${provisionAttempt}/3. VPS telah dihapus; menyiapkan VPS baru ${provisionAttempt + 1}/3 dengan spek dan region yang sama.` });
+    }
+    return;
+  }
 
   if (["requested", "submitting", "running"].includes(order.rebootState)) {
     if (order.service !== "purchase" || !order.dropletId) return;
@@ -127,7 +199,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       }
       // Name is persisted at checkout. Even a process crash after this write forbids
       // blindly replaying POST, whether or not the request reached DigitalOcean.
-      await stage("creating", { createAttemptedAt: new Date(deps.now()), evidence: "Request pembuatan droplet sedang diproses." });
+      await stage("creating", { provisionAttempt, createAttemptedAt: new Date(deps.now()), evidence: `Request pembuatan droplet ${provisionAttempt}/3 sedang diproses.` });
       try {
         const created = await client.createDroplet({ name: order.createName, region: order.snapshot.region, size: order.snapshot.size,
           image: order.snapshot.image, userData: buildUserData(deps.password()) }, deps.signal);
@@ -161,7 +233,12 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   const sourcePassword = order.service === "install" && order.sourcePasswordEncrypted ? (deps.sourcePassword?.() ?? password) : password;
   const sourceUsername = order.service === "install" && order.sourceUsername ? (deps.sourceUsername?.() ?? order.sourceUsername) : "root";
   if (order.stage === "ssh") {
+    if (!directInstall && (order.sshAttempts ?? 0) >= 3) {
+      await stage("replacing", { evidence: `SSH gagal 3 kali pada VPS ${provisionAttempt}/3. Menghapus VPS sebelum ${provisionAttempt >= 3 ? "refund ke saldo buyer" : "membuat VPS pengganti"}.` });
+      return;
+    }
     if (await deps.testSsh({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal)) {
+      if (deps.signal.aborted) return;
       if (getOs(order.snapshot.os)?.family === "linux") {
         await stage("ready", { reservationActive: false, evidence: "Login SSH root berhasil diverifikasi." });
         deps.clearToken();
@@ -170,7 +247,13 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       // Persist before mutation, but do not burn another worker interval.
       await stage("installing", { evidence: "SSH Linux berhasil; menyiapkan installer Windows." });
     } else {
-      if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
+      if (deps.signal.aborted) return;
+      if (!directInstall && order.dropletId) {
+        const sshAttempts = (order.sshAttempts ?? 0) + 1;
+        if (sshAttempts >= 3) await stage("replacing", { sshAttempts: 3, replacementDeleteRequestedAt: null,
+          evidence: `SSH gagal 3 kali pada VPS ${provisionAttempt}/3. Menghapus VPS sebelum ${provisionAttempt >= 3 ? "refund ke saldo buyer" : "membuat VPS pengganti"}.` });
+        else await save({ sshAttempts, evidence: `SSH timeout/koneksi gagal. Percobaan ${sshAttempts}/3 pada VPS ${provisionAttempt}/3; mencoba SSH kembali.` });
+      } else if (deps.now() - order.stageStartedAt.getTime() > 30 * 60_000) await save({ stage: "review", resumeStage: "ssh", evidence: "SSH belum dapat dikonfirmasi. VPS yang sama tetap dipantau." });
       return;
     }
   }
@@ -255,7 +338,7 @@ export class VpsWorker {
   private readonly warnings = new ThrottledWarningLogger();
   private readonly concurrency = boundedEnv("VPS_CONCURRENCY", 4, 1, 8);
   private paymentReconciliation: Promise<void> | null = null;
-  constructor(private readonly api: Pick<Api, "sendMessage">) {}
+  constructor(private readonly api: Pick<Api, "sendMessage" | "editMessageText">) {}
 
   private kickPaymentReconciliation(): void {
     if (this.paymentReconciliation || this.abort.signal.aborted) return;
@@ -277,7 +360,7 @@ export class VpsWorker {
         tenantId: "platform",
         paymentStatus: "paid",
         nextRunAt: { $lte: now },
-        stage: { $in: ["queued", "ssh", "installing", "rebooting"] },
+        stage: { $in: ["queued", "ssh", "replacing", "installing", "rebooting"] },
         $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }],
       }, update, options).select("+passwordEncrypted +sourcePasswordEncrypted").lean();
     }
@@ -289,7 +372,7 @@ export class VpsWorker {
       $and: [
         { $or: [{ lockUntil: null }, { lockUntil: { $lt: now } }] },
         { $or: [
-          { stage: { $in: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
+          { stage: { $in: ["queued", "creating", "droplet", "ssh", "replacing", "installing", "rebooting", "monitoring", "review", "failed", "cancelled"] } },
           { rebootState: { $in: ["requested", "submitting", "running"] } },
         ] },
       ],
@@ -328,6 +411,7 @@ export class VpsWorker {
     const leaseId = order.lockOwner;
     if (!leaseId) throw new Error("Missing VPS lease.");
     const initialStage = order.stage; const initialReboot = order.rebootState;
+    const initialEvidence = order.evidence;
     const stopStep = new AbortController();
     const stop = () => stopStep.abort();
     this.abort.signal.addEventListener("abort", stop, { once: true });
@@ -342,12 +426,6 @@ export class VpsWorker {
       if (!result.matchedCount) throw new Error("VPS order lease lost.");
     };
     try {
-      if (["failed", "cancelled"].includes(order.stage) && !order.dropletId && !order.createAttemptedAt) {
-        await releaseCapacityTicket(order._id);
-        await refundVpsOrder(order._id, order.stage === "cancelled" ? "cancelled_before_create" : order.lastError === "create_rejected" ? "create_rejected" : "validation_failed");
-        buyerTokens.delete(order.buyerId, order._id);
-        return;
-      }
       await advanceVpsOrder(order, {
         save,
         client: async () => {
@@ -373,6 +451,8 @@ export class VpsWorker {
           return client;
         },
         reserve: () => reserveStoreCapacity(order, leaseId),
+        releaseCapacity: () => releaseCapacityTicket(order._id),
+        refund: async reason => { await refundVpsOrder(order._id, reason); },
         password: () => decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourceUsername: () => order.sourceUsername ?? "root",
@@ -384,7 +464,7 @@ export class VpsWorker {
       if (order.credentialId && ["queued", "creating", "review"].includes(initialStage) && (order.dropletId || order.lastError === "create_rejected" || order.lastError === "create_uncertain")) {
         await VpsCredential.updateOne({ _id: order.credentialId }, { $set: { lastCreateResult: order.dropletId ? "created" : order.lastError, lastCreateAt: order.createAttemptedAt ?? new Date() } }).catch(() => {});
       }
-      if (initialStage !== order.stage || initialReboot !== order.rebootState) {
+      if (initialStage !== order.stage || initialReboot !== order.rebootState || initialEvidence !== order.evidence) {
         // Notification failure cannot alter provisioning, payment or refund state.
         const isReady = order.stage === "ready";
         const message = isReady
@@ -428,11 +508,11 @@ export class VpsWorker {
         }
       }
     } catch (error) {
-      await save({ lastError: "step_deferred" }).catch(() => {});
+      if (order.lastError !== "ssh_retry_exhausted") await save({ lastError: "step_deferred" }).catch(() => {});
       this.warnings.warn(`vps:${order._id}`, `[VPS:${order._id}] Step interrupted; persistent stage retained.`, error);
     } finally {
       clearInterval(heartbeat); clearTimeout(deadline); this.abort.signal.removeEventListener("abort", stop);
-      const nextDelay = order.stage === "review" ? 60_000 : order.stage === "monitoring" ? 5_000 : 2_000;
+      const nextDelay = order.stage === "review" ? 60_000 : order.stage === "ssh" || order.stage === "replacing" ? 10_000 : order.stage === "monitoring" ? 5_000 : 2_000;
       await VpsOrder.updateOne({ _id: order._id, lockOwner: leaseId }, { $set: { lockOwner: null, lockUntil: null, nextRunAt: new Date(Date.now() + nextDelay) } });
     }
   }
