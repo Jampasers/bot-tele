@@ -497,10 +497,10 @@ if defined BOT_TELE_NETCONF_FILE (
 
 set "BOT_TELE_IFINDEX="
 if defined mac_addr (
-    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$m=(''%mac_addr%'' -replace ''[:-]'','''').ToUpperInvariant(); Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue ^| Where-Object { (($_.MacAddress -replace ''[:-]'','''').ToUpperInvariant()) -eq $m } ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
+    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$m=('%mac_addr%' -replace '[:-]','').ToUpperInvariant(); Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue ^| Where-Object { (($_.MacAddress -replace '[:-]','').ToUpperInvariant()) -eq $m } ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
 )
 if not defined BOT_TELE_IFINDEX (
-    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-NetAdapter -ErrorAction SilentlyContinue ^| Where-Object { $_.HardwareInterface -and $_.Status -ne ''Disabled'' } ^| Sort-Object ifIndex ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
+    for /f %%I in ('powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-NetAdapter -ErrorAction SilentlyContinue ^| Where-Object { $_.HardwareInterface -and $_.Status -ne 'Disabled' } ^| Sort-Object ifIndex ^| Select-Object -First 1 -ExpandProperty ifIndex"') do set "BOT_TELE_IFINDEX=%%I"
 )
 
 if defined BOT_TELE_IFINDEX if defined ipv4_addr if defined ipv4_gateway (
