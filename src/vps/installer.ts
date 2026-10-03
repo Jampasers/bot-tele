@@ -863,49 +863,87 @@ for line in lines:
         _software_hive=$(get_path_in_correct_case "$os_dir/Windows/System32/config/SOFTWARE")
         if [ -f "$_software_hive" ]; then
             _gpo_reg=/tmp/bot-tele-gpo-startup.reg
+            # hivexregedit creates one key at a time, not its missing ancestors.
+            # Declare parents first; empty sections preserve existing values.
             cat > "$_gpo_reg" <<'EOF_BOT_GPO_REG'
+[\\Microsoft]
+
+[\\Microsoft\\Windows]
+
+[\\Microsoft\\Windows\\CurrentVersion]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup]
+
 [\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\\0]
 "GPO-ID"="LocalGPO"
 "SOM-ID"="Local"
-"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"FileSysPath"="C:\\\\Windows\\\\System32\\\\GroupPolicy\\\\Machine"
 "DisplayName"="Local Group Policy"
 "GPOName"="Local Group Policy"
 "PSScriptOrder"=dword:00000001
 
 [\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\\0\\0]
-"Script"="C:\\windows-fix-rdp.bat"
+"Script"="C:\\\\windows-fix-rdp.bat"
 "Parameters"=""
 "IsPowershell"=dword:00000000
 "ExecTime"=hex(b):00,00,00,00,00,00,00,00
 
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts]
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup]
+
 [\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup\\0]
 "GPO-ID"="LocalGPO"
 "SOM-ID"="Local"
-"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"FileSysPath"="C:\\\\Windows\\\\System32\\\\GroupPolicy\\\\Machine"
 "DisplayName"="Local Group Policy"
 "GPOName"="Local Group Policy"
 "PSScriptOrder"=dword:00000001
 
 [\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup\\0\\0]
-"Script"="C:\\windows-fix-rdp.bat"
+"Script"="C:\\\\windows-fix-rdp.bat"
 "Parameters"=""
 "IsPowershell"=dword:00000000
 "ExecTime"=hex(b):00,00,00,00,00,00,00,00
 
+[\\Policies]
+
+[\\Policies\\Microsoft]
+
+[\\Policies\\Microsoft\\Windows]
+
+[\\Policies\\Microsoft\\Windows\\System]
+
+[\\Policies\\Microsoft\\Windows\\System\\Scripts]
+
+[\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup]
+
 [\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup\\0]
 "GPO-ID"="LocalGPO"
 "SOM-ID"="Local"
-"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"FileSysPath"="C:\\\\Windows\\\\System32\\\\GroupPolicy\\\\Machine"
 "DisplayName"="Local Group Policy"
 "GPOName"="Local Group Policy"
 
 [\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup\\0\\0]
-"Script"="C:\\windows-fix-rdp.bat"
+"Script"="C:\\\\windows-fix-rdp.bat"
 "Parameters"=""
 "ExecTime"=hex(b):00,00,00,00,00,00,00,00
 
 [\\Policies\\Microsoft\\Windows\\System]
 "GpNetworkStartTimeoutPolicyValue"=dword:00000001
+
+[\\Microsoft\\Windows NT]
+
+[\\Microsoft\\Windows NT\\CurrentVersion]
 
 [\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon]
 "GpNetworkStartTimeoutPolicyValue"=dword:00000001

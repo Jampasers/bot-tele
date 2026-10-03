@@ -19,3 +19,29 @@ Reset menyimpan salinan konfigurasi lama dalam `vpscatalogresetbackups`, menggan
 Untuk pemulihan, pilih backupId yang tercetak setelah reset dan tinjau `plans` serta `catalog` dalam koleksi backup secara privat. Hentikan perubahan harga selama restore, lalu pulihkan hanya konfigurasi tersebut; jangan memulihkan order/payment sebagai bagian dari reset katalog.
 
 Sesudah source diperbarui, build dan jalankan ulang proses bot dari versi tersebut. Penggantian data database berlaku langsung pada pembacaan baru, tetapi proses yang masih menjalankan versi lama belum memiliki UI harga/OS baru.
+
+## Recovery error registry startup Windows
+
+Jika log berhenti di `Registering LocalGPO startup bootstrap` dengan
+`reg_import: cannot create ...\Scripts\Startup\0 since parent ... does not exist`,
+installer lama belum membuat key induk SOFTWARE secara berurutan. Generator yang
+baru membuat semua induk lebih dahulu dan meng-escape backslash pada nilai path
+Windows agar `hivexregedit` tidak mengubah `C:\windows-fix-rdp.bat` menjadi path
+tanpa separator. Impor berulang mempertahankan nilai induk dan key lain.
+
+Update dan build bot berlaku untuk instalasi baru. Pada VPS yang sudah berada
+di Alpine, `/trans.sh` adalah salinan lama di RAM. Jalankan perbaikan berikut
+melalui console VPS setelah proses installer berhenti:
+
+```sh
+apk add python3 wget
+wget -O /tmp/repair-windows-gpo.py https://raw.githubusercontent.com/Jampasers/bot-tele/main/scripts/repair-windows-gpo.py
+python3 /tmp/repair-windows-gpo.py /trans.sh && /trans.sh
+```
+
+Script recovery hanya mengganti payload registry GPO di `/trans.sh`, membuat
+backup `/trans.sh.bot-tele-gpo.bak`, dan menolak script yang tidak memiliki satu
+blok GPO bot-tele yang dikenali. Script ini tidak menjalankan installer atau
+reboot. Perintah `/trans.sh` terakhir mengulangi instalasi: image di-download dan
+ditulis ulang ke disk VPS yang sama. Jangan menggunakan `/trans.sh update`,
+karena opsi upstream tersebut mengganti script dengan versi tanpa patch bot.
