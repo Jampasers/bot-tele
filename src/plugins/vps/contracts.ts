@@ -91,6 +91,7 @@ export interface VpsUiDependencies {
   payBalance(actor: string, orderId: string): Promise<{ status: string; message?: string; methodLocked?: boolean }>;
   createInvoice(actor: string, orderId: string): Promise<{ buffer: Buffer; amount: number; expiresAt: Date | string }>;
   checkPayment(actor: string, orderId: string): Promise<{ status: string }>;
+  setStatusMessage?(actor: string, orderId: string, messageId: number): Promise<void>;
   cancel(actor: string, orderId: string): Promise<void>;
   reboot(actor: string, orderId: string): Promise<{ status: string }>;
   listCredentials(actor: string, filter: VpsCredentialFilter, offset: number, limit: number): Promise<VpsUiCredential[]>;

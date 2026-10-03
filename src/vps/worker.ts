@@ -390,7 +390,17 @@ export class VpsWorker {
         const message = isReady
           ? `✅ VPS Selesai & Siap Digunakan!\n\n🖥️ Order: ${order._id}\n${order.evidence}\n\n👉 Buka /vps lalu klik "🔐 Lihat akses VPS" untuk mengambil IP, Username, dan Password RDP.`
           : `🖥️ VPS ${order._id}\n${order.evidence}\nBuka /vps untuk detail.`;
-        await this.api.sendMessage(order.chatId, message).catch(() => console.warn(`[VPS:${order._id}] Notification delivery deferred.`));
+        if (order.statusMessageId) {
+          await this.api.editMessageText(order.chatId, order.statusMessageId, message).catch(() => console.warn(`[VPS:${order._id}] Status message edit deferred.`));
+        } else {
+          const sent = await this.api.sendMessage(order.chatId, message).catch(() => null);
+          if (sent) {
+            order.statusMessageId = sent.message_id;
+            await VpsOrder.updateOne({ _id: order._id, tenantId: "platform" }, { $set: { statusMessageId: sent.message_id } }).catch(() => {});
+          } else {
+            console.warn(`[VPS:${order._id}] Notification delivery deferred.`);
+          }
+        }
 
         if (isReady) {
           void User.findOne({ telegramId: order.buyerId, tenantId: "platform" })

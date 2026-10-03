@@ -256,6 +256,12 @@ export const vpsService: VpsUiDependencies = {
     return { buffer: result.qris.buffer, amount: result.invoice.amount, expiresAt: result.invoice.expiresAt };
   },
   async checkPayment(actor, orderId) { return checkVpsPayment(orderId, actor); },
+  async setStatusMessage(actor, orderId, messageId) {
+    assertVpsPlatform();
+    if (!Number.isSafeInteger(messageId) || messageId < 1) throw new Error("Status message tidak valid.");
+    const result = await VpsOrder.updateOne({ _id: orderId, tenantId: "platform", buyerId: actor }, { $set: { statusMessageId: messageId } });
+    if (!result.matchedCount) throw new Error("Pesanan tidak ditemukan.");
+  },
   cancel, reboot: requestVpsReboot,
   listCredentials, checkCredential, checkAllCredentials, addCredential, deleteCredential,
   async getCredential(actor, id) { assertVpsAdmin(actor); const c = await VpsCredential.findOne({ _id: id, tenantId: "platform" }).lean(); return c ? credentialDto(c) : null; },

@@ -472,16 +472,18 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         if (action[1] === "order") { await showOrder(ctx, orderId); return; }
         if (action[1] === "balance") {
           const result = await deps.payBalance(actor, orderId);
-          await ctx.reply(result.status === "paid" ? "Pembayaran saldo terkonfirmasi. Pesanan diproses di background." : result.status === "insufficient"
+          const message = await ctx.reply(result.status === "paid" ? "Pembayaran saldo terkonfirmasi. Pesanan diproses di background." : result.status === "insufficient"
             ? result.methodLocked === false ? "Saldo belum cukup. Top up saldo atau pilih QRIS pada order ini." : "Saldo belum cukup. Top up saldo lalu bayar kembali pada order ini. Metode pembayaran yang sudah dipilih tetap digunakan agar pembayaran tidak ganda."
             : "Status pembayaran belum final. Periksa detail pesanan.");
+          if (result.status === "paid") await deps.setStatusMessage?.(actor, orderId, message.message_id);
         } else if (action[1] === "qris") {
           const invoice = await deps.createInvoice(actor, orderId);
           await ctx.replyWithPhoto(new InputFile(invoice.buffer, "vps-qris.png"), { caption: `Pembayaran VPS\nOrder: ${orderId}\nTotal: ${vpsPrice(invoice.amount)}\nBerlaku sampai: ${vpsDate(invoice.expiresAt)}\n\nBayar tepat sesuai nominal. Pembayaran diperiksa otomatis.`, reply_markup: new InlineKeyboard().text("Cek pembayaran", `vps_check_${orderId}`).row().text("Detail pesanan", `vps_order_${orderId}`) });
           return;
         } else if (action[1] === "check") {
           const result = await deps.checkPayment(actor, orderId);
-          await ctx.reply(result.status === "paid" ? "Pembayaran terkonfirmasi. Pesanan diproses di background." : result.status === "expired" ? "Invoice kedaluwarsa. Periksa status order sebelum membuat pembayaran baru." : "Pembayaran belum terkonfirmasi; pemeriksaan otomatis tetap berjalan.");
+          const message = await ctx.reply(result.status === "paid" ? "Pembayaran terkonfirmasi. Pesanan diproses di background." : result.status === "expired" ? "Invoice kedaluwarsa. Periksa status order sebelum membuat pembayaran baru." : "Pembayaran belum terkonfirmasi; pemeriksaan otomatis tetap berjalan.");
+          if (result.status === "paid") await deps.setStatusMessage?.(actor, orderId, message.message_id);
         } else if (action[1] === "cancel") {
           const order = await deps.getOwned(actor, orderId);
           if (!order) throw new Error("Order unavailable");

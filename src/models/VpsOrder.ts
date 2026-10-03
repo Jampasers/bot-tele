@@ -7,6 +7,7 @@ export interface IVpsOrder {
   snapshot: { planId: string; planName: string; size: string; region: string; os: string; image: string; price: number; vcpus: number; memory: number; disk: number; installChrome?: boolean };
   paymentStatus: "unpaid" | "paying" | "paid" | "refunding" | "refunded" | "cancelled";
   paymentMethod: "balance" | "qris" | null; paymentPaidAt: Date | null;
+  statusMessageId?: number | null;
   paymentInvoice?: { reference: string; merchantId: string; amount: number; createdAt: Date; expiresAt: Date; matchedTransactionId?: string; paidAt?: Date };
   paymentInvoiceLeaseUntil: Date | null; refundReason: string | null; refundedAt: Date | null;
   stage: "queued" | "creating" | "droplet" | "ssh" | "installing" | "rebooting" | "monitoring" | "ready" | "needs_token" | "review" | "failed" | "cancelled";
@@ -29,6 +30,7 @@ const schema = new Schema<IVpsOrder>({
   snapshot: { type: new Schema({ planId: String, planName: String, size: String, region: String, os: String, image: String, price: { type: Number, min: 1, required: true }, vcpus: Number, memory: Number, disk: Number, installChrome: { type: Boolean, default: false } }, { _id: false }), required: true, immutable: true },
   paymentStatus: { type: String, enum: ["unpaid", "paying", "paid", "refunding", "refunded", "cancelled"], default: "unpaid" },
   paymentMethod: { type: String, enum: ["balance", "qris", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
+  statusMessageId: { type: Number, default: null },
   paymentInvoiceLeaseUntil: { type: Date, default: null }, refundReason: { type: String, default: null }, refundedAt: { type: Date, default: null },
   stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },
   resumeStage: { type: String, default: null }, credentialId: { type: String, default: null }, accountId: { type: String, default: null },
