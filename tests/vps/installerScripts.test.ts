@@ -381,6 +381,77 @@ echo keep-after
     assert.equal(readFileSync(script, "utf8"), "echo unmatched-installer\n");
 });
 
+// This is the literal output emitted by the Chrome interpolation before
+// 52c7e30: doubled path separators and backslash-n text on one CMD line.
+const legacyChromePrerequisite = String.raw`if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" (\n    if exist "%SystemDrive%\\windows-install-chrome.bat" call "%SystemDrive%\\windows-install-chrome.bat"\n)\n`;
+
+function runBootstrapRepair(root: string) {
+    return spawnSync(python!, [
+        fileURLToPath(new URL("../../scripts/repair-windows-bootstrap.py", import.meta.url)), root,
+    ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+}
+
+for (const newline of ["\n", "\r\n"]) {
+    test(`mounted Windows recovery repairs only the old Chrome block with ${newline.length === 1 ? "LF" : "CRLF"} endings`, { skip: scriptSkip }, async t => {
+        const { directory } = await emitWindowsFiles(t, true, false);
+        const root = path.join(directory, "os");
+        const config = path.join(root, "Windows", "System32", "config");
+        mkdirSync(config, { recursive: true });
+        writeFileSync(path.join(config, "SYSTEM"), "untouched-hive");
+        const script = path.join(root, "windows-fix-rdp.bat");
+        const fixed = (readFileSync(script, "utf8") + String.raw`rem preserve unrelated C:\newfolder` + "\n").replace(/\r?\n/g, newline);
+        const chrome = fixed.match(/^if exist "%SystemRoot%\\bot-tele-chrome-required"[^\r\n]*\r?\n    if exist [^\r\n]*\r?\n\)\r?\n/m)?.[0];
+        assert.ok(chrome);
+        const broken = fixed.replace(chrome, legacyChromePrerequisite);
+        assert.notEqual(broken, fixed);
+        writeFileSync(script, broken);
+        const password = readFileSync(path.join(root, "windows-set-admin-password.ps1"));
+        const network = readFileSync(path.join(root, "windows-set-netconf-eth0.bat"));
+
+        const first = runBootstrapRepair(root);
+        assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+        assert.match(first.stdout, /Chrome prerequisite block repaired/);
+        assert.equal(readFileSync(script, "utf8"), fixed, "recovery must equal the new generator output byte for byte");
+        assert.equal(readFileSync(script + ".bot-tele-bootstrap.bak", "utf8"), broken);
+        assert.equal(readFileSync(path.join(config, "SYSTEM"), "utf8"), "untouched-hive");
+        assert.deepEqual(readFileSync(path.join(root, "windows-set-admin-password.ps1")), password);
+        assert.deepEqual(readFileSync(path.join(root, "windows-set-netconf-eth0.bat")), network);
+        const second = runBootstrapRepair(root);
+        assert.equal(second.status, 0, `${second.stdout}\n${second.stderr}`);
+        assert.match(second.stdout, /No known Chrome newline bug found/);
+        assert.equal(readFileSync(script, "utf8"), fixed);
+        assert.equal(readFileSync(script + ".bot-tele-bootstrap.bak", "utf8"), broken);
+
+        writeFileSync(script, broken.replace("windows-install-chrome.bat", "unknown-chrome-installer.bat"));
+        const unknown = readFileSync(script);
+        assert.notEqual(runBootstrapRepair(root).status, 0, "unknown legacy blocks must be refused");
+        assert.deepEqual(readFileSync(script), unknown);
+        assert.equal(readFileSync(script + ".bot-tele-bootstrap.bak", "utf8"), broken);
+    });
+}
+
+for (const installChrome of [false, true]) {
+    test(`mounted Windows recovery leaves a current Chrome=${installChrome} bootstrap unchanged`, { skip: scriptSkip }, async t => {
+        const { directory } = await emitWindowsFiles(t, installChrome, false);
+        const root = path.join(directory, "os");
+        const config = path.join(root, "Windows", "System32", "config");
+        mkdirSync(config, { recursive: true });
+        writeFileSync(path.join(config, "SYSTEM"), "untouched-hive");
+        const script = path.join(root, "windows-fix-rdp.bat");
+        const before = readFileSync(script);
+        const result = runBootstrapRepair(root);
+        assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+        assert.deepEqual(readFileSync(script), before);
+        assert.equal(existsSync(script + ".bot-tele-bootstrap.bak"), false);
+
+        writeFileSync(script, "@echo off\necho unrelated-batch\n");
+        assert.notEqual(runBootstrapRepair(root).status, 0);
+        assert.equal(readFileSync(script, "utf8"), "@echo off\necho unrelated-batch\n");
+        assert.equal(existsSync(script + ".bot-tele-bootstrap.bak"), false);
+        assert.notEqual(runBootstrapRepair(path.join(directory, "configs")).status, 0, "a non-Windows root must be refused");
+    });
+}
+
 test("wallpaper and Chrome asset lookup is POSIX-safe across initrd switch_root", { skip: !python && "Python 3 is required" }, async t => {
     const directory = temporaryDirectory(t);
     const patched = patchFixture(directory, await installerPatch(directory, false, true));

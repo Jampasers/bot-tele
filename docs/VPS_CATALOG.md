@@ -73,3 +73,60 @@ impor registry di Alpine tidak memastikan bootstrap Windows telah berhasil.
 Jika masih gagal, periksa `C:\windows-setup.log`, `ipconfig /all`, dan
 `sc query TermService` dari console. Tidak perlu menulis ulang image untuk
 memperbaiki newline di batch ini.
+
+### Jika desktop di Recovery Console terlalu lambat
+
+Perbaikan yang sama dapat dilakukan pada file Windows dari Linux tanpa login
+ke desktop. Di panel DigitalOcean, matikan Droplet, pilih **Boot from Recovery
+ISO** di pengaturan recovery, lalu hidupkan lagi dan buka **Recovery Console**.
+Recovery ISO menampilkan password root sementara dan menyediakan SSH. Dari
+laptop, gunakan `ssh root@IP_VPS` dengan password sementara tersebut. Host key
+recovery memang berbeda; gunakan file known-hosts terpisah untuk sesi ini agar
+catatan koneksi normal tidak diganti:
+
+```powershell
+ssh -o UserKnownHostsFile="$env:TEMP\bot-tele-recovery-known-hosts" root@IP_VPS
+```
+
+Dari shell recovery, periksa partisi sebelum memilihnya:
+
+```sh
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINTS
+```
+
+Pilih partisi NTFS yang berisi folder `Windows`, bukan partisi boot/recovery.
+Ganti `/dev/PARTISI_WINDOWS` di bawah dengan hasil pemeriksaan tersebut. Jangan
+mengasumsikan nomor partisi sama pada image BIOS dan EFI. Jika partisi sudah
+ter-mount, gunakan mount point yang ada dan jangan mount ulang.
+
+```sh
+apt-get update
+apt-get install -y ntfs-3g python3 curl
+mkdir -p /mnt/windows
+mount -t ntfs-3g /dev/PARTISI_WINDOWS /mnt/windows
+curl -fL https://raw.githubusercontent.com/Jampasers/bot-tele/main/scripts/repair-windows-bootstrap.py -o /tmp/repair-windows-bootstrap.py
+python3 /tmp/repair-windows-bootstrap.py /mnt/windows
+tail -n 60 /mnt/windows/windows-setup.log
+```
+
+Helper hanya menerima partisi dengan hive `Windows/System32/config/SYSTEM` dan
+bootstrap bot-tele yang dikenali. Ia mengganti satu blok Chrome rusak,
+mempertahankan bytes di luar blok, dan menyimpan file asli di
+`windows-fix-rdp.bat.bot-tele-bootstrap.bak`. Impor registry, password, dan file
+network tidak disentuh. Jika tidak menemukan bug yang dikenali, helper tidak
+mengubah file; gunakan log untuk diagnosis berikutnya.
+
+Jika NTFS menolak mount karena hibernasi/volume kotor, simpan error untuk
+diagnosis. Jangan gunakan `remove_hiberfile` atau memaksa mount writable.
+Setelah helper berhasil memperbaiki blok, lakukan:
+
+```sh
+sync
+umount /mnt/windows
+poweroff
+```
+
+Di panel DO, pilih **Boot from Hard Drive**, lalu hidupkan Droplet kembali.
+Bootstrap yang telah diperbaiki akan dicoba lagi pada boot Windows berikutnya.
+Periksa port 3389 dan status di bot; perbaikan file sendiri tidak memastikan
+network, Chrome MSI, atau service RDP berhasil pada VPS tersebut.
