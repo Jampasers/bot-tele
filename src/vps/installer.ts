@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import jpeg from "jpeg-js";
 import { PNG } from "pngjs";
 import { Client } from "ssh2";
-import { InstallerError } from "./installerError.js";
+import { classifySshError, InstallerError, SSH_READINESS_DETAILS, type SshReadinessFailure } from "./installerError.js";
 import { validateWindowsImageUrl, type WindowsBootMode } from "./windowsImages.js";
 
 export { InstallerError } from "./installerError.js";
@@ -130,14 +130,16 @@ export interface InstallerDependencies {
 const executeSsh: SshExecutor = (input, signal) => new Promise((resolve, reject) => {
     validIp(input.ip);
     if (signal?.aborted) { reject(new InstallerError("cancelled")); return; }
-    const client = new Client(); let finished = false; let output = "";
+    const client = new Client(); let finished = false; let connected = false; let output = "";
     const finish = (error?: InstallerError, result?: SshRunResult): void => {
         if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); client.destroy();
         if (error) reject(error); else resolve(result!);
     };
     const abort = () => finish(new InstallerError("cancelled", input.mutation === true));
-    const timer = setTimeout(() => finish(new InstallerError("timeout", input.mutation === true)), input.timeoutMs);
+    const timer = setTimeout(() => finish(new InstallerError("timeout", input.mutation === true,
+        connected ? "handshake_timeout" : "connection_timeout")), input.timeoutMs);
     signal?.addEventListener("abort", abort, { once: true });
+    client.on("connect", () => { connected = true; });
     client.on("ready", () => {
         client.exec(input.command, (error, stream) => {
             if (error) { finish(new InstallerError("ssh", input.mutation === true)); return; }
@@ -149,21 +151,47 @@ const executeSsh: SshExecutor = (input, signal) => new Promise((resolve, reject)
             if (input.stdin !== undefined) stream.end(input.stdin); else stream.end();
         });
     });
-    client.on("error", (error: Error & { level?: string }) => finish(new InstallerError(error.level === "client-authentication" ? "authentication" : "ssh", input.mutation === true)));
-    client.on("close", () => finish(new InstallerError("ssh", input.mutation === true)));
+    client.on("error", (error: Error) => finish(classifySshError(error, input.mutation === true, connected)));
+    client.on("close", () => finish(new InstallerError("ssh", input.mutation === true, "connection_reset")));
     try { client.connect({ host: input.ip, port: 22, username: input.username, password: input.password,
         readyTimeout: Math.min(input.timeoutMs, 20_000), keepaliveInterval: 10_000, keepaliveCountMax: 3 });
-    } catch { finish(new InstallerError("ssh", input.mutation === true)); }
+    } catch (error) { finish(classifySshError(error, input.mutation === true, connected)); }
 });
 
-export async function testSsh(input: { ip: string; password: string; username?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<boolean> {
+export type SshReadiness = { ready: true; detail: string } | { ready: false; reason: SshReadinessFailure; detail: string };
+export async function inspectSsh(input: { ip: string; password: string; username?: string; waitForCloudInit?: boolean }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<SshReadiness> {
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    const failed = (reason: SshReadinessFailure): SshReadiness => ({ ready: false, reason, detail: SSH_READINESS_DETAILS[reason] });
     try {
-        const command = !input.username || input.username === "root"
-            ? "test \"$(id -u)\" = 0 && printf '__VPS_SSH_READY__'"
-            : "sudo -n true && printf '__VPS_SSH_READY__'";
+        const privilege = !input.username || input.username === "root" ? 'test "$(id -u)" = 0' : "sudo -n true";
+        // Observe rather than block a worker on `cloud-init status --wait`. A DO
+        // active status or even authenticated SSH can precede the Final stage.
+        const command = `if ! ${privilege}; then printf '__VPS_SSH_PERMISSION__'; exit 1; fi\n`
+            + (input.waitForCloudInit ? `if command -v cloud-init >/dev/null 2>&1; then
+  cloud_state="$(cloud-init status 2>/dev/null || true)"
+  case "$cloud_state" in
+    *"status: done"*|*"status: degraded done"*) ;;
+    *) printf '__VPS_CLOUD_INIT_PENDING__'; exit 0 ;;
+  esac
+fi
+` : "") + "printf '__VPS_SSH_READY__'";
         const result = await (deps.ssh ?? executeSsh)({ ...input, username: input.username ?? "root", command, timeoutMs: 20_000 }, signal);
-        return result.code === 0 && result.output.includes("__VPS_SSH_READY__");
-    } catch (error) { if (signal?.aborted) throw new InstallerError("cancelled"); if (error instanceof InstallerError && error.kind === "validation") throw error; return false; }
+        if (signal?.aborted) throw new InstallerError("cancelled");
+        if (result.code === 0 && result.output.includes("__VPS_SSH_READY__")) return { ready: true, detail: "Login SSH dan akses root/sudo berhasil diverifikasi." };
+        if (result.output.includes("__VPS_CLOUD_INIT_PENDING__")) return failed("cloud_init");
+        return failed("permission");
+    } catch (error) {
+        if (signal?.aborted || (error instanceof InstallerError && error.kind === "cancelled")) throw new InstallerError("cancelled");
+        if (error instanceof InstallerError && error.kind === "validation") throw error;
+        const safe = error instanceof InstallerError ? error : classifySshError(error);
+        if (safe.kind === "authentication") return failed("authentication");
+        if (safe.reason && Object.hasOwn(SSH_READINESS_DETAILS, safe.reason)) return failed(safe.reason as SshReadinessFailure);
+        return failed(safe.kind === "timeout" ? "connection_timeout" : "ssh");
+    }
+}
+
+export async function testSsh(input: { ip: string; password: string; username?: string }, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<boolean> {
+    return (await inspectSsh(input, signal, deps)).ready;
 }
 
 export function parseWindowsBootMode(output: string): WindowsBootMode {

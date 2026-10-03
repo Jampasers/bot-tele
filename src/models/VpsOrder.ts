@@ -1,5 +1,6 @@
 import { Schema, model } from "mongoose";
 import type { WindowsBootMode } from "../vps/windowsImages.js";
+import type { SshReadinessFailure } from "../vps/installerError.js";
 
 export interface IVpsOrder {
   _id: string; tenantId: string; buyerId: string; chatId: string;
@@ -17,6 +18,9 @@ export interface IVpsOrder {
   createAttemptedAt: Date | null; reservationActive: boolean;
   provisionAttempt?: number;
   sshAttempts?: number;
+  sshStartedAt?: Date | null;
+  sshNextAttemptAt?: Date | null;
+  sshLastFailure?: SshReadinessFailure | null;
   replacementDeleteRequestedAt?: Date | null;
   deletedDropletIds?: number[];
   passwordEncrypted: string; lastError: string | null; evidence: string;
@@ -42,6 +46,8 @@ const schema = new Schema<IVpsOrder>({
   sourceUsername: { type: String, default: null }, sourcePasswordEncrypted: { type: String, default: null, select: false },
   createAttemptedAt: { type: Date, default: null }, reservationActive: { type: Boolean, default: false }, passwordEncrypted: { type: String, required: true, select: false },
   provisionAttempt: { type: Number, default: 1, min: 1, max: 3 }, sshAttempts: { type: Number, default: 0, min: 0, max: 3 },
+  sshStartedAt: { type: Date, default: null }, sshNextAttemptAt: { type: Date, default: null },
+  sshLastFailure: { type: String, enum: ["network_unreachable", "connection_refused", "connection_timeout", "handshake_timeout", "connection_reset", "authentication", "cloud_init", "permission", "ssh", null], default: null },
   replacementDeleteRequestedAt: { type: Date, default: null }, deletedDropletIds: { type: [Number], default: [] },
   lastError: { type: String, default: null }, evidence: { type: String, default: "Belum diperiksa" }, installerLogUrl: { type: String, default: null },
   installerBootMode: { type: String, enum: ["bios", "efi", null], default: null }, installerImageUrl: { type: String, default: null },

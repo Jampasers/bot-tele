@@ -4,7 +4,11 @@ import type { IVpsOrder } from "../../src/models/VpsOrder.js";
 import { advanceVpsOrder, type VpsStepDependencies } from "../../src/vps/worker.js";
 import { DigitalOceanClient, DigitalOceanError } from "../../src/vps/digitalOcean.js";
 import { InstallerError } from "../../src/vps/installer.js";
-import { getOs } from "../../src/vps/installer.js";
+import { getOs, type SshReadiness } from "../../src/vps/installer.js";
+import { SSH_READINESS_DETAILS, type SshReadinessFailure } from "../../src/vps/installerError.js";
+
+const readySsh = (): SshReadiness => ({ ready: true, detail: "Ready" });
+const failedSsh = (reason: SshReadinessFailure = "connection_timeout"): SshReadiness => ({ ready: false, reason, detail: SSH_READINESS_DETAILS[reason] });
 
 function orderFixture(patch: Partial<IVpsOrder> = {}): IVpsOrder {
     const now = new Date();
@@ -24,7 +28,7 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
         save: async () => {}, client: async () => { throw new Error("API must not be used in this step"); },
         reserve: async () => { throw new Error("No new capacity may be reserved"); }, password: () => "MockPassword123!xyz",
         releaseCapacity: async () => {}, refund: async () => { throw new Error("No refund expected in this step"); },
-        testSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
+        inspectSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
         detectWindowsBootMode: async () => { throw new Error("Boot detection must not be repeated"); },
         resolveWindowsDdImageCandidates: () => { throw new Error("Image candidates must not be resolved again"); },
         selectWindowsImage: async () => { throw new Error("Image selection must not be repeated"); },
@@ -51,10 +55,10 @@ test("direct buyer VPS fast-path reaches reboot monitoring in one leased worker 
     const deps = dependencies({
         client: async () => { providerCalls++; throw new Error("DigitalOcean must not be used"); },
         sourceUsername: () => "ubuntu", sourcePassword: () => "synthetic-source-password",
-        testSsh: async input => {
+        inspectSsh: async input => {
             sshChecks++;
             assert.deepEqual(input, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
-            return true;
+            return readySsh();
         },
         detectWindowsBootMode: async () => "efi",
         resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
@@ -271,6 +275,13 @@ test("worker monitoring trusts stable external RDP even if an old installer view
     assert.equal(order.rdpSuccesses, 2);
 });
 
+// Existing replacement/recovery cases exercise exhausted post-boot retries.
+// Advance a virtual clock past both the boot grace and the persisted probe delay.
+async function advanceAfterBoot(order: IVpsOrder, deps: VpsStepDependencies): Promise<void> {
+    const now = Math.max(deps.now(), order.stageStartedAt.getTime(), order.sshNextAttemptAt?.getTime() ?? 0) + 300_000;
+    await advanceVpsOrder(order, { ...deps, now: () => now });
+}
+
 function retryProvider(order: IVpsOrder, options: { uncertainDelete?: boolean; refuseDelete?: boolean; holdDeletion?: boolean; uncertainCreateOnAttempt?: number } = {}) {
     const live = new Map<number, { id: number; name: string; status: string; size_slug: string; region: { slug: string }; networks: { v4: { type: string; ip_address: string }[] } }>();
     const creates: Record<string, unknown>[] = [], deletes: number[] = [];
@@ -314,14 +325,14 @@ for (const service of ["purchase", "install"] as const) {
         const deps = dependencies({ client: async () => provider.client,
             reserve: async () => { reservations++; return { credentialId: "shop-token", accountId: "team:one" }; },
             releaseCapacity: async () => { releases++; },
-            testSsh: async () => { sshChecks++; perDroplet.set(order.dropletId!, (perDroplet.get(order.dropletId!) ?? 0) + 1); return false; },
+            inspectSsh: async () => { sshChecks++; perDroplet.set(order.dropletId!, (perDroplet.get(order.dropletId!) ?? 0) + 1); return failedSsh(); },
             refund: async reason => {
                 assert.equal(reason, "ssh_retry_exhausted"); assert.equal(order.stage, "failed");
                 assert.equal(provider.live.size, 0); assert.equal(order.dropletId, null); assert.equal(order.createAttemptedAt, null);
                 refunds++;
             }, clearToken: () => { cleared++; },
         });
-        for (let step = 0; step < 30 && order.paymentStatus !== "refunded"; step++) await advanceVpsOrder(order, deps);
+        for (let step = 0; step < 30 && order.paymentStatus !== "refunded"; step++) await advanceAfterBoot(order, deps);
         assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded");
         assert.equal(sshChecks, 9); assert.deepEqual([...perDroplet.values()], [3, 3, 3]);
         assert.equal(provider.creates.length, 3); assert.deepEqual(provider.deletes, [101, 102, 103]);
@@ -331,7 +342,8 @@ for (const service of ["purchase", "install"] as const) {
         assert.equal(refunds, 1); assert.equal(cleared, 1); assert.ok(releases >= 3);
         assert.equal(reservations, service === "purchase" ? 2 : 0);
         assert.match(order.evidence, /SSH.*9 percobaan/); assert.match(order.evidence, /dikembalikan ke saldo/);
-        await advanceVpsOrder(order, deps);
+        assert.match(order.evidence, /port SSH 22 timeout/); assert.equal(order.sshLastFailure, "connection_timeout");
+        await advanceAfterBoot(order, deps);
         assert.equal(provider.creates.length, 3); assert.equal(refunds, 1);
     });
 }
@@ -340,8 +352,8 @@ test("successful SSH on a replacement keeps that VPS and proceeds without refund
     const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null,
         snapshot: { ...orderFixture().snapshot, os: "ubuntu24" } });
     const provider = retryProvider(order); let checks = 0;
-    const deps = dependencies({ client: async () => provider.client, testSsh: async () => ++checks === 6 });
-    for (let step = 0; step < 20 && order.stage !== "ready"; step++) await advanceVpsOrder(order, deps);
+    const deps = dependencies({ client: async () => provider.client, inspectSsh: async () => ++checks === 6 ? readySsh() : failedSsh() });
+    for (let step = 0; step < 20 && order.stage !== "ready"; step++) await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "ready"); assert.equal(order.paymentStatus, "paid");
     assert.equal(provider.creates.length, 2); assert.deepEqual(provider.deletes, [101]); assert.equal(provider.live.size, 1);
     assert.equal(order.dropletId, 102); assert.equal(checks, 6);
@@ -350,10 +362,10 @@ test("successful SSH on a replacement keeps that VPS and proceeds without refund
 test("SSH retry count survives restart and never attempts a fourth login on the same VPS", async () => {
     const order = orderFixture({ stage: "ssh", sshAttempts: 2, provisionAttempt: 1 });
     let checks = 0;
-    await advanceVpsOrder(order, dependencies({ testSsh: async () => { checks++; return false; } }));
+    await advanceAfterBoot(order, dependencies({ inspectSsh: async () => { checks++; return failedSsh(); } }));
     assert.equal(order.stage, "replacing"); assert.equal(order.sshAttempts, 3); assert.equal(checks, 1);
     const resumed = structuredClone(order);
-    await advanceVpsOrder(resumed, dependencies({ client: async () => undefined }));
+    await advanceAfterBoot(resumed, dependencies({ client: async () => undefined }));
     assert.equal(resumed.stage, "needs_token"); assert.equal(resumed.resumeStage, "replacing");
     assert.equal(checks, 1); assert.equal(resumed.dropletId, 42);
 });
@@ -361,13 +373,13 @@ test("SSH retry count survives restart and never attempts a fourth login on the 
 test("shutdown during an SSH check never counts a failure or deletes the VPS", async () => {
     const order = orderFixture({ stage: "ssh", sshAttempts: 2 });
     const abort = new AbortController();
-    await advanceVpsOrder(order, dependencies({ signal: abort.signal, testSsh: async () => { abort.abort(); return false; } }));
+    await advanceAfterBoot(order, dependencies({ signal: abort.signal, inspectSsh: async () => { abort.abort(); return failedSsh(); } }));
     assert.equal(order.stage, "ssh"); assert.equal(order.sshAttempts, 2); assert.equal(order.dropletId, 42);
 });
 
 test("existing buyer VPS is never deleted or recreated after SSH failures", async () => {
     const order = orderFixture({ stage: "ssh", sourceUsername: "root", sourcePasswordEncrypted: "buyer-source", dropletId: null, createAttemptedAt: null });
-    const deps = dependencies({ testSsh: async () => false });
+    const deps = dependencies({ inspectSsh: async () => failedSsh() });
     for (let step = 0; step < 12; step++) await advanceVpsOrder(order, deps);
     assert.equal(order.stage, "ssh"); assert.equal(order.paymentStatus, "paid"); assert.equal(order.sshAttempts, undefined);
 });
@@ -378,7 +390,7 @@ test("replacement refuses to delete a droplet whose identity differs from the or
         if (init.method === "DELETE") deletes++;
         return Response.json({ droplet: { id: 42, name: "another-buyers-vps", status: "active" } });
     } });
-    await advanceVpsOrder(order, dependencies({ client: async () => client }));
+    await advanceAfterBoot(order, dependencies({ client: async () => client }));
     assert.equal(order.stage, "review"); assert.equal(order.dropletId, 42); assert.equal(deletes, 0);
     assert.equal(order.lastError, "droplet_identity_mismatch");
 });
@@ -387,8 +399,8 @@ for (const failure of ["permission", "confirmation"] as const) {
     test(`replacement waits for confirmed deletion after ${failure} failure`, async () => {
         const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
         const provider = retryProvider(order, { refuseDelete: failure === "permission", holdDeletion: failure === "confirmation" });
-        const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
-        for (let step = 0; step < 10; step++) await advanceVpsOrder(order, deps);
+        const deps = dependencies({ client: async () => provider.client, inspectSsh: async () => failedSsh() });
+        for (let step = 0; step < 10; step++) await advanceAfterBoot(order, deps);
         assert.equal(order.stage, "replacing"); assert.equal(order.paymentStatus, "paid");
         assert.equal(provider.creates.length, 1); assert.equal(provider.live.size, 1); assert.equal(order.dropletId, 101);
     });
@@ -397,15 +409,15 @@ for (const failure of ["permission", "confirmation"] as const) {
 test("uncertain delete recovers by observing absence before creating a replacement", async () => {
     const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
     const provider = retryProvider(order, { uncertainDelete: true });
-    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
-    for (let step = 0; step < 5; step++) await advanceVpsOrder(order, deps);
+    const deps = dependencies({ client: async () => provider.client, inspectSsh: async () => failedSsh() });
+    for (let step = 0; step < 5; step++) await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "replacing");
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "replacing"); assert.equal(order.dropletId, 101); assert.equal(provider.live.size, 0);
     assert.equal(provider.creates.length, 1);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "queued"); assert.equal(order.provisionAttempt, 2);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(provider.creates.length, 2); assert.deepEqual(provider.deletes, [101]);
 });
 
@@ -415,7 +427,7 @@ test("delete intent must persist before any DELETE request", async () => {
         if (init.method === "DELETE") deletes++;
         return Response.json({ droplet: { id: 42, name: order.createName, status: "active" } });
     } });
-    await assert.rejects(advanceVpsOrder(order, dependencies({ client: async () => client, save: async () => { throw new Error("persistence unavailable"); } })));
+    await assert.rejects(advanceAfterBoot(order, dependencies({ client: async () => client, save: async () => { throw new Error("persistence unavailable"); } })));
     assert.equal(deletes, 0); assert.equal(order.stage, "replacing");
 });
 
@@ -430,9 +442,9 @@ test("refund interruption resumes a terminal failure without another delete or c
         assert.equal(reason, "ssh_retry_exhausted");
         if (++refunds === 1) throw new Error("interrupted wallet recovery");
     } });
-    await assert.rejects(advanceVpsOrder(order, deps), /wallet/);
+    await assert.rejects(advanceAfterBoot(order, deps), /wallet/);
     assert.equal(order.stage, "failed"); assert.equal(order.lastError, "ssh_retry_exhausted"); assert.equal(order.dropletId, null);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(order.paymentStatus, "refunded"); assert.deepEqual(order.deletedDropletIds, [1, 2, 42]);
     assert.equal(refunds, 2); assert.equal(deletes, 0);
 });
@@ -441,27 +453,165 @@ test("restart after deleting a droplet preserves the next attempt and does not r
     const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
     const provider = retryProvider(order);
     let failReset = true;
-    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false,
+    const deps = dependencies({ client: async () => provider.client, inspectSsh: async () => failedSsh(),
         save: async patch => { if (failReset && patch.stage === "queued" && patch.provisionAttempt === 2) { failReset = false; throw new Error("restart after deletion"); } },
     });
-    for (let step = 0; step < 5; step++) await advanceVpsOrder(order, deps);
-    await assert.rejects(advanceVpsOrder(order, deps), /restart/);
+    for (let step = 0; step < 5; step++) await advanceAfterBoot(order, deps);
+    await assert.rejects(advanceAfterBoot(order, deps), /restart/);
     assert.equal(order.stage, "replacing"); assert.equal(order.dropletId, 101); assert.equal(provider.live.size, 0);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "queued"); assert.equal(order.provisionAttempt, 2); assert.equal(order.sshAttempts, 0);
     assert.deepEqual(order.deletedDropletIds, [101]); assert.deepEqual(provider.deletes, [101]);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(provider.creates.length, 2);
 });
 
 test("ambiguous replacement create reconciles the new name without making a third VPS", async () => {
     const order = orderFixture({ stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null });
     const provider = retryProvider(order, { uncertainCreateOnAttempt: 2 });
-    const deps = dependencies({ client: async () => provider.client, testSsh: async () => false });
-    for (let step = 0; step < 7; step++) await advanceVpsOrder(order, deps);
+    const deps = dependencies({ client: async () => provider.client, inspectSsh: async () => failedSsh() });
+    for (let step = 0; step < 7; step++) await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "creating");
     assert.equal(provider.creates.length, 2); assert.equal(order.provisionAttempt, 2);
-    await advanceVpsOrder(order, deps);
+    await advanceAfterBoot(order, deps);
     assert.equal(order.stage, "droplet"); assert.equal(order.dropletId, 102);
     assert.equal(provider.creates.length, 2); assert.deepEqual(order.deletedDropletIds, [101]);
+});
+
+for (const service of ["purchase", "install"] as const) {
+    test(`${service} DO tolerates five boot-time SSH failures then becomes ready on its first VPS`, async () => {
+        const order = orderFixture({ service, stage: "queued", createAttemptedAt: null, dropletId: null, publicIp: null,
+            credentialId: service === "purchase" ? "shop-token" : null, installerBootMode: null, installerImageUrl: null,
+            snapshot: { ...orderFixture().snapshot, os: "ubuntu24" } });
+        const provider = retryProvider(order);
+        let now = order.stageStartedAt.getTime(), checks = 0, refunds = 0;
+        const deps = dependencies({ now: () => now, client: async () => provider.client,
+            refund: async () => { refunds++; }, inspectSsh: async input => {
+                assert.equal(input.waitForCloudInit, true);
+                return ++checks === 6 ? readySsh() : failedSsh(checks % 2 ? "authentication" : "connection_refused");
+            },
+        });
+        await advanceVpsOrder(order, deps); // Create.
+        await advanceVpsOrder(order, deps); // DO active is not yet SSH-ready.
+        const bootStarted = order.sshStartedAt!.getTime();
+        for (let probe = 0; probe < 6; probe++) {
+            now = bootStarted + probe * 30_000;
+            await advanceVpsOrder(order, deps);
+            assert.equal(order.sshAttempts, 0);
+            assert.equal(order.provisionAttempt, 1);
+            assert.equal(provider.creates.length, 1);
+            assert.deepEqual(provider.deletes, []);
+        }
+        assert.equal(checks, 6); assert.equal(refunds, 0); assert.equal(order.stage, "ready");
+        assert.equal(order.paymentStatus, "paid"); assert.equal(provider.live.size, 1);
+    });
+}
+
+test("authenticated SSH waits for cloud-init beyond boot grace without launching Windows or spending retries", async () => {
+    const order = orderFixture({ stage: "ssh", sshAttempts: 0 });
+    const bootStarted = order.stageStartedAt.getTime();
+    let now = bootStarted, bootFinished = false, installs = 0;
+    const deps = dependencies({ now: () => now, inspectSsh: async () => bootFinished ? readySsh() : failedSsh("cloud_init"),
+        launchWindows: async () => { installs++; return { state: "prepared", bootMode: "efi", imageUrl: order.installerImageUrl! }; },
+    });
+    for (const elapsed of [30_000, 90_000, 360_000, 1_200_000, 1_860_000]) {
+        now = bootStarted + elapsed;
+        await advanceVpsOrder(order, deps);
+        assert.equal(order.sshAttempts, 0); assert.equal(order.dropletId, 42); assert.equal(installs, 0);
+        assert.match(order.evidence, /cloud-init/);
+    }
+    assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "ssh");
+    now += 60_000; bootFinished = true;
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "monitoring"); assert.equal(installs, 1); assert.equal(order.paymentStatus, "paid");
+});
+
+test("SSH cooldown and original boot timer survive restart and review recovery", async () => {
+    let order = orderFixture({ stage: "ssh", sshAttempts: 0 });
+    const bootStarted = order.stageStartedAt.getTime();
+    let now = bootStarted, checks = 0;
+    const deps = dependencies({ now: () => now, inspectSsh: async () => { checks++; return failedSsh(); } });
+    await advanceVpsOrder(order, deps);
+    assert.equal(checks, 1); assert.equal(order.sshAttempts, 0);
+    assert.equal(order.sshStartedAt!.getTime(), bootStarted);
+    assert.equal(order.sshNextAttemptAt!.getTime(), bootStarted + 30_000);
+    order = structuredClone(order); // New worker/process, same persisted order.
+    now += 10_000;
+    await advanceVpsOrder(order, deps);
+    assert.equal(checks, 1);
+    now = bootStarted + 30_000;
+    await advanceVpsOrder(order, deps);
+    assert.equal(checks, 2); assert.equal(order.sshAttempts, 0);
+    order.stage = "review"; order.resumeStage = "ssh"; order.stageStartedAt = new Date(now);
+    now = bootStarted + 300_000;
+    await advanceVpsOrder(order, deps);
+    assert.equal(checks, 3); assert.equal(order.sshAttempts, 1);
+    assert.equal(order.sshStartedAt!.getTime(), bootStarted);
+});
+
+test("network unreachable on bot host preserves the same paid VPS and resumes when routing recovers", async () => {
+    const order = orderFixture({ stage: "ssh", sshAttempts: 2,
+        snapshot: { ...orderFixture().snapshot, os: "ubuntu24" } });
+    const bootStarted = order.stageStartedAt.getTime();
+    let now = bootStarted + 600_000, reachable = false;
+    const deps = dependencies({ now: () => now, inspectSsh: async () => reachable ? readySsh() : failedSsh("network_unreachable") });
+    for (let check = 0; check < 2; check++) {
+        await advanceVpsOrder(order, deps);
+        assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "ssh");
+        assert.equal(order.sshAttempts, 2); assert.equal(order.dropletId, 42);
+        assert.equal(order.paymentStatus, "paid"); assert.equal(order.lastError, "ssh_network_unreachable");
+        now += 60_000;
+    }
+    reachable = true;
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ready"); assert.equal(order.dropletId, 42); assert.equal(order.paymentStatus, "paid");
+    assert.equal(order.sshLastFailure, null);
+});
+
+test("upgrade protects a premature legacy replacement until the existing VPS finishes booting", async () => {
+    const order = orderFixture({ stage: "replacing", sshAttempts: 3, replacementDeleteRequestedAt: null,
+        snapshot: { ...orderFixture().snapshot, os: "ubuntu24" } });
+    const now = order.stageStartedAt.getTime() + 60_000;
+    const deps = dependencies({ now: () => now, inspectSsh: async () => readySsh() });
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ssh"); assert.equal(order.sshAttempts, 0); assert.equal(order.dropletId, 42);
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "ready"); assert.equal(order.dropletId, 42);
+});
+
+test("upgrade still reconciles an existing DELETE intent during the boot grace", async () => {
+    const order = orderFixture({ stage: "replacing", sshAttempts: 3, replacementDeleteRequestedAt: new Date(),
+        sshStartedAt: new Date(), sshNextAttemptAt: new Date(), sshLastFailure: "authentication" });
+    const client = new DigitalOceanClient("isolated-token", { fetch: async (_url, init) => {
+        assert.equal(init.method, "GET"); return Response.json({}, { status: 404 });
+    } });
+    await advanceVpsOrder(order, dependencies({ client: async () => client }));
+    assert.equal(order.stage, "queued"); assert.equal(order.dropletId, null); assert.equal(order.provisionAttempt, 2);
+    assert.equal(order.sshStartedAt, null); assert.equal(order.sshNextAttemptAt, null); assert.equal(order.sshLastFailure, null);
+    assert.deepEqual(order.deletedDropletIds, [42]);
+});
+
+test("DO active but locked droplet is observed without starting the SSH grace or a login", async () => {
+    const order = orderFixture({ stage: "droplet", sshStartedAt: null });
+    const client = new DigitalOceanClient("isolated-token", { fetch: async () => Response.json({ droplet: {
+        id: 42, name: order.createName, status: "active", locked: true,
+        networks: { v4: [{ type: "public", ip_address: "203.0.113.10" }] },
+    } }) });
+    await advanceVpsOrder(order, dependencies({ client: async () => client }));
+    assert.equal(order.stage, "droplet"); assert.equal(order.sshStartedAt, null);
+});
+
+test("configurable SSH boot grace is respected without resetting its start time", async t => {
+    const previous = process.env.VPS_SSH_BOOT_GRACE_SECONDS;
+    process.env.VPS_SSH_BOOT_GRACE_SECONDS = "600";
+    t.after(() => { if (previous === undefined) delete process.env.VPS_SSH_BOOT_GRACE_SECONDS; else process.env.VPS_SSH_BOOT_GRACE_SECONDS = previous; });
+    const order = orderFixture({ stage: "ssh", sshAttempts: 0 });
+    const bootStarted = order.stageStartedAt.getTime();
+    let now = bootStarted + 300_000;
+    const deps = dependencies({ now: () => now, inspectSsh: async () => failedSsh("authentication") });
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.sshAttempts, 0); assert.equal(order.sshStartedAt!.getTime(), bootStarted);
+    now = bootStarted + 600_000;
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.sshAttempts, 1); assert.equal(order.sshLastFailure, "authentication");
 });

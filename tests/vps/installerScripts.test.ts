@@ -7,7 +7,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
-import { InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
+import { inspectSsh, InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 function interpreter(candidates: string[], args: string[], expected: RegExp): string | undefined {
@@ -27,6 +27,37 @@ const scriptSkip = !python ? "Python 3 is required to execute the generated inst
 // hivexregedit prints its help successfully with exit code 1.
 const hivexProbe = spawnSync("hivexregedit", ["--help"], { encoding: "utf8", timeout: 5_000, windowsHide: true });
 const hivexregedit = /Usage:[\s\S]*hivexregedit --merge/.test(`${hivexProbe.stdout}${hivexProbe.stderr}`) ? "hivexregedit" : undefined;
+
+test("SSH readiness shell observes cloud-init and waits until boot scripts have finished", { skip: !bash && "Bash is required to execute the SSH readiness command" }, async () => {
+    for (const [status, ready] of [
+        ["status: running", false], ["status: not run", false], ["status: error", false],
+        ["status: disabled", false], ["status: done", true], ["status: degraded done", true],
+    ] as const) {
+        const result = await inspectSsh({ ip: "203.0.113.10", password: "MockPassword123!xyz", waitForCloudInit: true }, undefined, {
+            ssh: async input => {
+                assert.equal(input.timeoutMs, 20_000); assert.notEqual(input.mutation, true);
+                const script = `id() { printf '0\\n'; }\ncloud-init() { printf '%s\\n' '${status}'; }\n${input.command}`;
+                const run = spawnSync(bash!, ["-c", script], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+                assert.ifError(run.error); assert.equal(run.stderr, "");
+                return { code: run.status, output: run.stdout };
+            },
+        });
+        assert.equal(result.ready, ready, status);
+        if (!result.ready) assert.equal(result.reason, "cloud_init");
+    }
+});
+
+test("direct SSH readiness checks sudo without waiting on an existing VPS's cloud-init", { skip: !bash && "Bash is required to execute the SSH readiness command" }, async () => {
+    const result = await inspectSsh({ ip: "203.0.113.10", password: "MockPassword123!xyz", username: "ubuntu" }, undefined, {
+        ssh: async input => {
+            const script = `sudo() { test "$1" = -n && test "$2" = true; }\ncloud-init() { echo unexpected >&2; return 1; }\n${input.command}`;
+            const run = spawnSync(bash!, ["-c", script], { encoding: "utf8", timeout: 5_000, windowsHide: true });
+            assert.ifError(run.error); assert.equal(run.stderr, "");
+            return { code: run.status, output: run.stdout };
+        },
+    });
+    assert.equal(result.ready, true);
+});
 
 // These are the upstream setup hooks and batch registration sequence. Nothing
 // from the real installer (downloads, disks, network or registry) is executed.
