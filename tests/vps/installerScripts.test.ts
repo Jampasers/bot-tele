@@ -489,15 +489,17 @@ test("Windows CMD reaches the end of the wallpaper batch with and without its im
     assert.match(command, /-File %SystemDrive%\\danka-wallpaper\.ps1$/);
     assert.doesNotMatch(command, /Add-Type|-Command/);
     const safeBatch = sanitizeBatch(batch) + "\r\necho __WALLPAPER_BATCH_FINISHED__\r\n";
-    writeFileSync(path.join(directory, "wallpaper-parse.bat"), safeBatch);
     const cmd = process.env.ComSpec ?? path.join(process.env.SystemRoot!, "System32", "cmd.exe");
     for (const present of [false, true]) {
         const systemRoot = path.join(directory, present ? "with-wallpaper" : "without-wallpaper");
         mkdirSync(systemRoot);
         if (present) writeFileSync(path.join(systemRoot, "wallpaper.jpg"), "fixture");
+        // Keep the real SystemRoot for cmd.exe startup, then override it only
+        // in the generated batch to exercise both wallpaper file paths.
+        writeFileSync(path.join(directory, "wallpaper-parse.bat"),
+            `@set "SystemRoot=${systemRoot}"\r\n@set "SystemDrive=${directory}"\r\n${safeBatch}`);
         const result = spawnSync(cmd, ["/d", "/c", "wallpaper-parse.bat"], {
             cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
-            env: { ...process.env, SystemRoot: systemRoot, SystemDrive: directory },
         });
         assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
         assert.match(result.stdout, /__WALLPAPER_BATCH_FINISHED__/);
