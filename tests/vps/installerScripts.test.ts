@@ -214,6 +214,11 @@ test("installer preparation caps cloud-init wait and gates readiness on Chrome c
     assert.match(script, /__VPS_CHROME_PACKAGE_UNREACHABLE__/);
     assert.match(script, /configs.*bot-tele/);
     assert.doesNotMatch(readFileSync(path.join(directory, "trans.sh"), "utf8"), /BASH_SOURCE/);
+    assert.match(script, /Group Policy[\\\\/]+Scripts[\\\\/]+Startup[\\\\/]+0[\\\\/]+0/);
+    assert.match(script, /Group Policy[\\\\/]+State[\\\\/]+Machine[\\\\/]+Scripts[\\\\/]+Startup[\\\\/]+0[\\\\/]+0/);
+    assert.match(script, /Policies[\\\\/]+Microsoft[\\\\/]+Windows[\\\\/]+System[\\\\/]+Scripts[\\\\/]+Startup[\\\\/]+0[\\\\/]+0/);
+    assert.match(script, /GpNetworkStartTimeoutPolicyValue/);
+    assert.match(script, /Registering LocalGPO startup bootstrap/);
 });
 
 test("DD patch primes staged VirtIO storage drivers for first KVM boot", { skip: scriptSkip }, async t => {

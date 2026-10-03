@@ -854,7 +854,71 @@ for line in lines:
         cat "$os_dir/windows-del-gpo.bat" >> "$_gpo_guard"
         unix2dos "$_gpo_guard" 2>/dev/null || true
         cat "$_gpo_guard" > "$os_dir/windows-del-gpo.bat"
-        rm -f "$_gpo_guard"''')
+        rm -f "$_gpo_guard"
+
+        # scripts.ini alone is not reliable on captured Server images. Register
+        # the LocalGPO startup script in the offline SOFTWARE hive as well, and
+        # cap the pre-policy network wait so netconf inside the startup script
+        # cannot deadlock behind Group Policy waiting for networking.
+        _software_hive=$(get_path_in_correct_case "$os_dir/Windows/System32/config/SOFTWARE")
+        if [ -f "$_software_hive" ]; then
+            _gpo_reg=/tmp/bot-tele-gpo-startup.reg
+            cat > "$_gpo_reg" <<'EOF_BOT_GPO_REG'
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\\0]
+"GPO-ID"="LocalGPO"
+"SOM-ID"="Local"
+"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"DisplayName"="Local Group Policy"
+"GPOName"="Local Group Policy"
+"PSScriptOrder"=dword:00000001
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\Scripts\\Startup\\0\\0]
+"Script"="C:\\windows-fix-rdp.bat"
+"Parameters"=""
+"IsPowershell"=dword:00000000
+"ExecTime"=hex(b):00,00,00,00,00,00,00,00
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup\\0]
+"GPO-ID"="LocalGPO"
+"SOM-ID"="Local"
+"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"DisplayName"="Local Group Policy"
+"GPOName"="Local Group Policy"
+"PSScriptOrder"=dword:00000001
+
+[\\Microsoft\\Windows\\CurrentVersion\\Group Policy\\State\\Machine\\Scripts\\Startup\\0\\0]
+"Script"="C:\\windows-fix-rdp.bat"
+"Parameters"=""
+"IsPowershell"=dword:00000000
+"ExecTime"=hex(b):00,00,00,00,00,00,00,00
+
+[\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup\\0]
+"GPO-ID"="LocalGPO"
+"SOM-ID"="Local"
+"FileSysPath"="C:\\Windows\\System32\\GroupPolicy\\Machine"
+"DisplayName"="Local Group Policy"
+"GPOName"="Local Group Policy"
+
+[\\Policies\\Microsoft\\Windows\\System\\Scripts\\Startup\\0\\0]
+"Script"="C:\\windows-fix-rdp.bat"
+"Parameters"=""
+"ExecTime"=hex(b):00,00,00,00,00,00,00,00
+
+[\\Policies\\Microsoft\\Windows\\System]
+"GpNetworkStartTimeoutPolicyValue"=dword:00000001
+
+[\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon]
+"GpNetworkStartTimeoutPolicyValue"=dword:00000001
+EOF_BOT_GPO_REG
+            apk add hivex-perl >/dev/null
+            echo "[PATCH] Registering LocalGPO startup bootstrap in offline SOFTWARE hive"
+            if ! timeout 45s hivexregedit --merge "$_software_hive" "$_gpo_reg"; then
+                apk del hivex-perl >/dev/null 2>&1 || true
+                error_and_exit "Failed to register Windows startup bootstrap in offline SOFTWARE hive."
+            fi
+            apk del hivex-perl >/dev/null 2>&1 || true
+            echo "[PATCH] LocalGPO startup bootstrap registry registration complete"
+        fi''')
         continue
     if not gpo_found and line.strip() == 'if $use_gpo; then':
         gpo_found = True
