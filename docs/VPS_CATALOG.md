@@ -45,3 +45,31 @@ blok GPO bot-tele yang dikenali. Script ini tidak menjalankan installer atau
 reboot. Perintah `/trans.sh` terakhir mengulangi instalasi: image di-download dan
 ditulis ulang ke disk VPS yang sama. Jangan menggunakan `/trans.sh update`,
 karena opsi upstream tersebut mengganti script dengan versi tanpa patch bot.
+
+## Windows sudah login screen tetapi RDP belum aktif dengan opsi Chrome
+
+Jika Windows sudah menampilkan layar login setelah installer `DONE`, boot OS
+sudah berhasil. Versi generator sebelum perbaikan newline Chrome menulis teks
+literal `\n` ke blok CMD opsi Chrome, sehingga blok tersebut tidak menjadi
+baris terpisah dan bootstrap bisa berhenti sebelum mengaktifkan RDP.
+
+Untuk instalasi baru, update source bot, build, lalu restart proses bot.
+Untuk Windows yang sudah terpasang, masuk melalui console/VNC, kirim
+Ctrl+Alt+Delete dari kontrol console, lalu login sebagai Administrator dengan
+password pesanan. Buka PowerShell sebagai Administrator dan jalankan:
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$p = 'C:\windows-fix-rdp.bat'
+if (!(Test-Path "$p.bak")) { Copy-Item $p "$p.bak" }
+$s = [IO.File]::ReadAllText($p)
+[IO.File]::WriteAllText($p, $s.Replace('\n', [Environment]::NewLine))
+cmd /d /c $p
+```
+
+Ini memperbaiki salinan batch yang telah terpasang, kemudian menjalankan ulang
+bootstrap yang sama untuk network, password, Chrome, dan RDP. Keberhasilan
+impor registry di Alpine tidak memastikan bootstrap Windows telah berhasil.
+Jika masih gagal, periksa `C:\windows-setup.log`, `ipconfig /all`, dan
+`sc query TermService` dari console. Tidak perlu menulis ulang image untuk
+memperbaiki newline di batch ini.

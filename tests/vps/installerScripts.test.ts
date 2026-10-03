@@ -122,7 +122,12 @@ for (const installChrome of [false, true]) {
         assert.doesNotMatch(batch, /call "%%~fF"/);
         assert.doesNotMatch(batch, /Get-WmiObject|Get-CimInstance|wmic/i);
         assert.match(batch, /windows-set-admin-password\.bat/);
-        if (installChrome) assert.match(batch, /windows-install-chrome\.bat/);
+        if (installChrome) {
+            assert.match(batch, /windows-install-chrome\.bat/);
+            assert.match(batch, /^if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" \(\r?\n    if exist "%SystemDrive%\\windows-install-chrome\.bat" call "%SystemDrive%\\windows-install-chrome\.bat"\r?\n\)\r?\nif exist "%SystemRoot%\\bot-tele-password-ready"/m,
+                "Chrome and password prerequisite blocks must be separate physical CMD lines");
+            assert.doesNotMatch(batch, /\\n\s*if exist/, "literal newline escapes must never reach CMD");
+        }
         else assert.doesNotMatch(batch, /windows-install-chrome\.bat/);
         assert.match(batch, /BOT_TELE_ATTEMPT% GEQ 2/);
         assert.match(batch, /timeout \/t 5/);

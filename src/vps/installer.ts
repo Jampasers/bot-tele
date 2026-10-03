@@ -517,7 +517,10 @@ set /a BOT_TELE_ATTEMPT=0
 if not exist "%SystemRoot%\\bot-tele-password-ready" (
     if exist "%SystemDrive%\\windows-set-admin-password.bat" call "%SystemDrive%\\windows-set-admin-password.bat"
 )
-${input.installChrome === true ? 'if exist "%SystemRoot%\\\\bot-tele-chrome-required" if not exist "%SystemRoot%\\\\bot-tele-chrome-ready" (\\n    if exist "%SystemDrive%\\\\windows-install-chrome.bat" call "%SystemDrive%\\\\windows-install-chrome.bat"\\n)\\n' : ""}if exist "%SystemRoot%\\bot-tele-password-ready" (
+${input.installChrome === true ? `if exist "%SystemRoot%\\bot-tele-chrome-required" if not exist "%SystemRoot%\\bot-tele-chrome-ready" (
+    if exist "%SystemDrive%\\windows-install-chrome.bat" call "%SystemDrive%\\windows-install-chrome.bat"
+)
+` : ""}if exist "%SystemRoot%\\bot-tele-password-ready" (
     if not exist "%SystemRoot%\\bot-tele-chrome-required" goto BOT_TELE_SETUP_READY
     if exist "%SystemRoot%\\bot-tele-chrome-ready" goto BOT_TELE_SETUP_READY
 )
