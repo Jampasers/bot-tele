@@ -12,7 +12,7 @@ import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setV
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
   .text("💰 Harga VPS / DO Buyer", "vpa_plans_0").row()
-  .text("🛠 Harga Install VPS Buyer", `vpa_plan_${DIRECT_INSTALL_PLAN_ID}`).row()
+  .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
@@ -135,7 +135,8 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   }
   async function planDetail(ctx: Context, id: string): Promise<void> {
     const plan = await getPlan(id);
-    const keyboard = new InlineKeyboard();
+    const keyboard = new InlineKeyboard()
+      .text(`Harga global: ${plan.globalPrice ? vpsPrice(plan.globalPrice) : "Belum diatur"}`, `vpa_global_${id}`).row();
     if (plan.id === DIRECT_INSTALL_PLAN_ID) {
       plan.osPrices.forEach((os, index) => {
         const price = planPrice(plan, "external", os.os);
@@ -147,8 +148,8 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       return;
     }
     plan.regions.forEach((region, index) => keyboard.text(plan.regionLabels?.[region] ?? region, `vpa_os_${id}_${index}_0`).row());
-    keyboard.text(plan.enabled ? "Nonaktifkan spek" : "Aktifkan spek", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Spek & layanan", "vpa_plans_0");
-    await vpsReply(ctx, `💰 ${plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\n\nPilih region untuk mengatur harga setiap OS. Harga belum diatur berarti kombinasi belum dapat dibayar.`, keyboard);
+    keyboard.text(plan.enabled ? "Nonaktifkan spek" : "Aktifkan spek", `vpa_planenable_${id}_${plan.enabled ? "0" : "1"}`).row().text("🔙 Spek & layanan", plan.sourceMode === "direct" ? "vpa_plans_direct_0" : "vpa_plans_0");
+    await vpsReply(ctx, `💰 ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\n\nHarga global berlaku untuk semua region dan OS pada spek ini. Harga khusus region/OS tetap diprioritaskan. Pilih region untuk mengatur pengecualian.`, keyboard);
   }
   async function osPrices(ctx: Context, id: string, regionIndex: number, offset: number): Promise<void> {
     const plan = await getPlan(id), region = plan.regions[regionIndex];
@@ -166,7 +167,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       return;
     }
     keyboard.row().text("🔙 Region", `vpa_plan_${id}`);
-    await vpsReply(ctx, `💰 ${plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}\nRegion: ${plan.regionLabels?.[region] ?? region}\n\nPilih OS untuk mengisi harga Rupiah. Perubahan berlaku pada checkout baru.`, keyboard);
+    await vpsReply(ctx, `💰 ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}\nRegion: ${plan.regionLabels?.[region] ?? region}\n\nPilih OS untuk mengisi harga Rupiah. Perubahan berlaku pada checkout baru.`, keyboard);
   }
   async function addToken(ctx: Context): Promise<void> {
     const actor = actorOf(ctx);
@@ -460,17 +461,19 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           await vpsReply(ctx, `🔑 Token & akun DO · ${filter}\n\n${credentials.length ? credentials.map(c => `${c.label}: ${known(c.accountStatus)} · slot ${known(c.available)}\nDiperiksa: ${vpsDate(c.checkedAt)}`).join("\n\n") : "Belum ada token pada filter/halaman ini."}`, keyboard);
           return;
         }
-        const plans = /^vpa_plans_(\d{1,6})$/.exec(data);
+        const plans = /^vpa_plans_(direct_)?(\d{1,6})$/.exec(data);
         if (plans) {
-          const offset = Number(plans[1]);
-          const allPlans = (await deps.listPlans(undefined, true)).filter(plan => plan.id !== DIRECT_INSTALL_PLAN_ID);
+          const offset = Number(plans[2]);
+          const direct = Boolean(plans[1]);
+          const prefix = direct ? "vpa_plans_direct_" : "vpa_plans_";
+          const allPlans = (await deps.listPlans(undefined, true)).filter(plan => plan.id !== DIRECT_INSTALL_PLAN_ID && (direct ? plan.sourceMode === "direct" : plan.sourceMode !== "direct"));
           const page = allPlans.slice(offset, offset + 10);
           const keyboard = new InlineKeyboard();
-          page.forEach(plan => keyboard.text(`${plan.enabled ? "🟢" : "⚪"} ${plan.serviceType === "install" ? "Install" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}`, `vpa_plan_${plan.id}`).row());
-          if (offset) keyboard.text("← Sebelumnya", `vpa_plans_${Math.max(0, offset - 10)}`);
-          if (offset + 10 < allPlans.length) keyboard.text("Berikutnya →", `vpa_plans_${offset + 10}`);
+          page.forEach(plan => keyboard.text(`${plan.enabled ? "🟢" : "⚪"} ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Install" : "VPS DO"} · ${plan.sizeLabel ?? plan.name}`, `vpa_plan_${plan.id}`).row());
+          if (offset) keyboard.text("← Sebelumnya", `${prefix}${Math.max(0, offset - 10)}`);
+          if (offset + 10 < allPlans.length) keyboard.text("Berikutnya →", `${prefix}${offset + 10}`);
           keyboard.row().text("🧩 Katalog", "vpa_catalog").text("🔙 Admin VPS", "vpa_home");
-          await vpsReply(ctx, "💰 Harga VPS & Jasa Install DO Buyer\n\nPilih layanan/spek, lalu region dan OS untuk mengisi harga. Harga install VPS milik buyer diatur terpisah dari menu Admin VPS.", keyboard);
+          await vpsReply(ctx, `${direct ? "Harga Jasa Install VPS Buyer" : "Harga VPS & Jasa Install DO Buyer"}\n\nPilih layanan/spek untuk mengatur harga global atau harga khusus region/OS.`, keyboard);
           return;
         }
         const deletion = /^vpa_(delete|deleteconfirm)_([A-Za-z0-9-]{1,40})$/.exec(data);
@@ -518,6 +521,17 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           else { await deps.updatePlan(actor, id, { enabled }); await planDetail(ctx, id); }
           return;
         }
+        const global = /^vpa_global_([A-Za-z0-9-]{1,40})$/.exec(data);
+        if (global) {
+          const plan = await getPlan(global[1]!);
+          input(actor, async (priceCtx, value) => {
+            await deps.updatePlan(actor, plan.id, { globalPrice: numeric(value, 1, 100_000_000) });
+            await priceCtx.reply("Harga global per spek tersimpan. Harga khusus tetap berlaku.");
+            await planDetail(priceCtx, plan.id);
+          });
+          await vpsReply(ctx, `Kirim harga global Rupiah untuk ${plan.sizeLabel ?? plan.name}. Berlaku untuk semua region dan OS. Angka bulat 1-100000000.`, new InlineKeyboard().text("Batal", `vpa_plan_${plan.id}`));
+          return;
+        }
         const pricePage = /^vpa_os_([A-Za-z0-9-]{1,40})_(\d{1,3})_(\d{1,3})$/.exec(data);
         if (pricePage) { await osPrices(ctx, pricePage[1]!, Number(pricePage[2]), Number(pricePage[3])); return; }
         const price = /^vpa_set_([A-Za-z0-9-]{1,40})_(\d{1,3})_(\d{1,3})$/.exec(data);
@@ -525,13 +539,13 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
           const plan = await getPlan(price[1]!), region = plan.regions[Number(price[2])], os = plan.osPrices[Number(price[3])];
           if (!region || !os) throw new Error("Combination unavailable");
           input(actor, async (priceCtx, value) => {
-            await deps.updatePlan(actor, plan.id, { region, os: os.os, price: numeric(value, 1, 100_000_000) });
-            await priceCtx.reply("Harga kombinasi tersimpan.");
+            await deps.updatePlan(actor, plan.id, { region, os: os.os, price: value.trim() === "0" ? null : numeric(value, 1, 100_000_000) });
+            await priceCtx.reply("Harga khusus tersimpan. Input 0 mengikuti harga global.");
             await osPrices(priceCtx, plan.id, Number(price[2]), Math.floor(Number(price[3]) / 10) * 10);
           });
           await vpsReply(ctx, plan.id === DIRECT_INSTALL_PLAN_ID
-            ? `Kirim harga Rupiah untuk Jasa Install VPS Buyer\nOS: ${os.label}\n\nHarga ini tidak bergantung pada spek/region VPS. Angka bulat 1–100000000. Order sebelumnya tetap memakai harga checkout.`
-            : `Kirim harga Rupiah untuk ${plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\nRegion: ${region}\nOS: ${os.label}\n\nAngka bulat 1–100000000. Order sebelumnya tetap memakai harga checkout.`,
+            ? `Kirim harga Rupiah untuk Jasa Install VPS Buyer\nOS: ${os.label}\n\nHarga ini tidak bergantung pada spek/region VPS. Angka bulat 1-100000000, atau 0 untuk mengikuti harga global. Order sebelumnya tetap memakai harga checkout.`
+            : `Kirim harga Rupiah untuk ${plan.sourceMode === "direct" ? "Jasa install / VPS Buyer" : plan.serviceType === "install" ? "Jasa install · DO Buyer" : "VPS DO"}\n${plan.sizeLabel ?? plan.name}\nRegion: ${region}\nOS: ${os.label}\n\nAngka bulat 1-100000000, atau 0 untuk mengikuti harga global. Order sebelumnya tetap memakai harga checkout.`,
             new InlineKeyboard().text("Batal", `vpa_plan_${plan.id}`));
           return;
         }

@@ -7,7 +7,7 @@ import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
 import { defaultVpsCatalog, getVpsCatalog } from "./catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, directInstallPlans, supportsWindows, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
@@ -52,8 +52,12 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   const os = getOs(input.os);
   const price = plan ? vpsPlanPrice({ ...plan, osPrices: plan.osPrices.map(item => ({ ...item, price: item.price ?? null })) }, input.region, input.os) : undefined;
   if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket, region, atau harga tidak tersedia.");
+  const directPlan = directInstallPlans(catalog).some(item => item.id === plan._id) || plan._id === DIRECT_INSTALL_PLAN_ID;
+  if (Boolean(input.direct) !== directPlan) throw new Error("Sumber VPS tidak sesuai paket.");
+  const size = catalog.sizes.find(item => item.slug === plan.sizeSlug);
+  if (os.family === "windows" && size && !supportsWindows(size)) throw new Error("Windows memerlukan minimal 1 core, RAM 2 GB, dan storage 50 GB.");
   if (plan.catalogManaged && (!catalog.sizes.some(size => size.slug === plan.sizeSlug)
-    || !catalog.regions.some(region => region.slug === input.region) || !catalog.os.some(entry => entry.key === input.os))) throw new Error("Pilihan tidak ada dalam katalog.");
+    || (!directPlan && !catalog.regions.some(region => region.slug === input.region)) || !catalog.os.some(entry => entry.key === input.os))) throw new Error("Pilihan tidak ada dalam katalog.");
   if (input.installChrome === true && os.family !== "windows") throw new Error("Chrome hanya tersedia untuk Windows.");
   let accountId: string | null = null;
   let sourceUsername: string | null = null;
@@ -220,14 +224,8 @@ export const vpsService: VpsUiDependencies = {
     const catalog = await getVpsCatalog();
     const saved = await VpsPlan.find({ tenantId: "platform", ...(serviceType ? { serviceType } : {}),
       $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }] }).lean();
-    const plans = catalogPlans(catalog, serviceType).map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)));
-    if (!serviceType || serviceType === "install") {
-      const storedDirect = saved.find(row => row._id === DIRECT_INSTALL_PLAN_ID);
-      plans.push(directInstallPlan(catalog, storedDirect ? {
-        enabled: storedDirect.enabled,
-        osPrices: storedDirect.osPrices.map(item => ({ os: item.os, label: item.label, price: item.price ?? null })),
-      } : undefined));
-    }
+    const plans = [...catalogPlans(catalog, serviceType), ...(!serviceType || serviceType === "install" ? directInstallPlans(catalog) : [])]
+      .map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id)));
     return plans.filter(plan => includeDisabled || plan.enabled);
   },
   acceptBuyerToken,
@@ -318,7 +316,9 @@ export const vpsService: VpsUiDependencies = {
   },
   async updatePlan(actor, id, input) {
     assertVpsAdmin(actor);
-    if (input.price !== undefined && (!Number.isSafeInteger(input.price) || input.price < 1 || input.price > 100_000_000)) throw new Error("Harga tidak valid.");
+    for (const amount of [input.price, input.globalPrice]) {
+      if (amount != null && (!Number.isSafeInteger(amount) || amount < 1 || amount > 100_000_000)) throw new Error("Harga tidak valid.");
+    }
     const catalog = await getVpsCatalog();
 
     if (id === DIRECT_INSTALL_PLAN_ID) {
@@ -348,18 +348,19 @@ export const vpsService: VpsUiDependencies = {
       return;
     }
 
-    const plan = catalogPlans(catalog).find(item => item.id === id);
+    const plan = [...catalogPlans(catalog), ...directInstallPlans(catalog)].find(item => item.id === id);
     if (!plan || (input.price !== undefined && (!input.os || !input.region || !plan.regions.includes(input.region)
       || !plan.osPrices.some(os => os.os === input.os)))) throw new Error("Pilih spek, region, dan OS dari katalog.");
-    const { id: planId, sizeLabel, regionLabels, providerPrice, transfer, ...fields } = plan;
+    const { id: planId, sizeLabel, regionLabels, providerPrice, transfer, sourceMode, ...fields } = plan;
     await VpsPlan.updateOne({ _id: planId, tenantId: "platform" }, { $setOnInsert: fields }, { upsert: true, runValidators: true });
     if (input.enabled !== undefined) await VpsPlan.updateOne({ _id: planId, tenantId: "platform" }, { $set: { enabled: input.enabled } });
+    if (input.globalPrice !== undefined) await VpsPlan.updateOne({ _id: planId, tenantId: "platform" }, { $set: { globalPrice: input.globalPrice } });
     if (input.price !== undefined) {
       // Atomic replace-or-append prevents duplicate combination prices under concurrent admin edits.
       await VpsPlan.updateOne({ _id: planId, tenantId: "platform" }, [{ $set: {
         priceMatrix: { $concatArrays: [{ $filter: { input: { $ifNull: ["$priceMatrix", []] }, as: "entry",
           cond: { $not: [{ $and: [{ $eq: ["$$entry.region", input.region] }, { $eq: ["$$entry.os", input.os] }] }] } } },
-          [{ region: input.region, os: input.os, price: input.price }]] },
+          input.price === null ? [] : [{ region: input.region, os: input.os, price: input.price }]] },
         regions: { $literal: plan.regions }, osPrices: { $literal: plan.osPrices }, updatedAt: new Date(),
       } }], { updatePipeline: true });
     }

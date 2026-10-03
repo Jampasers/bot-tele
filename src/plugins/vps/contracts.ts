@@ -8,6 +8,8 @@ export interface VpsUiPlan {
   serviceType: VpsServiceType;
   sizeSlug: string;
   regions: string[];
+  globalPrice?: number | null;
+  sourceMode?: "digitalocean" | "direct";
   osPrices: { os: string; label: string; price: number | null; family?: "linux" | "windows" }[];
   priceMatrix?: { region: string; os: string; price: number }[];
   catalogManaged?: boolean;
@@ -97,7 +99,7 @@ export interface VpsUiDependencies {
   checkAllCredentials(actor: string): Promise<void>;
   updateCredential(actor: string, id: string, input: { enabled?: boolean; priority?: number }): Promise<void>;
   deleteCredential(actor: string, id: string): Promise<VpsCredentialDeleteResult>;
-  updatePlan(actor: string, id: string, input: { enabled?: boolean; price?: number; os?: string; region?: string }): Promise<void>;
+  updatePlan(actor: string, id: string, input: { enabled?: boolean; globalPrice?: number | null; price?: number | null; os?: string; region?: string }): Promise<void>;
   adminCancelOrder?(actor: string, orderId: string): Promise<{ status: "cancelled" | "refunded" }>;
   adminResolveOrder?(actor: string, orderId: string, resolution: "ready" | "failed"): Promise<void>;
 }

@@ -155,16 +155,16 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
     keyboard.text("🔙 VPS", "vps_home");
-    const notice = draft.direct
+    const notice = draft.directMode
       ? "Pembayaran ke toko hanya biaya instalasi Windows. VPS disediakan oleh buyer."
       : draft.serviceType === "install" ? feeNotice : "";
-    const stepLabel = draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
+    const stepLabel = draft.directMode ? "Pilih spek VPS milik kamu (minimal 1 core, RAM 2 GB, storage 50 GB):" : draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
     await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? stepLabel : "Belum ada paket aktif. Hubungi admin."}${notice ? `\n\n${notice}` : ""}`, keyboard);
   }
   async function showInstallSources(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
-    await vpsReply(ctx, "🛠 Jasa Install\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Tidak perlu pilih spek atau region.", new InlineKeyboard()
+    await vpsReply(ctx, "🛠 Jasa Install\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Pilih spek sesuai VPS kamu; Windows memerlukan minimal 1 core, RAM 2 GB, dan storage 50 GB.", new InlineKeyboard()
       .text("🌊 Buat VPS di akun DO saya", "vps_install_do").row()
       .text("🖥 Install Windows di VPS saya", "vps_install_direct").row()
       .text("🔙 Kembali", "vps_home"));
@@ -174,8 +174,8 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const options = pricedOs(draft.plan, "external", true);
     const keyboard = new InlineKeyboard();
     options.forEach((os, index) => keyboard.text(`${os.label} · ${os.price === null ? "Belum tersedia" : vpsPrice(os.price)}`, `vps_os_${draft.id}_${index}`).row());
-    keyboard.text("🔙 Sumber VPS", "vps_install").text("Batal", "vps_home");
-    await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 1/5) Pilih Windows yang mau di-install.\nHarga di bawah adalah biaya jasa install saja; spek dan provider VPS mengikuti VPS milik kamu.`, keyboard);
+    keyboard.text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
+    await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 2/6) Pilih Windows yang mau di-install.\nSpek: ${sizeLabel(draft.plan)}\nHarga di bawah adalah biaya jasa install saja. Pastikan spek VPS sesuai pilihan dan storage minimal 50 GB.`, keyboard);
   }
 
   async function beginDirectCredentials(ctx: Context, draft: Draft): Promise<void> {
@@ -196,16 +196,16 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           ready.direct.password = password;
           const selectedOs = pricedOs(ready.plan, "external", true).find(item => item.os === ready.os);
           if (!selectedOs) throw new Error("OS tidak tersedia.");
-          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${priceLabel(selectedOs.price)}\n\n(Langkah 5/5) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
+          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${priceLabel(selectedOs.price)}\n\n(Langkah 6/6) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
             .text("Lanjut tanpa Chrome", `vps_chrome_${ready.id}_no`).row()
             .text("+ Chrome (Gratis)", `vps_chrome_${ready.id}_yes`).row()
             .text("🔙 Ganti OS", `vps_backos_${ready.id}`).text("Batal", "vps_home"));
         } });
-        await usernameCtx.reply("(Langkah 4/5) Kirim password SSH VPS. Pesan akan dihapus otomatis.\n\nKetik /batal untuk membatalkan.");
+        await usernameCtx.reply("(Langkah 5/6) Kirim password SSH VPS. Pesan akan dihapus otomatis.\n\nKetik /batal untuk membatalkan.");
       } });
-      await ipCtx.reply("(Langkah 3/5) Kirim username SSH VPS, contoh: root atau ubuntu.\n\nKetik /batal untuk membatalkan.");
+      await ipCtx.reply("(Langkah 4/6) Kirim username SSH VPS, contoh: root atau ubuntu.\n\nKetik /batal untuk membatalkan.");
     } });
-    await vpsReply(ctx, "🖥 Akses VPS Buyer\n\n(Langkah 2/5) Kirim IP VPS. VPS harus sedang online dan bisa diakses via SSH.\n\nCredential hanya dipakai untuk proses instalasi; pesan password akan dihapus otomatis.", new InlineKeyboard()
+    await vpsReply(ctx, "🖥 Akses VPS Buyer\n\n(Langkah 3/6) Kirim IP VPS. VPS harus sedang online dan bisa diakses via SSH.\n\nCredential hanya dipakai untuk proses instalasi; pesan password akan dihapus otomatis.", new InlineKeyboard()
       .text("🔙 Ganti OS", `vps_backos_${draft.id}`).text("Batal", "vps_home"));
   }
 
@@ -217,7 +217,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
     const listedPlans = await deps.listPlans(serviceType);
     const plans = serviceType === "install"
-      ? listedPlans.filter(plan => direct ? plan.id === DIRECT_INSTALL_PLAN_ID : plan.id !== DIRECT_INSTALL_PLAN_ID)
+      ? listedPlans.filter(plan => direct ? plan.sourceMode === "direct" : plan.sourceMode !== "direct" && plan.id !== DIRECT_INSTALL_PLAN_ID)
       : listedPlans;
     const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans, ...(direct ? { directMode: true } : {}) };
     drafts.set(actor, draft);
@@ -228,9 +228,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         await vpsReply(ctx, "Jasa install Windows untuk VPS buyer belum tersedia. Hubungi admin.", new InlineKeyboard().text("🔙 Jasa Install", "vps_install").text("🔙 VPS", "vps_home"));
         return;
       }
-      draft.plan = plan;
-      draft.region = "external";
-      await showDirectOs(ctx, draft);
+      await choosePlan(ctx, draft);
       return;
     }
 
@@ -357,6 +355,11 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             if (!plan) throw new Error("Unknown plan");
             draft.plan = plan;
             delete draft.region; delete draft.os;
+            if (draft.directMode) {
+              draft.region = "external";
+              await showDirectOs(ctx, draft);
+              return;
+            }
             const regions = filterRegions(plan.regions, plan.sizeSlug, draft.availability);
             if (!regions.length) {
               await vpsReply(ctx, `❌ Spek ${sizeLabel(plan)} tidak tersedia di region mana pun untuk akun Anda.\n\nSilakan pilih spek lain.`,

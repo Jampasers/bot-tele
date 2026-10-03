@@ -9,12 +9,12 @@ import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vp
 import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, planPrice } from "../../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
-const DIRECT_PLAN: VpsUiPlan = { id: DIRECT_INSTALL_PLAN_ID, name: "Install Windows di VPS Buyer", serviceType: "install", sizeSlug: "external-vps", regions: ["external"], regionLabels: { external: "VPS milik buyer" }, osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 15_000, family: "windows" }], enabled: true, catalogManaged: false };
+const DIRECT_PLAN: VpsUiPlan = { ...directInstallPlans(defaultVpsCatalog())[0]!, osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: null, family: "windows" }], globalPrice: 15000 };
 const ORDER: VpsUiOrder = { _id: ORDER_ID, serviceType: "install", paymentStatus: "unpaid", stage: "queued", price: 43_210, planName: "RAM 2 GB", sizeSlug: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" };
 interface ApiCall { method: string; payload: Record<string, unknown> }
 function update(id: number, input: string, callback = false, actor = 42, chatType = "private", media = false): never {
@@ -93,7 +93,7 @@ test("jasa setup/install keeps both DigitalOcean and direct buyer VPS paths insi
   assert.match(JSON.stringify(calls), /vps_install_direct/);
 });
 
-test("direct install skips spec and region, then checks out Windows without a DO token", async () => {
+test("direct install selects spec and skips region, then checks out Windows without a DO token", async () => {
   let checkoutInput: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
   let acceptedTokens = 0;
   const { bot, calls } = await harness({
@@ -102,18 +102,20 @@ test("direct install skips spec and region, then checks out Windows without a DO
   });
   await bot.handleUpdate(update(1, "vps_install", true));
   await bot.handleUpdate(update(2, "vps_install_direct", true));
-  assert.match(replies(calls), /Langkah 1\/5.*Pilih Windows/s);
+  assert.match(replies(calls), /Pilih spek VPS milik/);
+  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
+  assert.match(replies(calls), /Pilih Windows/s);
   assert.doesNotMatch(JSON.stringify(calls.at(-1)), /vps_plan_|vps_region_/);
 
   await bot.handleUpdate(update(3, callback(calls, "vps_os_"), true));
-  assert.match(replies(calls), /Langkah 2\/5.*Kirim IP/s);
+  assert.match(replies(calls), /Langkah 3\/6.*Kirim IP/s);
   await bot.handleUpdate(update(4, "192.0.2.10"));
   await bot.handleUpdate(update(5, "ubuntu"));
   await bot.handleUpdate(update(6, "synthetic-source-password"));
   await bot.handleUpdate(update(7, callback(calls, "vps_chrome_"), true));
 
   assert.equal(acceptedTokens, 0);
-  assert.equal(checkoutInput?.planId, DIRECT_INSTALL_PLAN_ID);
+  assert.equal(checkoutInput?.planId, DIRECT_PLAN.id);
   assert.equal(checkoutInput?.region, "external");
   assert.equal(checkoutInput?.buyerSessionId, undefined);
   assert.deepEqual(checkoutInput?.direct, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
@@ -141,6 +143,7 @@ test("Chrome checkout can be retried with the same intent and memory-only VPS pa
     return ORDER;
   } });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
+  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
   await bot.handleUpdate(update(2, callback(calls, "vps_os_"), true));
   await bot.handleUpdate(update(3, "192.0.2.10"));
   await bot.handleUpdate(update(4, "root"));
@@ -446,12 +449,12 @@ test("admin prices a single service/spec/region/OS from the full catalog without
   process.env["ADMIN_ID"] = "42";
   t.after(() => { if (old === undefined) delete process.env["ADMIN_ID"]; else process.env["ADMIN_ID"] = old; });
   const plans = catalogPlans(defaultVpsCatalog(), "install");
-  const plan = plans[0]!;
+  const plan = plans[2]!;
   const sgpIndex = plan.regions.indexOf("sgp1"), winIndex = plan.osPrices.findIndex(os => os.os === "windows2022");
   let saved: Parameters<VpsUiDependencies["updatePlan"]>[2] | undefined;
   const { bot, calls } = await harness({ listPlans: async () => plans, updatePlan: async (actor, id, input) => {
     assert.equal(actor, "42"); assert.equal(id, plan.id); saved = input;
-    plan.priceMatrix!.push({ region: input.region!, os: input.os!, price: input.price! });
+    plan.priceMatrix!.push({ region: input.region!, os: input.os!, price: input.price as number });
   } }, { admin: true });
   await bot.handleUpdate(update(1, "vpa_plans_0", true));
   await bot.handleUpdate(update(2, `vpa_plan_${plan.id}`, true));
@@ -485,14 +488,16 @@ test("admin adds a custom size one field at a time and legacy add-package button
   assert.deepEqual(saved, { kind: "size", value: ["s-custom", "12", "24 GB", "500 GB", "8 TB", "$120/month"] });
 });
 
-test("direct install shows only Windows prices and never asks for spec or region", async () => {
-  const direct = directInstallPlan(defaultVpsCatalog());
+test("direct install selects a supported spec then shows only Windows without region", async () => {
+  const direct = directInstallPlans(defaultVpsCatalog())[0]!;
   let checkouts = 0;
   const { bot, calls } = await harness({
     listPlans: async serviceType => serviceType === "install" ? [...catalogPlans(defaultVpsCatalog(), "install"), direct] : [],
     checkout: async () => { checkouts++; return ORDER; },
   });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
+  assert.match(replies(calls), /Pilih spek VPS milik/);
+  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
   const last = calls.at(-1)!;
   assert.match(JSON.stringify(last), /Windows Server 2012 R2/);
   assert.match(JSON.stringify(last), /Windows Server 2022/);
@@ -583,3 +588,31 @@ test("purchase flow uses platform availability to filter regions", async () => {
   assert.doesNotMatch(JSON.stringify(regionStep), /Memphis \(mem1\)/);
 });
 
+
+
+test("admin sets global prices for each service and can clear combination overrides", async t => {
+  const old = process.env.ADMIN_ID; process.env.ADMIN_ID = "42";
+  t.after(() => { if (old === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = old; });
+  for (const plan of [catalogPlans(defaultVpsCatalog(), "purchase")[2]!, catalogPlans(defaultVpsCatalog(), "install")[2]!, directInstallPlans(defaultVpsCatalog())[0]!]) {
+    const writes: Parameters<VpsUiDependencies["updatePlan"]>[2][] = [];
+    const { bot, calls } = await harness({ listPlans: async () => [plan], updatePlan: async (_actor, _id, input) => { writes.push(input); } }, { admin: true });
+    if (plan.sourceMode === "direct") {
+      await bot.handleUpdate(update(30, "vpa_home", true));
+      assert.match(JSON.stringify(calls.at(-1)), /vpa_plans_direct_0/);
+      await bot.handleUpdate(update(31, "vpa_plans_direct_0", true));
+      assert.match(JSON.stringify(calls.at(-1)), new RegExp(plan.id));
+    }
+    await bot.handleUpdate(update(1, `vpa_plan_${plan.id}`, true));
+    assert.match(JSON.stringify(calls), /vpa_global_/);
+    await bot.handleUpdate(update(2, `vpa_global_${plan.id}`, true));
+    await bot.handleUpdate(update(3, "25000"));
+    assert.deepEqual(writes[0], { globalPrice: 25000 });
+    await bot.handleUpdate(update(4, `vpa_set_${plan.id}_0_0`, true));
+    await bot.handleUpdate(update(5, "0"));
+    assert.deepEqual(writes[1], { region: plan.regions[0], os: plan.osPrices[0]!.os, price: null });
+    for (const call of calls) {
+      const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+      assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
+    }
+  }
+});

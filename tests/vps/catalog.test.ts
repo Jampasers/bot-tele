@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_OS, DEFAULT_REGIONS, DEFAULT_SIZES, defaultVpsCatalog } from "../../src/vps/catalog.js";
 import { vpsPlanPrice } from "../../src/vps/service.js";
-import { catalogPlans, mergeCatalogPrices, planPrice } from "../../src/vps/catalogPlans.js";
+import { catalogPlans, mergeCatalogPrices, planPrice, directInstallPlans, supportsWindows } from "../../src/vps/catalogPlans.js";
 
 test("VPS catalog defaults contain the requested regions, sizes, and installer OS choices", () => {
   assert.deepEqual(DEFAULT_REGIONS.map(item => item[0]), ["nyc1", "nyc2", "nyc3", "ams3", "sfo2", "sfo3", "sgp1", "lon1", "fra1", "tor1", "blr1", "syd1", "atl1", "ric1", "mkc1", "mem1"]);
@@ -19,7 +19,7 @@ test("catalog replacement exposes seven specs per service with all regions and O
   }
   for (const plan of plans) {
     assert.equal(plan.regions.length, 16);
-    assert.equal(plan.osPrices.length, 18);
+    assert.equal(plan.osPrices.length, ["s-1vcpu-512mb-10gb", "s-1vcpu-1gb"].includes(plan.sizeSlug) ? 14 : 18);
     assert.ok(plan.osPrices.every(os => os.price === null));
     assert.equal(planPrice(plan, "sgp1", "windows2022"), undefined);
   }
@@ -28,7 +28,7 @@ test("catalog replacement exposes seven specs per service with all regions and O
 
 test("catalog pricing never borrows another region or old OS price; additions appear without a named package", () => {
   const catalog = defaultVpsCatalog();
-  const base = catalogPlans(catalog)[0]!;
+  const base = catalogPlans(catalog)[2]!;
   const priced = mergeCatalogPrices(base, { enabled: true, priceMatrix: [{ region: "sgp1", os: "windows2022", price: 25000 }] });
   assert.equal(planPrice(priced, "sgp1", "windows2022"), 25000);
   assert.equal(planPrice(priced, "fra1", "windows2022"), undefined);
@@ -43,4 +43,31 @@ test("region-specific VPS price overrides legacy OS price and falls back for old
   const plan = { osPrices: [{ os: "windows2022", label: "Windows", price: 100_000 }], priceMatrix: [{ region: "sgp1", os: "windows2022", price: 125_000 }] };
   assert.equal(vpsPlanPrice(plan, "sgp1", "windows2022"), 125_000);
   assert.equal(vpsPlanPrice(plan, "fra1", "windows2022"), 100_000);
+});
+
+
+test("global spec prices apply across regions and OS with explicit overrides", () => {
+  for (const base of [...catalogPlans(defaultVpsCatalog()), ...directInstallPlans(defaultVpsCatalog())]) {
+    const plan = mergeCatalogPrices(base, { enabled: true, globalPrice: 30000, priceMatrix: [] });
+    for (const region of plan.regions) for (const os of plan.osPrices) assert.equal(planPrice(plan, region, os.os), 30000);
+    const region = plan.regions[0]!, os = plan.osPrices[0]!.os;
+    plan.priceMatrix = [{ region, os, price: 42000 }];
+    assert.equal(planPrice(plan, region, os), 42000);
+    assert.equal(planPrice(plan, region, plan.osPrices[1]!.os), 30000);
+    plan.priceMatrix = [];
+    assert.equal(planPrice(plan, region, os), 30000);
+    assert.equal(planPrice(plan, region, "unknown"), undefined);
+  }
+});
+
+test("Windows is excluded below 1 core 2 GB and insufficient storage", () => {
+  const catalog = defaultVpsCatalog();
+  assert.deepEqual(catalog.sizes.map(supportsWindows), [false, false, true, true, true, true, true]);
+  assert.equal(supportsWindows({ ...catalog.sizes[2]!, disk: "25 GB" }), false);
+  assert.equal(directInstallPlans(catalog).length, 5);
+  for (const plan of catalogPlans(catalog).filter(plan => /512mb|1gb$/.test(plan.sizeSlug))) {
+    plan.globalPrice = 25000;
+    plan.priceMatrix = [{ region: "sgp1", os: "windows2022", price: 25000 }];
+    assert.equal(planPrice(plan, "sgp1", "windows2022"), undefined);
+  }
 });

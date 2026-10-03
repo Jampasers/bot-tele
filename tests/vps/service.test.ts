@@ -7,7 +7,7 @@ import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans } from "../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans } from "../../src/vps/catalogPlans.js";
 import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
 import { getOs } from "../../src/vps/installer.js";
 import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
@@ -102,7 +102,8 @@ test("direct Windows checkout stores buyer VPS access encrypted and never calls 
   env(t);
   let saved: IVpsOrder | null = null;
   const id = randomUUID();
-  const plan = { _id: randomUUID(), name: "Install Windows", serviceType: "install", enabled: true, sizeSlug: "external-vps", regions: ["external"], osPrices: [{ os: "windows2022", label: "Windows", price: 15000 }] };
+  const base = directInstallPlans(defaultVpsCatalog())[0]!;
+  const plan = { ...base, _id: base.id, globalPrice: 15000 };
   t.mock.method(VpsOrder, "findOne", () => query(() => saved));
   t.mock.method(VpsPlan, "findOne", () => query(() => plan));
   t.mock.method(VpsOrder, "create", async (input: Record<string, unknown>) => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
@@ -167,20 +168,21 @@ test("service menu derives DO specs plus a separate buyer-owned install service"
     return query(() => [{ _id: "old-id", name: "Old custom package", enabled: true, priceMatrix: [] }]);
   });
   const plans = await platform(() => vpsService.listPlans("install"));
-  const doPlans = plans.filter(plan => plan.id !== DIRECT_INSTALL_PLAN_ID);
-  const direct = plans.find(plan => plan.id === DIRECT_INSTALL_PLAN_ID);
+  const doPlans = plans.filter(plan => plan.sourceMode !== "direct");
+  const direct = plans.find(plan => plan.sourceMode === "direct");
+  assert.equal(plans.filter(plan => plan.sourceMode === "direct").length, 5);
   assert.equal(doPlans.length, 7);
-  assert.ok(doPlans.every(plan => plan.regions.length === 16 && plan.osPrices.length === 18));
+  assert.ok(doPlans.every(plan => plan.regions.length === 16 && plan.osPrices.length >= 14));
   assert.ok(doPlans.every(plan => plan.name !== "Old custom package"));
   assert.ok(direct);
-  assert.equal(direct.sizeSlug, "external-vps");
+  assert.equal(direct.sizeSlug, "s-1vcpu-2gb");
   assert.deepEqual(direct.regions, ["external"]);
   assert.deepEqual(direct.osPrices.map(os => os.os), ["windows2012r2", "windows2016", "windows2019", "windows2022"]);
 });
 
 test("catalog checkout without an exact configured price cannot create order or contact DigitalOcean", async t => {
   env(t);
-  const plan = catalogPlans(defaultVpsCatalog(), "install")[0]!;
+  const plan = catalogPlans(defaultVpsCatalog(), "install")[2]!;
   t.mock.method(VpsOrder, "findOne", () => query(() => null));
   t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...plan, _id: plan.id })));
   let writes = 0, provider = 0;
@@ -219,7 +221,7 @@ test("admin combination price validates catalog membership before any write and 
   env(t);
   const old = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
   t.after(() => { if (old === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = old; });
-  const plan = catalogPlans(defaultVpsCatalog(), "install")[0]!;
+  const plan = catalogPlans(defaultVpsCatalog(), "install")[2]!;
   const writes: { filter: unknown; update: unknown; options: unknown }[] = [];
   t.mock.method(VpsPlan, "updateOne", async (filter, update, options) => { writes.push({ filter, update, options }); return { matchedCount: 1, modifiedCount: 1 }; });
   await platform(async () => {
@@ -275,4 +277,36 @@ test("admin token deletion requires disabled state and refuses active order refe
     assert.deepEqual(await vpsService.deleteCredential("101", credential._id), { status: "deleted" });
     assert.equal(deletes, 1);
   });
+});
+
+
+test("admin persists global price and removes overrides atomically for all VPS services", async t => {
+  env(t);
+  const old = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
+  t.after(() => { if (old === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = old; });
+  const writes: { filter: any; update: any }[] = [];
+  t.mock.method(VpsPlan, "updateOne", async (filter, update) => { writes.push({ filter, update }); return { matchedCount: 1 } as never; });
+  await platform(async () => {
+    for (const plan of [catalogPlans(defaultVpsCatalog(), "purchase")[2]!, catalogPlans(defaultVpsCatalog(), "install")[2]!, directInstallPlans(defaultVpsCatalog())[0]!]) {
+      writes.length = 0;
+      await vpsService.updatePlan("101", plan.id, { globalPrice: 25000 });
+      assert.deepEqual(writes[1]!.update, { $set: { globalPrice: 25000 } });
+      assert.deepEqual(writes[1]!.filter, { _id: plan.id, tenantId: "platform" });
+      await vpsService.updatePlan("101", plan.id, { region: plan.regions[0], os: plan.osPrices[0]!.os, price: null });
+      assert.deepEqual(writes.at(-1)!.update[0].$set.priceMatrix.$concatArrays[1], []);
+    }
+    writes.length = 0;
+    await assert.rejects(vpsService.updatePlan("101", catalogPlans(defaultVpsCatalog())[0]!.id, { region: "sgp1", os: "windows2022", price: 25000 }), /katalog/);
+    assert.equal(writes.length, 0);
+  });
+});
+
+test("checkout rejects old Windows prices on undersized specs before contacting DO", async t => {
+  env(t);
+  const base = catalogPlans(defaultVpsCatalog(), "purchase")[0]!;
+  t.mock.method(VpsOrder, "findOne", () => query(() => null));
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...base, _id: base.id, globalPrice: 25000,
+    osPrices: [{ os: "windows2022", label: "Windows", price: null }], priceMatrix: [] })));
+  t.mock.method(DigitalOceanClient.prototype, "account", async () => { throw new Error("Should not contact DO"); });
+  await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(), serviceType: "purchase", planId: base.id, os: "windows2022", region: "sgp1" }), /minimal/));
 });
