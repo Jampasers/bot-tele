@@ -53,7 +53,6 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (input.serviceType === "install" && !input.installInviteId) {
     const claimed = await findClaimedInstallInvite(input.actorTelegramId, input.direct ? "direct" : "digitalocean");
     if (claimed) {
-      if (claimed.orderId !== input.requestId) throw new VpsInstallInviteError("Kamu punya undangan gratis yang sudah diklaim. Buka menu Jasa Install lagi untuk melanjutkan tanpa pembayaran.");
       input = { ...input, installInviteId: claimed.id };
     }
   }

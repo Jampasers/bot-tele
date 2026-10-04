@@ -109,7 +109,7 @@ function database(t: TestContext, balance = 100_000) {
   t.mock.method(BalanceLog, "create", async (value: Row) => { audit.push(value); return value; });
   const addOrder = (overrides: Row = {}) => {
     const order = { _id: randomUUID(), tenantId: "platform", buyerId: "101", stage: "queued", paymentStatus: "unpaid", paymentMethod: null,
-      dropletId: null, createAttemptedAt: null, paymentInvoiceLeaseUntil: null,
+      dropletId: null, createAttemptedAt: null, paymentInvoiceLeaseUntil: null, installInviteAcceptedAt: null,
       snapshot: { price: 25_000, planName: "Basic" }, ...overrides };
     orders.push(order); return order as Row;
   };
@@ -122,7 +122,7 @@ function database(t: TestContext, balance = 100_000) {
 }
 const platform = <T>(fn: () => Promise<T>) => runWithTenant(platformContext(), fn);
 
-test("claimed invite recovery enforces buyer, source, expiry, revocation and unused status", async t => {
+test("claimed invite recovery enforces buyer, source, expiry and revocation after prior use", async t => {
   const db = database(t);
   for (const [patch, available] of [
     [{ expiresAt: null }, true],
@@ -131,7 +131,7 @@ test("claimed invite recovery enforces buyer, source, expiry, revocation and unu
     [{ sourceMode: "digitalocean" }, false],
     [{ expiresAt: new Date(0) }, false],
     [{ revokedAt: new Date() }, false],
-    [{ redeemedAt: new Date() }, false],
+    [{ redeemedAt: new Date() }, true],
     [{ claimedBy: null }, false],
     [{ claimedBy: "102" }, false],
     [{ recipientId: "102" }, false],
@@ -200,7 +200,7 @@ test("free install invitation settles once, sends normal order logs and testimon
   const results = await Promise.all(Array.from({ length: 8 }, () => platform(() => checkVpsPayment(order._id, "101"))));
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.ok(results.every(result => result.status === "paid"));
-  assert.ok(invite.redeemedAt);
+  assert.ok(order.installInviteAcceptedAt); assert.equal(invite.redeemedAt, null);
   assert.equal(order.paymentStatus, "paid");
   assert.equal(db.users[0]!.balance, 0);
   assert.equal(db.users[0]!.totalOrders, 1);
@@ -217,7 +217,74 @@ test("free install invitation settles once, sends normal order logs and testimon
   await assert.rejects(platform(() => checkVpsPayment(order._id, "999")), /access denied/);
 });
 
-test("consumed free invitation survives interrupted payment, expiry and disabled catalog; cancellation refunds zero", async t => {
+test("one claimed invitation activates repeated direct and DO orders with independent zero-value logs", async t => {
+  const db = database(t, 5000);
+  const invite = db.addInvite(randomUUID(), { expiresAt: null });
+  const logs: any[] = [], testimonials: any[] = [];
+  t.mock.method(ActivityLogService, "getDefaultApi", () => ({}) as never);
+  t.mock.method(ActivityLogService, "logVpsOrder", async (_api, data) => { logs.push(data); return true; });
+  t.mock.method(TestimonialService, "sendVpsPurchaseTestimonial", async (_api, data) => { testimonials.push(data); return true; });
+  for (const direct of [true, false, true, false]) {
+    const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: invite._id, ...(direct ? { sourceUsername: "root" } : {}) });
+    assert.notEqual(order._id, invite.orderId);
+    const results = await Promise.all(Array.from({ length: 4 }, () => platform(() => checkVpsPayment(order._id, "101"))));
+    assert.ok(results.every(result => result.status === "paid"));
+    assert.ok(order.installInviteAcceptedAt);
+    order.stage = direct ? "cancelled" : "failed";
+    await platform(() => refundVpsOrder(order._id, direct ? "cancelled_before_create" : "validation_failed"));
+    assert.equal(order.paymentStatus, "refunded");
+    assert.equal((await platform(() => findClaimedInstallInvite("101", direct ? "direct" : "digitalocean")))?.id, invite._id);
+  }
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(db.orders.length, 4); assert.equal(db.users[0]!.totalOrders, 4);
+  assert.equal(db.users[0]!.balance, 5000); assert.equal(db.audit.length, 0);
+  assert.equal(db.users[0]!.appliedVpsPaymentEffectIds.length, 0);
+  assert.equal(invite.redeemedAt, null); assert.equal(invite.revokedAt, null);
+  assert.ok(db.orders.every(order => order.paymentInvoice === undefined));
+  assert.equal(logs.length, 4); assert.equal(testimonials.length, 4);
+  assert.equal(new Set(logs.map(log => log.orderId)).size, 4);
+  assert.ok(logs.every(log => log.totalPrice === 0 && log.catalogPrice === 25000 && log.method === "Undangan Gratis"));
+  assert.ok(testimonials.every(log => log.totalPrice === 0 && log.method === "Undangan Gratis"));
+});
+
+test("admin revokes a used invitation, preserving activated orders while rejecting all fresh orders", async t => {
+  const db = database(t, 5000);
+  const previous = process.env.ADMIN_ID;
+  process.env.ADMIN_ID = "900";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  const invite = db.addInvite(randomUUID(), { expiresAt: null });
+  const activated = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: invite._id });
+  assert.equal((await platform(() => checkVpsPayment(activated._id, "101"))).status, "paid");
+  const pending = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: invite._id });
+  await platform(() => revokeInstallInvite("900", invite._id));
+  assert.ok(invite.revokedAt);
+  assert.equal(await platform(() => findClaimedInstallInvite("101")), null);
+  await assert.rejects(platform(() => requireInstallInvite("101", invite._id, randomUUID(), "direct")), VpsInstallInviteError);
+  for (const paymentStatus of ["unpaid", "paying"]) {
+    pending.paymentStatus = paymentStatus;
+    await assert.rejects(platform(() => checkVpsPayment(pending._id, "101")), VpsInstallInviteError);
+    assert.equal(pending.installInviteAcceptedAt, null);
+  }
+  assert.equal((await platform(() => checkVpsPayment(activated._id, "101"))).status, "paid");
+  assert.equal(activated.stage, "queued"); assert.equal(db.users[0]!.balance, 5000);
+  assert.equal(db.users[0]!.totalOrders, 1); assert.equal(db.audit.length, 0);
+});
+
+test("legacy receipt recovers its interrupted order after revocation without authorizing a fresh order", async t => {
+  const db = database(t, 5000);
+  const legacy = db.addOrder({ service: "install", paymentMethod: "invite", paymentStatus: "paying", installInviteId: "a".repeat(32) });
+  const paidAt = new Date("2026-01-01T00:00:00Z");
+  const invite = db.addInvite(legacy._id, { redeemedAt: paidAt, revokedAt: new Date(), expiresAt: new Date(0) });
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ enabled: false })));
+  const fresh = db.addOrder({ service: "install", paymentMethod: "invite", paymentStatus: "paying", installInviteId: invite._id });
+  await assert.rejects(platform(() => checkVpsPayment(fresh._id, "101")), VpsInstallInviteError);
+  assert.equal((await platform(() => checkVpsPayment(legacy._id, "101"))).status, "paid");
+  assert.equal(legacy.installInviteAcceptedAt.getTime(), paidAt.getTime());
+  assert.equal(fresh.installInviteAcceptedAt, null);
+  assert.equal(db.users[0]!.balance, 5000); assert.equal(db.users[0]!.totalOrders, 1);
+});
+
+test("accepted free order survives interrupted payment, expiry, revocation and disabled catalog; cancellation refunds zero", async t => {
   const db = database(t, 5000);
   const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
   const invite = db.addInvite(order._id);
@@ -225,8 +292,8 @@ test("consumed free invitation survives interrupted payment, expiry and disabled
   t.mock.method(ActivityLogService, "logVpsCancelled", async (_api, data) => { logs.push(data); return true; });
   db.failPaid();
   await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), /interruption/);
-  assert.equal(order.paymentStatus, "paying"); assert.ok(invite.redeemedAt);
-  invite.expiresAt = new Date(0);
+  assert.equal(order.paymentStatus, "paying"); assert.ok(order.installInviteAcceptedAt);
+  invite.expiresAt = new Date(0); invite.revokedAt = new Date();
   t.mock.method(VpsPlan, "findOne", () => query(() => ({ enabled: false })));
   await platform(reconcileVpsPayments);
   assert.equal(order.paymentStatus, "paid");
@@ -244,7 +311,7 @@ test("consumed free invitation survives interrupted payment, expiry and disabled
   assert.equal(logs.length, 1); assert.equal(logs[0].refundAmount, 0);
 });
 
-test("expired, revoked, disabled, wrong-source and wrong-order invites cannot start free installs", async t => {
+test("expired, revoked, disabled, wrong-source and wrong-buyer invites cannot start free installs", async t => {
   const db = database(t);
   const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
   const invite = db.addInvite(order._id);
@@ -255,7 +322,8 @@ test("expired, revoked, disabled, wrong-source and wrong-order invites cannot st
   invite.expiresAt = new Date(Date.now() + 86400_000); invite.sourceMode = "direct";
   await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
   invite.sourceMode = "any";
-  await assert.rejects(platform(() => requireInstallInvite("101", invite._id, randomUUID(), "direct")), VpsInstallInviteError);
+  await platform(() => requireInstallInvite("101", invite._id, randomUUID(), "direct"));
+  await assert.rejects(platform(() => requireInstallInvite("102", invite._id, randomUUID(), "direct")), VpsInstallInviteError);
   order.service = "purchase";
   await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
   order.service = "install";
@@ -265,7 +333,7 @@ test("expired, revoked, disabled, wrong-source and wrong-order invites cannot st
   assert.equal(db.users[0]!.balance, 100000);
 });
 
-test("invite creation and revocation require platform admin; claiming locks a link to one recipient and stable order", async t => {
+test("invite creation and revocation require platform admin; claiming locks a reusable link to one recipient", async t => {
   const db = database(t);
   const previous = process.env.ADMIN_ID, enabled = process.env.VPS_ENABLED;
   process.env.ADMIN_ID = "900"; process.env.VPS_ENABLED = "true";
@@ -287,7 +355,9 @@ test("invite creation and revocation require platform admin; claiming locks a li
   await platform(() => claimInstallInvite("101", targeted.id));
   const row = db.invites.find(item => item._id === targeted.id)!;
   row.redeemedAt = new Date();
-  await assert.rejects(platform(() => revokeInstallInvite("900", targeted.id)), VpsInstallInviteError);
+  await platform(() => revokeInstallInvite("900", targeted.id));
+  assert.ok(row.revokedAt);
+  await assert.rejects(platform(() => claimInstallInvite("101", targeted.id)), VpsInstallInviteError);
 });
 
 test("new balance payments and QRIS invoices are rejected before any money or method mutation when disabled", async t => {

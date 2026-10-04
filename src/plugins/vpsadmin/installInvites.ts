@@ -5,7 +5,7 @@ import { vpsInviteExpiry, vpsReply } from "../vps/ui.js";
 import { VpsInstallInviteError } from "../../vps/installInvites.js";
 
 const sourceLabel = (source: VpsUiInstallInvite["sourceMode"]): string => source === "direct" ? "Install VPS Buyer (SSH)" : source === "digitalocean" ? "Install dari DO" : "Semua Installer (VPS Buyer + DO)";
-const statusLabel = (invite: VpsUiInstallInvite): string => invite.redeemedAt ? "Sudah digunakan" : invite.revokedAt ? "Dicabut" : invite.expiresAt && invite.expiresAt.getTime() <= Date.now() ? "Kedaluwarsa" : invite.claimedBy ? "Diklaim, belum install" : "Belum diklaim";
+const statusLabel = (invite: VpsUiInstallInvite): string => invite.revokedAt ? "Dicabut" : invite.expiresAt && invite.expiresAt.getTime() <= Date.now() ? "Kedaluwarsa" : invite.claimedBy ? "Aktif · gratis berulang" : "Belum diklaim";
 
 export function createInstallInviteAdmin(deps: VpsUiDependencies, input: (actor: string, receive: (ctx: Context, value: string) => Promise<void>) => void) {
   const drafts = new Map<string, { token: string; sourceMode: VpsUiInstallInvite["sourceMode"]; expiresAt: number }>();
@@ -13,9 +13,12 @@ export function createInstallInviteAdmin(deps: VpsUiDependencies, input: (actor:
   async function detail(ctx: Context, invite: VpsUiInstallInvite): Promise<void> {
     const link = `https://t.me/${ctx.me.username}?start=install_${invite.id}`;
     const keyboard = new InlineKeyboard();
-    if (!invite.redeemedAt && !invite.revokedAt && (!invite.expiresAt || invite.expiresAt.getTime() > Date.now())) keyboard.url("Buka undangan", link).row().text("Cabut undangan", `vpa_invrevoke_${invite.id}`).row();
+    if (!invite.revokedAt) {
+      if (!invite.expiresAt || invite.expiresAt.getTime() > Date.now()) keyboard.url("Buka undangan", link).row();
+      keyboard.text("Cabut akses gratis", `vpa_invrevoke_${invite.id}`).row();
+    }
     keyboard.text("Daftar undangan", "vpa_invites_0").text("Admin VPS", "vpa_home");
-    await vpsReply(ctx, `Undangan Jasa Install Gratis\n\nSumber: ${sourceLabel(invite.sourceMode)}\nPenerima: ${invite.recipientId ?? "Siapa pun pemegang link (1 orang)"}\nStatus: ${statusLabel(invite)}\nDiklaim oleh: ${invite.claimedBy ?? "belum ada"}\nMasa berlaku: ${vpsInviteExpiry(invite.expiresAt)}\n\nLink untuk dibagikan:\n${link}\n\nSatu undangan untuk satu order. Biaya DO/VPS tetap ditanggung penerima. Order masuk log dan testimoni biasa dengan metode Undangan Gratis.`, keyboard);
+    await vpsReply(ctx, `Undangan Jasa Install Gratis\n\nSumber: ${sourceLabel(invite.sourceMode)}\nPenerima: ${invite.recipientId ?? "Siapa pun pemegang link (1 orang)"}\nStatus: ${statusLabel(invite)}\nDiklaim oleh: ${invite.claimedBy ?? "belum ada"}\nMasa berlaku: ${vpsInviteExpiry(invite.expiresAt)}\n\nLink untuk dibagikan:\n${link}\n\nPenerima bisa install gratis berulang selama akses undangan aktif. Cabut akses gratis untuk menghentikan pemakaian berikutnya; order yang sudah aktif tetap berjalan. Biaya DO/VPS tetap ditanggung penerima. Setiap order masuk log dan testimoni biasa dengan metode Undangan Gratis.`, keyboard);
   }
   return async (ctx: Context, data: string): Promise<void> => {
     const actor = String(ctx.from!.id);
@@ -29,7 +32,7 @@ export function createInstallInviteAdmin(deps: VpsUiDependencies, input: (actor:
       if (offset) keyboard.text("Sebelumnya", `vpa_invites_${Math.max(0, offset - 10)}`);
       if (invites.length === 10) keyboard.text("Berikutnya", `vpa_invites_${offset + 10}`);
       keyboard.row().text("Admin VPS", "vpa_home");
-      await vpsReply(ctx, "Undangan Jasa Install Gratis\n\nBuat link sekali pakai untuk mengajak user mencoba jasa install. User memakai VPS atau akun DO sendiri; saldo tidak dipotong.", keyboard);
+      await vpsReply(ctx, "Undangan Jasa Install Gratis\n\nBerikan akses install gratis berulang selama undangan aktif. Admin bisa cabut akses kapan saja. User memakai VPS atau akun DO sendiri; saldo tidak dipotong.", keyboard);
       return;
     }
     if (data === "vpa_invnew") {
@@ -55,7 +58,7 @@ export function createInstallInviteAdmin(deps: VpsUiDependencies, input: (actor:
         const recipientId = value.trim();
         if (recipientId !== "-" && !/^[1-9]\d{0,19}$/.test(recipientId)) {
           input(actor, receive);
-          await inputCtx.reply("Kirim Telegram ID berupa angka positif, atau - untuk link sekali pakai tanpa penerima khusus.");
+          await inputCtx.reply("Kirim Telegram ID berupa angka positif, atau - untuk link yang diklaim satu orang tanpa penerima khusus.");
           return;
         }
         const invite = await deps.createInstallInvite(actor, { sourceMode: draft.sourceMode, days: days[2] === "unlimited" ? null : Number(days[2]), ...(recipientId === "-" ? {} : { recipientId }) });
@@ -63,7 +66,7 @@ export function createInstallInviteAdmin(deps: VpsUiDependencies, input: (actor:
         await detail(inputCtx, invite);
       };
       input(actor, receive);
-      await vpsReply(ctx, "Kirim Telegram ID penerima undangan. Hanya ID ini yang bisa memakainya.\n\nKirim - untuk link sekali pakai yang bisa diklaim satu orang. Ketik /batal untuk membatalkan.", back());
+      await vpsReply(ctx, "Kirim Telegram ID penerima undangan. Hanya ID ini yang bisa memakainya.\n\nKirim - untuk link yang bisa diklaim satu orang dan dipakai berulang oleh orang tersebut. Ketik /batal untuk membatalkan.", back());
       return;
     }
     const action = /^vpa_inv(detail|revoke)_([a-f0-9]{32})$/.exec(data);

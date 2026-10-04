@@ -1,10 +1,11 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { VpsInstallInvite, type IVpsInstallInvite } from "../models/VpsInstallInvite.js";
+import { VpsOrder } from "../models/VpsOrder.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform } from "./security.js";
 import type { VpsUiInstallInvite } from "../plugins/vps/contracts.js";
 
 export class VpsInstallInviteError extends Error {}
-const unavailable = (): VpsInstallInviteError => new VpsInstallInviteError("Undangan tidak tersedia, sudah digunakan, kedaluwarsa, dicabut, atau untuk user lain.");
+const unavailable = (): VpsInstallInviteError => new VpsInstallInviteError("Undangan tidak tersedia, kedaluwarsa, dicabut, atau untuk user lain.");
 function scope(id: string, actor?: string) {
   assertVpsPlatform();
   if (!/^[a-f0-9]{32}$/.test(id) || (actor !== undefined && !/^[1-9]\d{0,19}$/.test(actor))) throw unavailable();
@@ -36,10 +37,10 @@ export async function getInstallInvite(actor: string, id: string): Promise<VpsUi
 }
 export async function revokeInstallInvite(actor: string, id: string): Promise<void> {
   assertVpsAdmin(actor);
-  const result = await VpsInstallInvite.updateOne({ ...scope(id), redeemedAt: null, revokedAt: null }, { $set: { revokedAt: new Date() } });
-  if (!result.modifiedCount) throw new VpsInstallInviteError("Undangan sudah digunakan, dicabut, atau tidak ditemukan.");
+  const result = await VpsInstallInvite.updateOne({ ...scope(id), revokedAt: null }, { $set: { revokedAt: new Date() } });
+  if (!result.modifiedCount) throw new VpsInstallInviteError("Undangan sudah dicabut atau tidak ditemukan.");
 }
-/** The first eligible buyer owns this one preassigned order ID, even after a restart. */
+/** The first eligible buyer owns this reusable invitation, even after a restart. */
 export async function claimInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite> {
   assertVpsEnabled();
   const invite = await VpsInstallInvite.findOneAndUpdate({ ...scope(id, actor), revokedAt: null,
@@ -49,32 +50,41 @@ export async function claimInstallInvite(actor: string, id: string): Promise<Vps
   if (!invite) throw unavailable();
   return dto(invite);
 }
-/** Recover an unused claimed invitation independently of the in-memory wizard. */
+/** Recover an active claimed invitation independently of the in-memory wizard. */
 export async function findClaimedInstallInvite(actor: string, sourceMode?: "digitalocean" | "direct"): Promise<VpsUiInstallInvite | null> {
   assertVpsPlatform();
   if (!/^[1-9]\d{0,19}$/.test(actor)) throw unavailable();
-  const invite = await VpsInstallInvite.findOne({ tenantId: "platform", claimedBy: actor, redeemedAt: null, revokedAt: null,
+  const invite = await VpsInstallInvite.findOne({ tenantId: "platform", claimedBy: actor, revokedAt: null,
     ...(sourceMode ? { sourceMode: { $in: ["any", sourceMode] } } : {}),
     $and: [{ $or: [{ recipientId: null }, { recipientId: actor }] }, { $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] }],
   }).sort({ createdAt: 1, _id: 1 }).lean();
   return invite ? dto(invite) : null;
 }
 export async function requireInstallInvite(actor: string, id: string, orderId: string, sourceMode: "digitalocean" | "direct"): Promise<IVpsInstallInvite> {
-  const invite = await VpsInstallInvite.findOne({ ...scope(id, actor), claimedBy: actor, orderId }).lean();
+  if (!/^[a-f0-9-]{36}$/.test(orderId)) throw unavailable();
+  const invite = await VpsInstallInvite.findOne({ ...scope(id, actor), claimedBy: actor }).lean();
   if (!invite || (invite.sourceMode !== "any" && invite.sourceMode !== sourceMode)
-    || (invite.recipientId !== null && invite.recipientId !== actor)
-    || (!invite.redeemedAt && (invite.revokedAt || (invite.expiresAt && invite.expiresAt.getTime() <= Date.now())))) throw unavailable();
+    || (invite.recipientId !== null && invite.recipientId !== actor)) throw unavailable();
+  if (invite.revokedAt || (invite.expiresAt && invite.expiresAt.getTime() <= Date.now())) {
+    const order = await VpsOrder.findOne({ _id: orderId, tenantId: "platform", buyerId: actor, service: "install",
+      installInviteId: id, paymentMethod: "invite" }).select("installInviteAcceptedAt paymentStatus").lean();
+    // Preserve the old one-order receipt only for its original order. It cannot
+    // authorize a fresh order after revocation or expiry.
+    const legacyAccepted = order?.paymentStatus === "paying" && invite.orderId === orderId && invite.redeemedAt;
+    if (!order?.installInviteAcceptedAt && !legacyAccepted) throw unavailable();
+  }
   return invite;
 }
-/** Consuming the invite is atomic; its durable receipt lets the same order recover. */
-export async function consumeInstallInvite(actor: string, id: string, orderId: string, sourceMode: "digitalocean" | "direct"): Promise<IVpsInstallInvite> {
-  let invite = await requireInstallInvite(actor, id, orderId, sourceMode);
-  if (invite.redeemedAt) return invite;
-  const consumed = await VpsInstallInvite.findOneAndUpdate({ ...scope(id, actor), claimedBy: actor, orderId,
-    redeemedAt: null, revokedAt: null, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
-  }, { $set: { redeemedAt: new Date() } }, { returnDocument: "after" }).lean();
-  if (consumed) return consumed;
-  invite = await requireInstallInvite(actor, id, orderId, sourceMode);
-  if (!invite.redeemedAt) throw unavailable();
-  return invite;
+/** Each order gets its own durable activation receipt; the grant remains reusable. */
+export async function acceptInstallInvite(actor: string, id: string, orderId: string, sourceMode: "digitalocean" | "direct"): Promise<Date> {
+  const invite = await requireInstallInvite(actor, id, orderId, sourceMode);
+  const orderScope = { _id: orderId, tenantId: "platform", buyerId: actor, service: "install", installInviteId: id, paymentMethod: "invite" } as const;
+  const acceptedAt = invite.orderId === orderId && invite.redeemedAt ? invite.redeemedAt : new Date();
+  const accepted = await VpsOrder.findOneAndUpdate({ ...orderScope, paymentStatus: "paying", stage: { $in: ["queued", "needs_token"] },
+    installInviteAcceptedAt: null }, { $set: { installInviteAcceptedAt: acceptedAt } }, { returnDocument: "after" }).lean();
+  const order = accepted ?? await VpsOrder.findOne(orderScope).lean();
+  if (!order?.installInviteAcceptedAt) throw unavailable();
+  // redeemedAt/orderId remain only as legacy receipts. New grants record usage
+  // on each order, so there is no growing array or one-use state on the invite.
+  return order.installInviteAcceptedAt;
 }

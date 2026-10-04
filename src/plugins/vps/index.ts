@@ -258,10 +258,6 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
     if (serviceType === "install" && !invite) {
       invite = await deps.findClaimedInstallInvite(actor, direct ? "direct" : "digitalocean") ?? undefined;
-      if (invite) {
-        const existing = await deps.getOwned(actor, invite.orderId);
-        if (existing) { await showOrder(ctx, existing._id); return; }
-      }
     }
     const listedPlans = await deps.listPlans(serviceType, true);
     const plans = serviceType === "install"
@@ -269,7 +265,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       : listedPlans;
     // Draft status updates must not mutate shared DTOs returned by a dependency.
     const draftPlans = plans.map(plan => ({ ...plan }));
-    const draft: Draft = { id: invite?.orderId ?? randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: draftPlans, rules: [], ...(direct ? { directMode: true } : {}), ...(invite ? { installInviteId: invite.id } : {}) };
+    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: draftPlans, rules: [], ...(direct ? { directMode: true } : {}), ...(invite ? { installInviteId: invite.id } : {}) };
     drafts.set(actor, draft);
 
     if (direct) {
@@ -382,8 +378,6 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const invitation = /^vps_(?:invite|free_(do|direct))_([a-f0-9]{32})$/.exec(data);
         if (invitation) {
           const invite = await deps.claimInstallInvite(actor, invitation[2]!);
-          const existing = await deps.getOwned(actor, invite.orderId);
-          if (existing) { await showOrder(ctx, existing._id); return; }
           if (invitation[1]) {
             const direct = invitation[1] === "direct";
             if (invite.sourceMode !== "any" && invite.sourceMode !== (direct ? "direct" : "digitalocean")) throw new VpsInstallInviteError("Sumber VPS tidak sesuai undangan.");
@@ -395,7 +389,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (invite.sourceMode !== "direct") keyboard.text("Buat VPS di DO saya", `vps_free_do_${invite.id}`).row();
           if (invite.sourceMode !== "digitalocean") keyboard.text("Install ke VPS saya (SSH)", `vps_free_direct_${invite.id}`).row();
           keyboard.text("Batal", "vps_home");
-          await vpsReply(ctx, `Undangan Jasa Install Gratis\n\n${inviteNotice}\n\nMasa berlaku: ${vpsInviteExpiry(invite.expiresAt)}\nPilih sumber VPS kamu.`, keyboard);
+          await vpsReply(ctx, `Undangan Jasa Install Gratis\n\n${inviteNotice}\nBisa dipakai berulang selama akses undangan aktif.\n\nMasa berlaku: ${vpsInviteExpiry(invite.expiresAt)}\nPilih sumber VPS kamu.`, keyboard);
           return;
         }
         if (data === "vps_home") { await showHome(ctx); return; }
@@ -574,7 +568,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         } else if (action[1] === "cancel") {
           const order = await deps.getOwned(actor, orderId);
           if (!order) throw new Error("Order unavailable");
-          await vpsReply(ctx, `Batalkan pesanan ${orderId}?\n\n${order.paymentMethod === "invite" ? "Order undangan gratis bisa dibatalkan sebelum proses dimulai. Tidak ada dana yang dikembalikan dan undangan tetap untuk order ini saja." : order.paymentStatus === "paid" ? "Pembatalan dan refund hanya dapat diproses jika droplet belum dibuat dan pesanan memenuhi syarat pembatalan." : "Pesanan yang belum dibayar akan dibatalkan."}`, new InlineKeyboard().text("Ya, batalkan", `vps_canceldo_${orderId}`).row().text("Kembali", `vps_order_${orderId}`));
+          await vpsReply(ctx, `Batalkan pesanan ${orderId}?\n\n${order.paymentMethod === "invite" ? "Order undangan gratis bisa dibatalkan sebelum proses dimulai. Tidak ada dana yang dikembalikan. Undangan tetap bisa dipakai untuk order baru selama aksesnya aktif." : order.paymentStatus === "paid" ? "Pembatalan dan refund hanya dapat diproses jika droplet belum dibuat dan pesanan memenuhi syarat pembatalan." : "Pesanan yang belum dibayar akan dibatalkan."}`, new InlineKeyboard().text("Ya, batalkan", `vps_canceldo_${orderId}`).row().text("Kembali", `vps_order_${orderId}`));
           return;
         } else if (action[1] === "canceldo") {
           await deps.cancel(actor, orderId);
