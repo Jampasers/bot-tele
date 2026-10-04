@@ -42,6 +42,7 @@ export interface VpsTestimonialData {
   region?: string | undefined;
   totalPrice: number;
   method?: string | undefined;
+  hidePaymentDetails?: boolean | undefined;
   buyer: BuyerInfo;
   date?: Date | undefined;
 }
@@ -459,6 +460,10 @@ export class TestimonialService {
       const serviceLabel = isPurchase ? "VPS DigitalOcean" : "Jasa Install OS";
       const regionLine = data.region ? `📍 <b>Region:</b> <code>${escapeHtml(data.region)}</code>\n` : "";
       const osLine = data.os ? `💿 <b>Sistem Operasi:</b> <code>${safeOs}</code>\n` : "";
+      const paymentLines = data.hidePaymentDetails
+        ? ""
+        : `💰 <b>Total Transaksi:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
+          `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method || "Saldo / QRIS")}</code>\n`;
 
       const text =
         `${title}\n` +
@@ -468,13 +473,12 @@ export class TestimonialService {
         `🖥️ <b>Paket Spek:</b> <b>${safePlanName}</b>\n` +
         regionLine +
         osLine +
-        `💰 <b>Total Transaksi:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
-        `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method || "Saldo / QRIS")}</code>\n` +
+        paymentLines +
         `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
         `📅 <b>Waktu:</b> ${formattedDate}\n` +
-        `⚡ <b>Status:</b> ✅ <b>Lunas &amp; Sedang Dikonfigurasi Otomatis</b>\n` +
+        `⚡ <b>Status:</b> ✅ <b>Selesai &amp; Siap Digunakan</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `<i>✨ Layanan otomatis diproses oleh sistem bot. Terima kasih atas kepercayaannya! 🙏</i>`;
+        `<i>✨ Layanan selesai diproses otomatis oleh sistem bot. Terima kasih atas kepercayaannya! 🙏</i>`;
 
       const keyboard = new InlineKeyboard();
       if (botUsername) {
@@ -483,20 +487,22 @@ export class TestimonialService {
 
       // ── Generate Receipt Card Image ────────────────────────────────────────
       let receiptBuffer: Buffer | null = null;
-      try {
-        receiptBuffer = await ReceiptService.generateReceiptBuffer({
-          orderId: data.orderId,
-          method: data.method || "Saldo / QRIS",
-          product: data.os ? `${data.planName || "VPS"} (${data.os})` : (data.planName || "VPS"),
-          category: isPurchase ? "DigitalOcean VPS" : "Jasa Install VPS",
-          date: formattedDate,
-          totalIdr: data.totalPrice,
-          status: "PAID",
-          buyerName: formatBuyerPlain(data.buyer),
-          brandTitle: botUsername ? `@${botUsername}` : undefined,
-        });
-      } catch (genErr) {
-        console.warn(`[Testimonial] Gagal render gambar struk VPS:`, genErr);
+      if (!data.hidePaymentDetails) {
+        try {
+          receiptBuffer = await ReceiptService.generateReceiptBuffer({
+            orderId: data.orderId,
+            method: data.method || "Saldo / QRIS",
+            product: data.os ? `${data.planName || "VPS"} (${data.os})` : (data.planName || "VPS"),
+            category: isPurchase ? "DigitalOcean VPS" : "Jasa Install VPS",
+            date: formattedDate,
+            totalIdr: data.totalPrice,
+            status: "PAID",
+            buyerName: formatBuyerPlain(data.buyer),
+            brandTitle: botUsername ? `@${botUsername}` : undefined,
+          });
+        } catch (genErr) {
+          console.warn(`[Testimonial] Gagal render gambar struk VPS:`, genErr);
+        }
       }
 
       if (receiptBuffer) {

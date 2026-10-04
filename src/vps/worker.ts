@@ -4,6 +4,7 @@ import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
 import { User } from "../models/User.js";
 import { ActivityLogService } from "../services/activityLog.js";
+import { TestimonialService } from "../services/testimonial.js";
 import { decryptSecret } from "../services/crypto.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ThrottledWarningLogger } from "../runtime/retryLogger.js";
@@ -552,25 +553,55 @@ export class VpsWorker {
           void User.findOne({ telegramId: order.buyerId, tenantId: "platform" })
             .select("telegramId firstName username")
             .lean()
-            .then(buyer => {
-              return ActivityLogService.logVpsSuccess(undefined, {
-                orderId: order._id,
-                service: order.service,
-                planName: order.snapshot.planName,
-                sizeSlug: order.snapshot.size,
-                region: order.snapshot.region,
-                os: order.snapshot.os,
-                publicIp: order.publicIp ?? undefined,
-                evidence: order.evidence,
-                buyer: {
-                  telegramId: order.buyerId,
-                  firstName: buyer?.firstName,
-                  username: buyer?.username,
-                },
-                date: new Date(),
-              });
+            .then(async buyer => {
+              const completedAt = new Date();
+              const buyerInfo = {
+                telegramId: order.buyerId,
+                firstName: buyer?.firstName,
+                username: buyer?.username,
+              };
+              const totalPrice = order.paymentMethod === "invite"
+                ? 0
+                : order.paymentMethod === "qris"
+                  ? (order.paymentInvoice?.amount ?? order.snapshot.price)
+                  : order.snapshot.price;
+              const method = order.paymentMethod === "qris"
+                ? "QRIS"
+                : order.paymentMethod === "balance"
+                  ? "Saldo Akun"
+                  : undefined;
+              const tasks: Promise<unknown>[] = [
+                ActivityLogService.logVpsSuccess(undefined, {
+                  orderId: order._id,
+                  service: order.service,
+                  planName: order.snapshot.planName,
+                  sizeSlug: order.snapshot.size,
+                  region: order.snapshot.region,
+                  os: order.snapshot.os,
+                  publicIp: order.publicIp ?? undefined,
+                  evidence: order.evidence,
+                  buyer: buyerInfo,
+                  date: completedAt,
+                }),
+              ];
+              const tgApi = ActivityLogService.getDefaultApi();
+              if (tgApi) {
+                tasks.push(TestimonialService.sendVpsPurchaseTestimonial(tgApi, {
+                  orderId: order._id,
+                  service: order.service,
+                  planName: order.snapshot.planName,
+                  os: order.snapshot.os,
+                  region: order.snapshot.region,
+                  totalPrice,
+                  ...(method ? { method } : {}),
+                  hidePaymentDetails: order.paymentMethod === "invite",
+                  buyer: buyerInfo,
+                  date: completedAt,
+                }));
+              }
+              await Promise.allSettled(tasks);
             })
-            .catch(err => console.warn(`[VPS:${order._id}] Failed to dispatch ready audit log:`, err));
+            .catch(err => console.warn(`[VPS:${order._id}] Failed to dispatch ready audit/testimonial:`, err));
         }
       }
     } catch (error) {

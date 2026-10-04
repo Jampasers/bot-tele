@@ -189,7 +189,7 @@ test("permanent invitations allow either installer without expiry and still enfo
   await assert.rejects(platform(() => createInstallInvite("900", { sourceMode: "any", days: 0 })), VpsInstallInviteError);
 });
 
-test("free install invitation settles once, sends normal order logs and testimonial, and never touches wallet or QRIS", async t => {
+test("free install invitation settles once, logs payment without publishing testimonial, and never touches wallet or QRIS", async t => {
   const db = database(t, 0);
   const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
   const invite = db.addInvite(order._id);
@@ -207,11 +207,9 @@ test("free install invitation settles once, sends normal order logs and testimon
   assert.equal(db.users[0]!.appliedVpsPaymentEffectIds.length, 0);
   assert.equal(db.audit.length, 0);
   assert.equal(order.paymentInvoice, undefined);
-  assert.equal(logs.length, 1); assert.equal(testimonials.length, 1);
+  assert.equal(logs.length, 1); assert.equal(testimonials.length, 0);
   assert.equal(logs[0].totalPrice, 0); assert.equal(logs[0].catalogPrice, 25000);
   assert.equal(logs[0].method, "Undangan Gratis");
-  assert.equal(testimonials[0].orderId, order._id); assert.equal(testimonials[0].totalPrice, 0);
-  assert.equal(testimonials[0].method, "Undangan Gratis");
   await assert.rejects(platform(() => payVpsFromBalance(order._id, "101")), VpsInstallInviteError);
   await assert.rejects(platform(() => createVpsInvoice(order._id, "101")), VpsInstallInviteError);
   await assert.rejects(platform(() => checkVpsPayment(order._id, "999")), /access denied/);
@@ -241,10 +239,9 @@ test("one claimed invitation activates repeated direct and DO orders with indepe
   assert.equal(db.users[0]!.appliedVpsPaymentEffectIds.length, 0);
   assert.equal(invite.redeemedAt, null); assert.equal(invite.revokedAt, null);
   assert.ok(db.orders.every(order => order.paymentInvoice === undefined));
-  assert.equal(logs.length, 4); assert.equal(testimonials.length, 4);
+  assert.equal(logs.length, 4); assert.equal(testimonials.length, 0);
   assert.equal(new Set(logs.map(log => log.orderId)).size, 4);
   assert.ok(logs.every(log => log.totalPrice === 0 && log.catalogPrice === 25000 && log.method === "Undangan Gratis"));
-  assert.ok(testimonials.every(log => log.totalPrice === 0 && log.method === "Undangan Gratis"));
 });
 
 test("admin revokes a used invitation, preserving activated orders while rejecting all fresh orders", async t => {

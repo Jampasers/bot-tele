@@ -6,7 +6,6 @@ import { getTenantContext, PLATFORM_TENANT_ID } from "../tenant/context.js";
 import { generatePlatformQris, getPlatformPaymentClients } from "../payments/platformPayment.service.js";
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
 import { ActivityLogService } from "../services/activityLog.js";
-import { TestimonialService } from "../services/testimonial.js";
 import { assertVpsOrderAcceptsNewPayment, assertVpsSelectionAvailable } from "./availability.js";
 import { acceptInstallInvite, requireInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "./installInvites.js";
 import { getVpsCatalog } from "./catalog.js";
@@ -108,24 +107,9 @@ async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: s
           date: paidAt,
         });
 
-        // 2. Transaction Proof to TESTIMONIAL_CHANNEL
-        const tgApi = ActivityLogService.getDefaultApi();
-        if (tgApi) {
-          await TestimonialService.sendVpsPurchaseTestimonial(tgApi, {
-            orderId: order._id,
-            service: order.service,
-            planName: order.snapshot.planName,
-            os: order.snapshot.os,
-            region: order.snapshot.region,
-            totalPrice,
-            method: order.paymentMethod === "balance" ? "Saldo Akun" : method,
-            buyer: buyerInfo,
-            date: paidAt,
-          });
-        }
       } catch (logErr) {
         if (process.env.NODE_ENV !== "test") {
-          console.warn(`[VPS:${order._id}] Failed to dispatch audit or testimonial log:`, logErr);
+          console.warn(`[VPS:${order._id}] Failed to dispatch payment audit log:`, logErr);
         }
       }
     })();
