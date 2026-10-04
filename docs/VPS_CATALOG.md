@@ -9,6 +9,26 @@ Menu **Katalog OS/region/spek** menerima tambahan satu field per pesan. Entri ba
 Admin juga bisa membagikan [undangan Jasa Install gratis](VPS_INSTALL_INVITES.md)
 melalui `/vpsadmin` → **Undangan Jasa Install Gratis**.
 
+## Install ke VPS milik buyer
+
+Install VPS Buyer langsung menawarkan Windows, lalu meminta IP, username dan
+password SSH, serta opsi Chrome. Buyer tidak perlu memilih spek atau region.
+Admin memakai satu layanan **Install Windows di VPS Buyer** dengan harga global
+layanan atau harga khusus per Windows. Harga khusus Windows diprioritaskan.
+
+Sebelum persiapan installer, bot memeriksa kapasitas disk fisik yang menampung
+OS melalui SSH. Minimum **50 GB (50.000.000.000 byte)**; bukan sisa ruang partisi
+Linux, karena instalasi mengganti OS. Disk data tambahan tidak dihitung. Disk
+yang sudah diperiksa diteruskan sebagai target installer. Jika kapasitas di
+bawah minimum, order gagal sebelum perubahan disk dan seluruh pembayaran
+dikembalikan ke saldo bot, termasuk nominal unik QRIS. Refund tetap sekali
+meski worker restart. Undangan gratis ditutup tanpa kredit saldo.
+
+Jika disk tidak dapat dibaca atau root berada pada beberapa disk, bot menahan
+instalasi dan mencoba pemeriksaan ulang pada VPS yang sama. Tidak ada refund
+berdasarkan ukuran yang belum terverifikasi. Pesanan lama tetap memakai
+snapshot harga saat checkout dan juga diperiksa sebelum persiapan installer.
+
 ## Disable spek, OS, dan region
 
 Buka `/vpsadmin` → **Disable Spek / OS / Region** (juga tersedia di menu katalog).
@@ -26,9 +46,10 @@ dikirim; `/batal` membatalkan input.
 | Region per spek | Satu region dan satu spek, semua OS |
 | Region per OS + spek | Satu region untuk pasangan OS dan spek tertentu |
 
-Aturan berlaku pada VPS DO dan jasa install DO buyer. Disable spek/OS juga
-berlaku pada install melalui SSH di VPS milik buyer; aturan region tidak
-berlaku pada VPS eksternal. Cakupan global mencakup entri katalog baru juga.
+Aturan berlaku pada VPS DO dan jasa install DO buyer.
+Install melalui SSH memakai disable layanan dan OS global;
+aturan spek DO dan region tidak berlaku pada VPS eksternal. Cakupan global
+mencakup entri katalog baru juga.
 
 Pilihan nonaktif tetap tampil dengan tanda 🚫 dan menampilkan pesan aturan
 saat dipilih. Karena region dipilih sebelum OS, aturan region yang dibatasi

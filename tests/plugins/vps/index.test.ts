@@ -10,13 +10,13 @@ import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/
 import type { AvailabilityMap, VpsUiDependencies, VpsUiInstallInvite, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
 import { VpsInstallInviteError } from "../../../src/vps/installInvites.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlan, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
 import { DEFAULT_DISABLED_MESSAGE, type VpsAvailabilityRule, type VpsAvailabilityInput } from "../../../src/vps/availability.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
-const DIRECT_PLAN: VpsUiPlan = { ...directInstallPlans(defaultVpsCatalog())[0]!, osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: null, family: "windows" }], globalPrice: 15000 };
+const DIRECT_PLAN: VpsUiPlan = { ...directInstallPlan(defaultVpsCatalog()), osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: null, family: "windows" }], globalPrice: 15000 };
 const ORDER: VpsUiOrder = { _id: ORDER_ID, serviceType: "install", paymentStatus: "unpaid", stage: "queued", price: 43_210, planName: "RAM 2 GB", sizeSlug: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" };
 const INVITE: VpsUiInstallInvite = { id: "a".repeat(32), sourceMode: "any", recipientId: "42", orderId: ORDER_ID, claimedBy: "42", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000) };
 interface ApiCall { method: string; payload: Record<string, unknown> }
@@ -142,7 +142,7 @@ test("free invitations use the ordinary direct/DO selection and require explicit
     assert.match(JSON.stringify(calls.at(-1)), /vps_free_direct_/);
     await bot.handleUpdate(update(++id, `vps_free_${direct ? "direct" : "do"}_${INVITE.id}`, true));
     if (!direct) await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
-    await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
+    if (!direct) await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
     if (!direct) await bot.handleUpdate(update(++id, callback(calls, "vps_region_"), true));
     assert.match(JSON.stringify(calls.at(-1)), /Gratis \(undangan\)/);
     await bot.handleUpdate(update(++id, callback(calls, "vps_os_"), true));
@@ -281,7 +281,6 @@ test("direct buyer VPS installation also respects global OS disable rules", asyn
   const { bot, calls } = await harness({ listAvailabilityRules: async () => [{ id: "b".repeat(24), kind: "os", target: "windows2022", size: null, os: null,
     message: "Windows installer sedang diperbaiki", enabled: true }], checkout: async () => { checkouts++; return ORDER; } });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
-  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
   assert.match(JSON.stringify(calls.at(-1)), /🚫.*Windows Server/);
   await bot.handleUpdate(update(3, callback(calls, "vps_os_"), true));
   assert.match(replies(calls), /Windows installer sedang diperbaiki/);
@@ -325,7 +324,7 @@ test("jasa setup/install keeps both DigitalOcean and direct buyer VPS paths insi
   assert.match(JSON.stringify(calls), /vps_install_direct/);
 });
 
-test("direct install selects spec and skips region, then checks out Windows without a DO token", async () => {
+test("direct install starts with Windows and checks out without a spec, region or DO token", async () => {
   let checkoutInput: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
   let acceptedTokens = 0;
   const { bot, calls } = await harness({
@@ -334,13 +333,12 @@ test("direct install selects spec and skips region, then checks out Windows with
   });
   await bot.handleUpdate(update(1, "vps_install", true));
   await bot.handleUpdate(update(2, "vps_install_direct", true));
-  assert.match(replies(calls), /Pilih spek VPS milik/);
-  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
+  assert.doesNotMatch(replies(calls), /Pilih spek VPS milik|Ganti Spek|Spek:/);
   assert.match(replies(calls), /Pilih Windows/s);
   assert.doesNotMatch(JSON.stringify(calls.at(-1)), /vps_plan_|vps_region_/);
 
   await bot.handleUpdate(update(3, callback(calls, "vps_os_"), true));
-  assert.match(replies(calls), /Langkah 3\/6.*Kirim IP/s);
+  assert.match(replies(calls), /Langkah 2\/5.*Kirim IP/s);
   await bot.handleUpdate(update(4, "192.0.2.10"));
   await bot.handleUpdate(update(5, "ubuntu"));
   await bot.handleUpdate(update(6, "synthetic-source-password"));
@@ -375,7 +373,6 @@ test("Chrome checkout can be retried with the same intent and memory-only VPS pa
     return ORDER;
   } });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
-  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
   await bot.handleUpdate(update(2, callback(calls, "vps_os_"), true));
   await bot.handleUpdate(update(3, "192.0.2.10"));
   await bot.handleUpdate(update(4, "root"));
@@ -720,16 +717,15 @@ test("admin adds a custom size one field at a time and legacy add-package button
   assert.deepEqual(saved, { kind: "size", value: ["s-custom", "12", "24 GB", "500 GB", "8 TB", "$120/month"] });
 });
 
-test("direct install selects a supported spec then shows only Windows without region", async () => {
-  const direct = directInstallPlans(defaultVpsCatalog())[0]!;
+test("direct install immediately shows all Windows options without a spec or region", async () => {
+  const direct = directInstallPlan(defaultVpsCatalog());
   let checkouts = 0;
   const { bot, calls } = await harness({
     listPlans: async serviceType => serviceType === "install" ? [...catalogPlans(defaultVpsCatalog(), "install"), direct] : [],
     checkout: async () => { checkouts++; return ORDER; },
   });
   await bot.handleUpdate(update(1, "vps_install_direct", true));
-  assert.match(replies(calls), /Pilih spek VPS milik/);
-  await bot.handleUpdate(update(20, callback(calls, "vps_plan_"), true));
+  assert.doesNotMatch(replies(calls), /Pilih spek VPS milik|Ganti Spek|Spek:/);
   const last = calls.at(-1)!;
   assert.match(JSON.stringify(last), /Windows Server 2012 R2/);
   assert.match(JSON.stringify(last), /Windows Server 2022/);

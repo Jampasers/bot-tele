@@ -7,7 +7,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
-import { inspectSsh, InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
+import { inspectSsh, inspectInstallStorage, MIN_INSTALL_DISK_BYTES, InstallerError, launchWindows, selectWindowsImage } from "../../src/vps/installer.js";
 import { resolveWindowsDdImage } from "../../src/vps/windowsImages.js";
 
 function interpreter(candidates: string[], args: string[], expected: RegExp): string | undefined {
@@ -27,6 +27,69 @@ const scriptSkip = !python ? "Python 3 is required to execute the generated inst
 // hivexregedit prints its help successfully with exit code 1.
 const hivexProbe = spawnSync("hivexregedit", ["--help"], { encoding: "utf8", timeout: 5_000, windowsHide: true });
 const hivexregedit = /Usage:[\s\S]*hivexregedit --merge/.test(`${hivexProbe.stdout}${hivexProbe.stderr}`) ? "hivexregedit" : undefined;
+
+test("storage probe measures the root backing disk for partitions, NVMe and single-disk LVM without mutations", { skip: !bash && "Bash is required" }, async () => {
+    for (const [source, disk, bytes] of [
+        ["/dev/vda1", "/dev/vda", MIN_INSTALL_DISK_BYTES],
+        ["/dev/nvme0n1p2[/root]", "/dev/nvme0n1", 49_999_999_999],
+        ["/dev/mapper/vg-root", "/dev/sda", 80_000_000_000],
+    ] as const) {
+        const storage = await inspectInstallStorage({ ip: "192.0.2.10", password: "offline", username: "ubuntu" }, undefined, {
+            ssh: async input => {
+                assert.equal(input.command, "sudo -n bash -s");
+                assert.notEqual(input.mutation, true);
+                const script = `findmnt() { printf '%s\\n' '${source}'; }
+lsblk() {
+  if [ "$1" = '-srnpo' ]; then
+    [ "$3" = '${source.split("[")[0]}' ] || return 1
+    printf '%s\\n' '${source.split("[")[0]} part' '${disk} disk'
+  elif [ "$1" = '-bdrn' ]; then
+    [ "$4" = '${disk}' ] || return 1
+    printf '%s\\n' '${bytes}'
+  else return 1; fi
+}
+${input.stdin}`;
+                const run = spawnSync(bash!, ["-c", script], { encoding: "utf8", timeout: 5_000 });
+                assert.ifError(run.error); assert.equal(run.stderr, "");
+                return { code: run.status, output: run.stdout };
+            },
+        });
+        assert.deepEqual(storage, { targetDisk: disk, bytes });
+    }
+});
+
+test("storage probe refuses ambiguous multi-disk roots and invalid or failed SSH output", { skip: !bash && "Bash is required" }, async () => {
+    await assert.rejects(inspectInstallStorage({ ip: "192.0.2.10", password: "offline" }, undefined, {
+        ssh: async input => {
+            const run = spawnSync(bash!, ["-c", `findmnt() { echo /dev/md0; }
+lsblk() { printf '%s\\n' '/dev/sda disk' '/dev/sdb disk'; }
+${input.stdin}`], { encoding: "utf8", timeout: 5_000 });
+            return { code: run.status, output: run.stdout };
+        },
+    }), (error: unknown) => error instanceof InstallerError && error.reason === "storage_detection");
+    for (const result of [
+        { code: 1, output: "__VPS_INSTALL_DISK__:/dev/vda:50000000000\n" },
+        { code: 0, output: "__VPS_INSTALL_DISK__:/dev/vda:0\n" },
+        { code: 0, output: "__VPS_INSTALL_DISK__:/dev/vda:9007199254740992\n" },
+        { code: 0, output: "__VPS_INSTALL_DISK__:/dev/vda:50000000000\n__VPS_INSTALL_DISK__:/dev/vdb:80000000000\n" },
+        { code: 0, output: "unexpected SSH output containing a secret" },
+    ]) {
+        await assert.rejects(inspectInstallStorage({ ip: "192.0.2.10", password: "offline" }, undefined, { ssh: async () => result }),
+            (error: unknown) => error instanceof InstallerError && error.reason === "storage_detection" && !error.message.includes("secret"));
+    }
+});
+
+test("Windows reinstall targets the disk verified by the storage probe", async () => {
+    let script = "";
+    await launchWindows({ ip: "192.0.2.10", password: "offline", windowsPassword: "MockPassword123!xyz",
+        os: "windows2022", orderId: "storage-probe-test", bootMode: "efi", imageUrl: "https://images.example.test/windows-efi.xz", targetDisk: "/dev/nvme0n1" },
+    undefined, { ssh: async input => { script = input.stdin!; return { code: 0, output: "__VPS_PREPARED__" }; } });
+    assert.match(script, /--target-disk '\/dev\/nvme0n1'/);
+    if (bash) {
+        const run = spawnSync(bash, ["-n"], { input: script, encoding: "utf8", timeout: 5_000 });
+        assert.equal(run.status, 0, run.stderr);
+    }
+});
 
 test("SSH readiness shell observes cloud-init and waits until boot scripts have finished", { skip: !bash && "Bash is required to execute the SSH readiness command" }, async () => {
     for (const [status, ready] of [

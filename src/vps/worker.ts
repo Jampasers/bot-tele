@@ -8,7 +8,7 @@ import { decryptSecret } from "../services/crypto.js";
 import { platformContext, runWithTenant } from "../tenant/context.js";
 import { ThrottledWarningLogger } from "../runtime/retryLogger.js";
 import { DigitalOceanClient, DigitalOceanError } from "./digitalOcean.js";
-import { buildUserData, detectWindowsBootMode, getOs, inspectSsh, inspectWindows, InstallerError, launchWindows, scheduleInstallerReboot, selectWindowsImage } from "./installer.js";
+import { buildUserData, detectWindowsBootMode, getOs, inspectInstallStorage, MIN_INSTALL_DISK_BYTES, inspectSsh, inspectWindows, InstallerError, launchWindows, scheduleInstallerReboot, selectWindowsImage } from "./installer.js";
 import { SSH_READINESS_DETAILS } from "./installerError.js";
 import { resolveWindowsDdImageCandidates } from "./windowsImages.js";
 import { assertVpsPlatform, boundedEnv, buyerTokens } from "./security.js";
@@ -26,6 +26,7 @@ export interface VpsStepDependencies {
   sourcePassword?(): string;
   sourceUsername?(): string;
   inspectSsh: typeof inspectSsh;
+  inspectInstallStorage: typeof inspectInstallStorage;
   detectWindowsBootMode: typeof detectWindowsBootMode;
   resolveWindowsDdImageCandidates: typeof resolveWindowsDdImageCandidates;
   selectWindowsImage: typeof selectWindowsImage;
@@ -170,7 +171,8 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   }
   if (["failed", "cancelled", "ready", "needs_token"].includes(order.stage)) return;
   if (order.stage === "review") {
-    // Retry observation only. Neither create nor install can be repeated from this branch.
+    // Retry observation only, except a direct install held at its read-only disk
+    // preflight. Installer preparation itself still uses the remote order guard.
     if (order.resumeStage === "creating") {
       const client = await api(); if (!client) return;
       const found = (await client.listDroplets(deps.signal)).filter(d => d.name === order.createName);
@@ -183,7 +185,8 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       await monitorWindows(false);
       return;
     }
-    if (order.resumeStage !== "ssh" && order.resumeStage !== "droplet") return;
+    const retryStorage = directInstall && order.resumeStage === "installing" && order.lastError === "storage_detection";
+    if (order.resumeStage !== "ssh" && order.resumeStage !== "droplet" && !retryStorage) return;
     // These steps only observe the existing VPS and cannot allocate another droplet.
     const resumeStage = order.resumeStage as IVpsOrder["stage"];
     await save({ stage: resumeStage });
@@ -299,6 +302,27 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     }
   }
   if (order.stage === "installing") {
+    let targetDisk: string | undefined;
+    if (directInstall) {
+      let storage: Awaited<ReturnType<typeof inspectInstallStorage>>;
+      try {
+        storage = await deps.inspectInstallStorage({ ip: order.publicIp, password: sourcePassword, username: sourceUsername }, deps.signal);
+      } catch {
+        if (deps.signal.aborted) return;
+        await stage("review", { resumeStage: "installing", lastError: "storage_detection",
+          evidence: "Storage VPS belum dapat diverifikasi dengan aman. Instalasi belum dilanjutkan; pemeriksaan disk pada VPS yang sama akan dicoba kembali." });
+        return;
+      }
+      if (deps.signal.aborted) return;
+      if (storage.bytes < MIN_INSTALL_DISK_BYTES) {
+        await stage("failed", { resumeStage: null, lastError: "storage_insufficient",
+          evidence: `Kapasitas disk VPS ${(Math.floor(storage.bytes / 10_000_000) / 100).toFixed(2)} GB, kurang dari minimum 50 GB. Instalasi dibatalkan sebelum perubahan disk.` });
+        await refundTerminal();
+        return;
+      }
+      targetDisk = storage.targetDisk;
+      await save({ lastError: null, resumeStage: null });
+    }
     let bootMode = order.installerBootMode;
     let imageUrl = order.installerImageUrl;
     if ((bootMode && !imageUrl) || (!bootMode && imageUrl)) {
@@ -336,6 +360,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     const wallpaperBase64 = await deps.wallpaperBase64?.();
     const result = await deps.launchWindows({ ip: order.publicIp, password: sourcePassword, username: sourceUsername, windowsPassword: password,
       os: order.snapshot.os, orderId: order._id, bootMode, imageUrl, installChrome: order.snapshot.installChrome === true,
+      ...(targetDisk ? { targetDisk } : {}),
       ...(wallpaperBase64 ? { wallpaperBase64 } : {}) }, deps.signal);
     if (result.logUrl) await save({ installerLogUrl: result.logUrl });
     if (result.state === "prepared") {
@@ -497,7 +522,7 @@ export class VpsWorker {
         password: () => decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourcePassword: () => order.sourcePasswordEncrypted ? decryptSecret(order.sourcePasswordEncrypted, `platform:vps:source-password:${order._id}`) : decryptSecret(order.passwordEncrypted, `platform:vps:password:${order._id}`),
         sourceUsername: () => order.sourceUsername ?? "root",
-        inspectSsh, detectWindowsBootMode, resolveWindowsDdImageCandidates, selectWindowsImage, launchWindows, scheduleInstallerReboot, inspectWindows,
+        inspectSsh, inspectInstallStorage, detectWindowsBootMode, resolveWindowsDdImageCandidates, selectWindowsImage, launchWindows, scheduleInstallerReboot, inspectWindows,
         wallpaperBase64: resolveVpsWallpaperBase64,
         clearToken: () => buyerTokens.delete(order.buyerId, order._id), now: Date.now, signal: stopStep.signal,
       });

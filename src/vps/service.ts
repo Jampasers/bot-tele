@@ -55,7 +55,11 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
     await requireInstallInvite(input.actorTelegramId, input.installInviteId, input.requestId, input.direct ? "direct" : "digitalocean");
   }
   const catalog = await getVpsCatalog();
-  const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType }).lean();
+  const storedPlan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType }).lean();
+  // The buyer's disk is inspected over SSH, so this service has no catalog spec.
+  const plan = input.serviceType === "install" && input.planId === DIRECT_INSTALL_PLAN_ID
+    ? { ...directInstallPlan(catalog, storedPlan), _id: DIRECT_INSTALL_PLAN_ID }
+    : storedPlan;
   if (plan) assertVpsSelectionAvailable(catalog.availabilityRules ?? [], { size: plan.sizeSlug, os: input.os, region: input.region });
   if (plan?.enabled === false) throw new VpsSelectionDisabledError();
   const serviceGlobal = plan?.serviceType === "install"
@@ -242,8 +246,9 @@ export const vpsService: VpsUiDependencies = {
     const saved = await VpsPlan.find({ tenantId: "platform", ...(serviceType ? { serviceType } : {}),
       $or: [{ catalogManaged: true }, { _id: DIRECT_INSTALL_PLAN_ID }, { _id: INSTALL_DO_GLOBAL_PRICE_ID }, { _id: INSTALL_DIRECT_GLOBAL_PRICE_ID }] }).lean();
     const servicePrice = { doPrice: saved.find(row => row._id === INSTALL_DO_GLOBAL_PRICE_ID)?.globalPrice ?? null, directPrice: saved.find(row => row._id === INSTALL_DIRECT_GLOBAL_PRICE_ID)?.globalPrice ?? null };
-    const plans = [...catalogPlans(catalog, serviceType), ...(!serviceType || serviceType === "install" ? directInstallPlans(catalog) : [])]
-      .map(plan => mergeCatalogPrices(plan, saved.find(row => row._id === plan.id), plan.sourceMode === "direct" ? servicePrice.directPrice : plan.sourceMode === "digitalocean" ? servicePrice.doPrice : null));
+    const direct = directInstallPlan(catalog, saved.find(row => row._id === DIRECT_INSTALL_PLAN_ID));
+    const plans = [...catalogPlans(catalog, serviceType), ...(!serviceType || serviceType === "install" ? [direct] : [])]
+      .map(plan => mergeCatalogPrices(plan, plan.id === DIRECT_INSTALL_PLAN_ID ? direct : saved.find(row => row._id === plan.id), plan.sourceMode === "direct" ? servicePrice.directPrice : plan.sourceMode === "digitalocean" ? servicePrice.doPrice : null));
     return plans.filter(plan => includeDisabled || plan.enabled);
   },
   acceptBuyerToken,
@@ -375,6 +380,7 @@ export const vpsService: VpsUiDependencies = {
         regions: plan.regions,
         osPrices: nextOsPrices,
         priceMatrix: [],
+        globalPrice: input.globalPrice !== undefined ? input.globalPrice : stored?.globalPrice ?? null,
         catalogManaged: false,
         enabled: input.enabled ?? plan.enabled,
       } }, { upsert: true, runValidators: true });

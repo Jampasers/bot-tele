@@ -33,13 +33,15 @@ export function directInstallPlans(catalog: PlanCatalog): VpsUiPlan[] {
 
 export function directInstallPlan(
   catalog: PlanCatalog,
-  saved?: Pick<VpsUiPlan, "enabled" | "osPrices">,
+  saved?: { enabled: boolean; osPrices: readonly { os: string; label: string; price?: number | null }[];
+    globalPrice?: number | null | undefined; priceMatrix?: VpsUiPlan["priceMatrix"] } | null,
 ): VpsUiPlan {
   const savedPrices = new Map((saved?.osPrices ?? []).map(item => [item.os, item.price] as const));
   return {
     id: DIRECT_INSTALL_PLAN_ID,
     name: "Install Windows di VPS Buyer",
     serviceType: "install",
+    sourceMode: "direct",
     sizeSlug: "external-vps",
     sizeLabel: "VPS Buyer · Direct SSH",
     regions: ["external"],
@@ -47,7 +49,12 @@ export function directInstallPlan(
     osPrices: catalog.os
       .filter(os => os.family === "windows")
       .map(os => ({ os: os.key, label: os.name, family: os.family, price: savedPrices.get(os.key) ?? null })),
-    priceMatrix: [],
+    priceMatrix: [
+      ...(saved?.priceMatrix ?? []),
+      ...(saved?.osPrices ?? []).filter(item => item.price !== null && item.price !== undefined)
+        .map(item => ({ region: "external", os: item.os, price: item.price! })),
+    ],
+    globalPrice: saved?.globalPrice ?? null,
     enabled: saved?.enabled ?? true,
     catalogManaged: false,
   };
