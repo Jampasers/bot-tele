@@ -72,9 +72,15 @@ test("admin creates recipient-locked or bearer install invitation, shares a deep
   const previous = process.env.ADMIN_ID;
   process.env.ADMIN_ID = "42";
   t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
-  for (const recipient of ["123", "-"]) {
+  for (const { recipient, days, sourceMode } of [
+    { recipient: "123", days: null, sourceMode: "any" as const },
+    { recipient: "-", days: null, sourceMode: "any" as const },
+    { recipient: "123", days: 1, sourceMode: "any" as const },
+    { recipient: "123", days: 7, sourceMode: "digitalocean" as const },
+    { recipient: "-", days: 30, sourceMode: "direct" as const },
+  ]) {
     let saved: Parameters<VpsUiDependencies["createInstallInvite"]>[1] | undefined;
-    const invite = { ...INVITE };
+    const invite = { ...INVITE, sourceMode, expiresAt: days === null ? null : INVITE.expiresAt };
     const { bot, calls } = await harness({ listInstallInvites: async () => [],
       createInstallInvite: async (actor, input) => { assert.equal(actor, "42"); saved = input; return invite; },
       getInstallInvite: async () => invite,
@@ -84,12 +90,16 @@ test("admin creates recipient-locked or bearer install invitation, shares a deep
     assert.match(JSON.stringify(calls), /vpa_invites_0/);
     await bot.handleUpdate(update(2, "vpa_invites_0", true));
     await bot.handleUpdate(update(3, "vpa_invnew", true));
-    await bot.handleUpdate(update(4, "vpa_invsource_any", true));
-    await bot.handleUpdate(update(5, callback(calls, "vpa_invdays_"), true));
+    assert.match(JSON.stringify(calls.at(-1)), /Semua Installer \(VPS Buyer \+ DO\)/);
+    await bot.handleUpdate(update(4, `vpa_invsource_${sourceMode}`, true));
+    assert.match(JSON.stringify(calls.at(-1)), /Tanpa batas waktu/);
+    const expiry = callback(calls, "vpa_invdays_").replace(/_[^_]+$/, `_${days === null ? "unlimited" : days}`);
+    await bot.handleUpdate(update(5, expiry, true));
     await bot.handleUpdate(update(6, "@not_a_telegram_id"));
     assert.equal(saved, undefined);
     await bot.handleUpdate(update(7, recipient));
-    assert.deepEqual(saved, { sourceMode: "any", days: 1, ...(recipient === "-" ? {} : { recipientId: recipient }) });
+    assert.deepEqual(saved, { sourceMode, days, ...(recipient === "-" ? {} : { recipientId: recipient }) });
+    if (days === null) assert.match(replies(calls), /Masa berlaku: Tanpa batas waktu/);
     assert.match(replies(calls), new RegExp(`https://t.me/vps_test_bot\\?start=install_${INVITE.id}`));
     await bot.handleUpdate(update(8, callback(calls, "vpa_invrevoke_"), true));
     assert.match(replies(calls), /Dicabut/);
@@ -121,12 +131,15 @@ test("free invitations use the ordinary direct/DO selection and require explicit
   for (const direct of [true, false]) {
     let selected: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
     let order: VpsUiOrder | null = null, payments = 0;
-    const { bot, calls } = await harness({ claimInstallInvite: async () => INVITE, getOwned: async () => order,
+    const { bot, calls } = await harness({ claimInstallInvite: async () => ({ ...INVITE, expiresAt: null }), getOwned: async () => order,
       checkout: async input => { selected = structuredClone(input); order = { ...ORDER, sourceMode: direct ? "direct" : "digitalocean", price: 0, catalogPrice: 43210, paymentMethod: "invite" }; return order; },
       checkPayment: async () => { payments++; order!.paymentStatus = "paid"; return { status: "paid" }; },
     });
     let id = 0;
     await bot.handleUpdate(update(++id, `vps_invite_${INVITE.id}`, true));
+    assert.match(replies(calls), /Masa berlaku: Tanpa batas waktu/);
+    assert.match(JSON.stringify(calls.at(-1)), /vps_free_do_/);
+    assert.match(JSON.stringify(calls.at(-1)), /vps_free_direct_/);
     await bot.handleUpdate(update(++id, `vps_free_${direct ? "direct" : "do"}_${INVITE.id}`, true));
     if (!direct) await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
     await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));

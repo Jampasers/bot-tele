@@ -14,14 +14,14 @@ function dto(invite: IVpsInstallInvite): VpsUiInstallInvite {
   return { id: invite._id, recipientId: invite.recipientId, sourceMode: invite.sourceMode, orderId: invite.orderId,
     claimedBy: invite.claimedBy, redeemedAt: invite.redeemedAt, revokedAt: invite.revokedAt, expiresAt: invite.expiresAt };
 }
-export async function createInstallInvite(actor: string, input: { recipientId?: string; sourceMode: IVpsInstallInvite["sourceMode"]; days: number }): Promise<VpsUiInstallInvite> {
+export async function createInstallInvite(actor: string, input: { recipientId?: string; sourceMode: IVpsInstallInvite["sourceMode"]; days: number | null }): Promise<VpsUiInstallInvite> {
   assertVpsAdmin(actor);
   if ((input.recipientId !== undefined && !/^[1-9]\d{0,19}$/.test(input.recipientId))
-    || !["any", "digitalocean", "direct"].includes(input.sourceMode) || ![1, 7, 30].includes(input.days)) {
+    || !["any", "digitalocean", "direct"].includes(input.sourceMode) || (input.days !== null && ![1, 7, 30].includes(input.days))) {
     throw new VpsInstallInviteError("Telegram ID, sumber VPS, atau masa berlaku undangan tidak valid.");
   }
   const invite = await VpsInstallInvite.create({ _id: randomBytes(16).toString("hex"), tenantId: "platform", createdBy: actor,
-    recipientId: input.recipientId ?? null, sourceMode: input.sourceMode, orderId: randomUUID(), expiresAt: new Date(Date.now() + input.days * 86400_000) });
+    recipientId: input.recipientId ?? null, sourceMode: input.sourceMode, orderId: randomUUID(), expiresAt: input.days === null ? null : new Date(Date.now() + input.days * 86400_000) });
   return dto(invite.toObject());
 }
 export async function listInstallInvites(actor: string, offset: number): Promise<VpsUiInstallInvite[]> {
@@ -42,7 +42,8 @@ export async function revokeInstallInvite(actor: string, id: string): Promise<vo
 /** The first eligible buyer owns this one preassigned order ID, even after a restart. */
 export async function claimInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite> {
   assertVpsEnabled();
-  const invite = await VpsInstallInvite.findOneAndUpdate({ ...scope(id, actor), revokedAt: null, expiresAt: { $gt: new Date() },
+  const invite = await VpsInstallInvite.findOneAndUpdate({ ...scope(id, actor), revokedAt: null,
+    $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
     $and: [{ $or: [{ recipientId: null }, { recipientId: actor }] }, { $or: [{ claimedBy: null }, { claimedBy: actor }] }],
   }, { $set: { claimedBy: actor } }, { returnDocument: "after" }).lean();
   if (!invite) throw unavailable();
@@ -52,7 +53,7 @@ export async function requireInstallInvite(actor: string, id: string, orderId: s
   const invite = await VpsInstallInvite.findOne({ ...scope(id, actor), claimedBy: actor, orderId }).lean();
   if (!invite || (invite.sourceMode !== "any" && invite.sourceMode !== sourceMode)
     || (invite.recipientId !== null && invite.recipientId !== actor)
-    || (!invite.redeemedAt && (invite.revokedAt || invite.expiresAt.getTime() <= Date.now()))) throw unavailable();
+    || (!invite.redeemedAt && (invite.revokedAt || (invite.expiresAt && invite.expiresAt.getTime() <= Date.now())))) throw unavailable();
   return invite;
 }
 /** Consuming the invite is atomic; its durable receipt lets the same order recover. */
@@ -60,7 +61,7 @@ export async function consumeInstallInvite(actor: string, id: string, orderId: s
   let invite = await requireInstallInvite(actor, id, orderId, sourceMode);
   if (invite.redeemedAt) return invite;
   const consumed = await VpsInstallInvite.findOneAndUpdate({ ...scope(id, actor), claimedBy: actor, orderId,
-    redeemedAt: null, revokedAt: null, expiresAt: { $gt: new Date() },
+    redeemedAt: null, revokedAt: null, $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }],
   }, { $set: { redeemedAt: new Date() } }, { returnDocument: "after" }).lean();
   if (consumed) return consumed;
   invite = await requireInstallInvite(actor, id, orderId, sourceMode);

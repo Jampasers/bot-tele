@@ -6,6 +6,7 @@ export const vpsDate = (value: Date | string | null | undefined): string => {
   const date = value instanceof Date ? value : new Date(value ?? "");
   return Number.isNaN(date.getTime()) ? "belum diketahui" : `${new Intl.DateTimeFormat("id-ID", { timeZone: "Asia/Jakarta", dateStyle: "short", timeStyle: "short" }).format(date)} WIB`;
 };
+export const vpsInviteExpiry = (expiresAt: Date | null): string => expiresAt === null ? "Tanpa batas waktu" : vpsDate(expiresAt);
 export function isVpsPlatform(): boolean {
   const tenant = getTenantContext();
   return tenant.tenantId === PLATFORM_TENANT_ID && !tenant.rentalId;
@@ -47,4 +48,3 @@ export async function vpsReply(ctx: Context, text: string, keyboard?: InlineKeyb
   }
   await ctx.reply(text, options);
 }
-

@@ -6,7 +6,7 @@ import type { AvailabilityMap, VpsServiceType, VpsUiDependencies, VpsUiInstallIn
 import { clearVpsInput, setVpsInput } from "./input.js";
 import { getOs } from "../../vps/installer.js";
 import { DIRECT_INSTALL_PLAN_ID, planPrice } from "../../vps/catalogPlans.js";
-import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
+import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsInviteExpiry, vpsPrice, vpsReply } from "./ui.js";
 import { DigitalOceanError } from "../../vps/digitalOcean.js";
 import { DEFAULT_DISABLED_MESSAGE, disabledVpsSelection, VpsSelectionDisabledError, type VpsAvailabilityRule } from "../../vps/availability.js";
 import { VpsInstallInviteError } from "../../vps/installInvites.js";
@@ -381,7 +381,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (invite.sourceMode !== "direct") keyboard.text("Buat VPS di DO saya", `vps_free_do_${invite.id}`).row();
           if (invite.sourceMode !== "digitalocean") keyboard.text("Install ke VPS saya (SSH)", `vps_free_direct_${invite.id}`).row();
           keyboard.text("Batal", "vps_home");
-          await vpsReply(ctx, `Undangan Jasa Install Gratis\n\n${inviteNotice}\n\nBerlaku sampai: ${vpsDate(invite.expiresAt)}\nPilih sumber VPS kamu.`, keyboard);
+          await vpsReply(ctx, `Undangan Jasa Install Gratis\n\n${inviteNotice}\n\nMasa berlaku: ${vpsInviteExpiry(invite.expiresAt)}\nPilih sumber VPS kamu.`, keyboard);
           return;
         }
         if (data === "vps_home") { await showHome(ctx); return; }
