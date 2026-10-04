@@ -20,7 +20,14 @@ export const DEFAULT_OS = [
   ["rocky8", "Rocky Linux 8", "rockylinux-8-x64", "linux"], ["rocky9", "Rocky Linux 9", "rockylinux-9-x64", "linux"], ["rocky10", "Rocky Linux 10", "rockylinux-10-x64", "linux"],
   ["centos9", "CentOS Stream 9", "centos-stream-9-x64", "linux"], ["centos10", "CentOS Stream 10", "centos-stream-10-x64", "linux"], ["fedora43", "Fedora 43", "fedora-43-x64", "linux"], ["fedora44", "Fedora 44", "fedora-44-x64", "linux"],
   ["windows2012r2", "Windows Server 2012 R2", "ubuntu-24-04-x64", "windows"], ["windows2016", "Windows Server 2016", "ubuntu-24-04-x64", "windows"], ["windows2019", "Windows Server 2019", "ubuntu-24-04-x64", "windows"], ["windows2022", "Windows Server 2022", "ubuntu-24-04-x64", "windows"],
+  ["windows2025", "Windows Server 2025", "ubuntu-24-04-x64", "windows"], ["windows10", "Windows 10", "ubuntu-24-04-x64", "windows"],
+  ["windows10atlas", "Windows 10 Atlas", "ubuntu-24-04-x64", "windows"], ["windows10ghost", "Windows 10 Ghost Spectre", "ubuntu-24-04-x64", "windows"],
+  ["windows11atlas", "Windows 11 Atlas", "ubuntu-24-04-x64", "windows"], ["windows11ghost", "Windows 11 Ghost Spectre", "ubuntu-24-04-x64", "windows"],
 ] as const;
+
+const BUILTIN_WINDOWS_ADDITIONS = new Set([
+  "windows2025", "windows10", "windows10atlas", "windows10ghost", "windows11atlas", "windows11ghost",
+]);
 
 export interface VpsCatalogData {
   _id: string;
@@ -33,11 +40,26 @@ export function defaultVpsCatalog(): VpsCatalogData {
   return { _id: "platform", regions: DEFAULT_REGIONS.map(([slug, name, country]) => ({ slug, name, country })),
     sizes: DEFAULT_SIZES.map(([, slug, cpu, ram, disk, transfer, price]) => ({ slug, cpu, ram, disk, transfer, price })),
     os: DEFAULT_OS.map(([key, name, slug, family]) => ({ key, name, slug, family, installerImage: slug,
-      windowsImageName: family === "windows" ? `${name} ServerStandard` : null })) };
+      windowsImageName: family === "windows" ? (name.startsWith("Windows Server ") ? `${name} ServerStandard` : name) : null })) };
 }
 
 export async function getVpsCatalog(): Promise<VpsCatalogData> {
-  const catalog = await VpsCatalog.findById("platform").lean() ?? defaultVpsCatalog();
+  const defaults = defaultVpsCatalog();
+  const stored = await VpsCatalog.findById("platform").lean();
+  let catalog = (stored as VpsCatalogData | null) ?? defaults;
+  if (stored) {
+    const additions = defaults.os.filter(entry => BUILTIN_WINDOWS_ADDITIONS.has(entry.key) && !catalog.os.some(existing => existing.key === entry.key));
+    if (additions.length) {
+      for (const entry of additions) {
+        await VpsCatalog.updateOne(
+          { _id: "platform", "os.key": { $ne: entry.key } },
+          { $push: { os: entry } },
+          { runValidators: true },
+        );
+      }
+      catalog = (await VpsCatalog.findById("platform").lean() as VpsCatalogData | null) ?? catalog;
+    }
+  }
   for (const entry of catalog.os) {
     const image = entry.installerImage || (entry.family === "windows" ? "ubuntu-24-04-x64" : entry.slug);
     registerOs({ key: entry.key, name: entry.name, family: entry.family, image, ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });

@@ -12,6 +12,10 @@ const expected: ReadonlyArray<readonly [string, WindowsBootMode, string]> = [
   ["windows2019", "efi", "en_win2019_uefi.xz"],
   ["windows2022", "bios", "en-us_win2022.xz"],
   ["windows2022", "efi", "en-us_win2022_uefi.xz"],
+  ["windows2025", "bios", "en-us_win2025.xz"],
+  ["windows2025", "efi", "en-us_win2025_uefi.xz"],
+  ["windows10", "bios", "en-us_windows10_ltsc.xz"],
+  ["windows10", "efi", "en-us_win10_ltsc_uefi.xz"],
 ];
 
 test("Windows DD resolver maps every supported OS and boot mode", () => {
@@ -43,6 +47,20 @@ test("Windows DD resolver prioritizes exact override, then fast mirror, then def
     "https://dl.lamp.sh/vhd/en-us_win2022_uefi.xz",
   ]);
   assert.equal(resolveWindowsDdImage("windows2022", "efi", env), env.VPS_WIN2022_EFI_URL);
+});
+
+test("custom Atlas and Ghost Spectre images require explicit per-mode URLs", () => {
+  const custom = [
+    ["windows10atlas", "VPS_WIN10_ATLAS_BIOS_URL"],
+    ["windows10ghost", "VPS_WIN10_GHOST_BIOS_URL"],
+    ["windows11atlas", "VPS_WIN11_ATLAS_BIOS_URL"],
+    ["windows11ghost", "VPS_WIN11_GHOST_BIOS_URL"],
+  ] as const;
+  for (const [os, envName] of custom) {
+    assert.throws(() => resolveWindowsDdImage(os, "bios", {}), InstallerError);
+    const env = { [envName]: `https://images.example.test/${os}-bios.zst` };
+    assert.equal(resolveWindowsDdImage(os, "bios", env), env[envName]);
+  }
 });
 
 test("Windows fast mirror can use xz when a zst mirror is not available", () => {

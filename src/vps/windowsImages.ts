@@ -7,9 +7,12 @@ export interface WindowsDdImage {
   efi: string;
 }
 
-type WindowsDdOs = "windows2012r2" | "windows2016" | "windows2019" | "windows2022";
+type WindowsDdOs = "windows2012r2" | "windows2016" | "windows2019" | "windows2022" | "windows2025" | "windows10"
+  | "windows10atlas" | "windows10ghost" | "windows11atlas" | "windows11ghost";
 
-interface WindowsImageDefinition extends WindowsDdImage {
+interface WindowsImageDefinition {
+  bios?: string;
+  efi?: string;
   env: Readonly<Record<WindowsBootMode, string>>;
 }
 
@@ -33,6 +36,28 @@ const WINDOWS_DD_IMAGES: Readonly<Record<WindowsDdOs, WindowsImageDefinition>> =
     bios: "https://dl.lamp.sh/vhd/en-us_win2022.xz",
     efi: "https://dl.lamp.sh/vhd/en-us_win2022_uefi.xz",
     env: { bios: "VPS_WIN2022_BIOS_URL", efi: "VPS_WIN2022_EFI_URL" },
+  },
+  windows2025: {
+    bios: "https://dl.lamp.sh/vhd/en-us_win2025.xz",
+    efi: "https://dl.lamp.sh/vhd/en-us_win2025_uefi.xz",
+    env: { bios: "VPS_WIN2025_BIOS_URL", efi: "VPS_WIN2025_EFI_URL" },
+  },
+  windows10: {
+    bios: "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
+    efi: "https://dl.lamp.sh/vhd/en-us_win10_ltsc_uefi.xz",
+    env: { bios: "VPS_WIN10_BIOS_URL", efi: "VPS_WIN10_EFI_URL" },
+  },
+  windows10atlas: {
+    env: { bios: "VPS_WIN10_ATLAS_BIOS_URL", efi: "VPS_WIN10_ATLAS_EFI_URL" },
+  },
+  windows10ghost: {
+    env: { bios: "VPS_WIN10_GHOST_BIOS_URL", efi: "VPS_WIN10_GHOST_EFI_URL" },
+  },
+  windows11atlas: {
+    env: { bios: "VPS_WIN11_ATLAS_BIOS_URL", efi: "VPS_WIN11_ATLAS_EFI_URL" },
+  },
+  windows11ghost: {
+    env: { bios: "VPS_WIN11_GHOST_BIOS_URL", efi: "VPS_WIN11_GHOST_EFI_URL" },
   },
 });
 
@@ -78,9 +103,13 @@ export function resolveWindowsDdImageCandidates(
   const envName = definition.env[bootMode];
   const candidates: string[] = [];
   if (env[envName] !== undefined) candidates.push(validateWindowsImageUrl(env[envName]!));
-  const mirror = mirrorImageUrl(definition[bootMode], env);
-  if (mirror) candidates.push(mirror);
-  candidates.push(validateWindowsImageUrl(definition[bootMode]));
+  const defaultUrl = definition[bootMode];
+  if (defaultUrl) {
+    const mirror = mirrorImageUrl(defaultUrl, env);
+    if (mirror) candidates.push(mirror);
+    candidates.push(validateWindowsImageUrl(defaultUrl));
+  }
+  if (!candidates.length) throw new InstallerError("validation");
   return [...new Set(candidates)];
 }
 

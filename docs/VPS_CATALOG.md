@@ -1,6 +1,6 @@
 # Katalog Jasa Install & VPS DO
 
-Menu memakai satu spek per entri katalog, bukan paket bernama bebas. Defaultnya 7 spek Basic, 16 region, 14 OS Linux, dan Windows Server 2012 R2/2016/2019/2022 yang sudah ada pada installer. OS Windows membuat VPS bootstrap Ubuntu sebelum instalasi; alur VPS milik buyer hanya menawarkan Windows.
+Menu memakai satu spek per entri katalog, bukan paket bernama bebas. Defaultnya 7 spek Basic, 16 region, 14 OS Linux, serta Windows Server 2012 R2/2016/2019/2022/2025, Windows 10, Windows 10 Atlas, Windows 10 Ghost Spectre, Windows 11 Atlas, dan Windows 11 Ghost Spectre. OS Windows membuat VPS bootstrap Ubuntu sebelum instalasi; alur VPS milik buyer hanya menawarkan Windows.
 
 Di `/vpsadmin`, pilih **Harga per spek / region / OS**, pilih layanan dan spek, region, kemudian OS. Harga Rupiah berlaku hanya pada kombinasi tersebut. Semua pilihan tetap tampil ketika harga belum diatur, tetapi checkout ditolak sampai harganya terisi. Label dolar bulanan dari daftar spek hanya referensi biaya DigitalOcean, bukan harga jual atau jasa install.
 
@@ -15,6 +15,13 @@ Install VPS Buyer langsung menawarkan Windows, lalu meminta IP, username dan
 password SSH, serta opsi Chrome. Buyer tidak perlu memilih spek atau region.
 Admin memakai satu layanan **Install Windows di VPS Buyer** dengan harga global
 layanan atau harga khusus per Windows. Harga khusus Windows diprioritaskan.
+
+Windows Server 2025 dan Windows 10 memakai fallback image publik installer yang
+sama dengan versi Windows stock lain. Atlas/Ghost Spectre sengaja tidak memakai
+image acak pihak ketiga: isi URL image DD BIOS/UEFI melalui environment
+`VPS_WIN10_ATLAS_*`, `VPS_WIN10_GHOST_*`, `VPS_WIN11_ATLAS_*`, dan
+`VPS_WIN11_GHOST_*`. Katalog lama disinkron secara additive saat dibaca, jadi
+OS built-in baru ditambahkan tanpa reset katalog atau menghapus harga lama.
 
 Sebelum persiapan installer, bot memeriksa kapasitas disk fisik yang menampung
 OS melalui SSH. Minimum **50 GB (50.000.000.000 byte)**; bukan sisa ruang partisi

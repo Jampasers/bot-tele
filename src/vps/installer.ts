@@ -14,6 +14,7 @@ export { InstallerError } from "./installerError.js";
 export interface VpsOs { key: string; name: string; family: "linux" | "windows"; image: string; windowsImageName?: string; }
 const linux = (key: string, name: string, image: string): VpsOs => ({ key, name, image, family: "linux" });
 const windows = (key: string, version: string): VpsOs => ({ key, name: `Windows Server ${version}`, family: "windows", image: "ubuntu-24-04-x64", windowsImageName: `Windows Server ${version} ServerStandard` });
+const windowsClient = (key: string, name: string): VpsOs => ({ key, name, family: "windows", image: "ubuntu-24-04-x64", windowsImageName: name });
 /** Local reference choices; actual availability is checked with DO before checkout/create. */
 export const OS_CATALOG: Readonly<Record<string, VpsOs>> = Object.freeze({
     ubuntu22: linux("ubuntu22", "Ubuntu 22.04 LTS", "ubuntu-22-04-x64"),
@@ -32,6 +33,9 @@ export const OS_CATALOG: Readonly<Record<string, VpsOs>> = Object.freeze({
     fedora44: linux("fedora44", "Fedora 44", "fedora-44-x64"),
     windows2012r2: windows("windows2012r2", "2012 R2"), windows2016: windows("windows2016", "2016"),
     windows2019: windows("windows2019", "2019"), windows2022: windows("windows2022", "2022"),
+    windows2025: windows("windows2025", "2025"), windows10: windowsClient("windows10", "Windows 10"),
+    windows10atlas: windowsClient("windows10atlas", "Windows 10 Atlas"), windows10ghost: windowsClient("windows10ghost", "Windows 10 Ghost Spectre"),
+    windows11atlas: windowsClient("windows11atlas", "Windows 11 Atlas"), windows11ghost: windowsClient("windows11ghost", "Windows 11 Ghost Spectre"),
 });
 const runtimeOs = new Map<string, VpsOs>();
 export function registerOs(os: VpsOs): void { if (/^[a-z0-9][a-z0-9_-]{1,31}$/.test(os.key)) runtimeOs.set(os.key, os); }

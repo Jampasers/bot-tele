@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   const replacements = await replacementVpsPlans();
   if (!apply) {
     console.log(JSON.stringify({ mode: "dry-run", database: db.databaseName, oldPlans: before.length,
-      replacements: replacements.length, specsPerService: 7, regions: 16, linuxOs: 14, windowsOs: 4, fingerprint }));
+      replacements: replacements.length, specsPerService: 7, regions: 16, linuxOs: 14, windowsOs: 10, fingerprint }));
     return;
   }
   if (!process.argv.includes("--expect") || expected !== fingerprint) throw new Error("VPS configuration changed; repeat the dry run.");
