@@ -7,7 +7,8 @@ import { buildCatalogKeyboard, buildCatalogText } from "../../../src/plugins/pan
 import { createVpsPlugin, vpsOrderText } from "../../../src/plugins/vps/index.js";
 import { createVpsAdminPlugin, vpsCredentialText } from "../../../src/plugins/vpsadmin/index.js";
 import { clearAllVpsInputs, vpsInputMiddleware } from "../../../src/plugins/vps/input.js";
-import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
+import type { AvailabilityMap, VpsUiDependencies, VpsUiInstallInvite, VpsUiOrder, VpsUiPlan } from "../../../src/plugins/vps/contracts.js";
+import { VpsInstallInviteError } from "../../../src/vps/installInvites.js";
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
 import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
@@ -17,6 +18,7 @@ const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
 const DIRECT_PLAN: VpsUiPlan = { ...directInstallPlans(defaultVpsCatalog())[0]!, osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: null, family: "windows" }], globalPrice: 15000 };
 const ORDER: VpsUiOrder = { _id: ORDER_ID, serviceType: "install", paymentStatus: "unpaid", stage: "queued", price: 43_210, planName: "RAM 2 GB", sizeSlug: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" };
+const INVITE: VpsUiInstallInvite = { id: "a".repeat(32), sourceMode: "any", recipientId: "42", orderId: ORDER_ID, claimedBy: "42", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000) };
 interface ApiCall { method: string; payload: Record<string, unknown> }
 function update(id: number, input: string, callback = false, actor = 42, chatType = "private", media = false): never {
   const from = { id: actor, is_bot: false, first_name: "Test" };
@@ -65,6 +67,104 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   await (options.admin ? createVpsAdminPlugin(deps) : createVpsPlugin(deps)).register(bot);
   return { bot, calls };
 }
+
+test("admin creates recipient-locked or bearer install invitation, shares a deep link and revokes it", async t => {
+  const previous = process.env.ADMIN_ID;
+  process.env.ADMIN_ID = "42";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  for (const recipient of ["123", "-"]) {
+    let saved: Parameters<VpsUiDependencies["createInstallInvite"]>[1] | undefined;
+    const invite = { ...INVITE };
+    const { bot, calls } = await harness({ listInstallInvites: async () => [],
+      createInstallInvite: async (actor, input) => { assert.equal(actor, "42"); saved = input; return invite; },
+      getInstallInvite: async () => invite,
+      revokeInstallInvite: async (actor, id) => { assert.equal(actor, "42"); assert.equal(id, INVITE.id); invite.revokedAt = new Date(); },
+    }, { admin: true });
+    await bot.handleUpdate(update(1, "/vpsadmin"));
+    assert.match(JSON.stringify(calls), /vpa_invites_0/);
+    await bot.handleUpdate(update(2, "vpa_invites_0", true));
+    await bot.handleUpdate(update(3, "vpa_invnew", true));
+    await bot.handleUpdate(update(4, "vpa_invsource_any", true));
+    await bot.handleUpdate(update(5, callback(calls, "vpa_invdays_"), true));
+    await bot.handleUpdate(update(6, "@not_a_telegram_id"));
+    assert.equal(saved, undefined);
+    await bot.handleUpdate(update(7, recipient));
+    assert.deepEqual(saved, { sourceMode: "any", days: 1, ...(recipient === "-" ? {} : { recipientId: recipient }) });
+    assert.match(replies(calls), new RegExp(`https://t.me/vps_test_bot\\?start=install_${INVITE.id}`));
+    await bot.handleUpdate(update(8, callback(calls, "vpa_invrevoke_"), true));
+    assert.match(replies(calls), /Dicabut/);
+    for (const call of calls) {
+      const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+      assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
+    }
+  }
+});
+
+test("unauthorized admins and rental tenants cannot create, list, revoke or redeem invites", async t => {
+  const previous = process.env.ADMIN_ID;
+  process.env.ADMIN_ID = "42";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  let calls = 0;
+  const deps = { createInstallInvite: async () => { calls++; return INVITE; }, listInstallInvites: async () => { calls++; return []; },
+    revokeInstallInvite: async () => { calls++; }, claimInstallInvite: async () => { calls++; return INVITE; } };
+  for (const tenant of [platformContext(), { tenantId: "rental", rentalId: "rental" }]) {
+    const { bot } = await harness(deps, { admin: true, tenant });
+    const actor = tenant.rentalId ? 42 : 999;
+    for (const [index, data] of ["vpa_invites_0", "vpa_invsource_any", `vpa_invrevoke_${INVITE.id}`].entries()) await bot.handleUpdate(update(index + 1, data, true, actor));
+  }
+  const { bot } = await harness(deps, { tenant: { tenantId: "rental", rentalId: "rental" } });
+  await bot.handleUpdate(update(10, `vps_invite_${INVITE.id}`, true));
+  assert.equal(calls, 0);
+});
+
+test("free invitations use the ordinary direct/DO selection and require explicit activation without payment buttons", async () => {
+  for (const direct of [true, false]) {
+    let selected: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
+    let order: VpsUiOrder | null = null, payments = 0;
+    const { bot, calls } = await harness({ claimInstallInvite: async () => INVITE, getOwned: async () => order,
+      checkout: async input => { selected = structuredClone(input); order = { ...ORDER, sourceMode: direct ? "direct" : "digitalocean", price: 0, catalogPrice: 43210, paymentMethod: "invite" }; return order; },
+      checkPayment: async () => { payments++; order!.paymentStatus = "paid"; return { status: "paid" }; },
+    });
+    let id = 0;
+    await bot.handleUpdate(update(++id, `vps_invite_${INVITE.id}`, true));
+    await bot.handleUpdate(update(++id, `vps_free_${direct ? "direct" : "do"}_${INVITE.id}`, true));
+    if (!direct) await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
+    await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
+    if (!direct) await bot.handleUpdate(update(++id, callback(calls, "vps_region_"), true));
+    assert.match(JSON.stringify(calls.at(-1)), /Gratis \(undangan\)/);
+    await bot.handleUpdate(update(++id, callback(calls, "vps_os_"), true));
+    if (direct) {
+      await bot.handleUpdate(update(++id, "192.0.2.10"));
+      await bot.handleUpdate(update(++id, "ubuntu"));
+      await bot.handleUpdate(update(++id, "synthetic-secret-password"));
+    }
+    await bot.handleUpdate(update(++id, callback(calls, "vps_chrome_"), true));
+    assert.equal(selected?.requestId, INVITE.orderId);
+    assert.equal(selected?.installInviteId, INVITE.id);
+    assert.equal(selected?.serviceType, "install");
+    assert.equal(Boolean(selected?.direct), direct);
+    assert.equal(payments, 0);
+    assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
+    assert.doesNotMatch(JSON.stringify(calls), /vps_balance_|vps_qris_|synthetic-secret-password/);
+    await bot.handleUpdate(update(++id, callback(calls, "vps_check_"), true));
+    assert.equal(payments, 1);
+    assert.match(replies(calls), /saldo tidak dipotong/);
+    await bot.handleUpdate(update(++id, `vps_invite_${INVITE.id}`, true));
+    assert.equal(payments, 1, "Opening a used link only shows the existing order");
+  }
+});
+
+test("invitation source restrictions and invalid invitations are explained without starting a selection", async () => {
+  const { bot, calls } = await harness({ claimInstallInvite: async () => ({ ...INVITE, sourceMode: "direct" }), getOwned: async () => null });
+  await bot.handleUpdate(update(1, `vps_invite_${INVITE.id}`, true));
+  assert.match(JSON.stringify(calls), /vps_free_direct_/);
+  assert.doesNotMatch(JSON.stringify(calls), /vps_free_do_/);
+  await bot.handleUpdate(update(2, `vps_free_do_${INVITE.id}`, true));
+  assert.match(replies(calls), /Sumber VPS tidak sesuai undangan/);
+  const invalid = await harness({ claimInstallInvite: async () => { throw new VpsInstallInviteError("Undangan kedaluwarsa"); } });
+  await invalid.bot.handleUpdate(update(1, `vps_invite_${INVITE.id}`, true));
+  assert.match(replies(invalid.calls), /Undangan kedaluwarsa/);
+});
 
 test("admin disable wizard covers every scope, custom messages, reenable and message edits", async t => {
   const previous = process.env.ADMIN_ID;

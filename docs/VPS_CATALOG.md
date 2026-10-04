@@ -6,6 +6,9 @@ Di `/vpsadmin`, pilih **Harga per spek / region / OS**, pilih layanan dan spek, 
 
 Menu **Katalog OS/region/spek** menerima tambahan satu field per pesan. Entri baru langsung ditampilkan dalam menu; tidak perlu membuat paket bernama atau menyalin semua kombinasi. Harga dan status tersimpan di `vpsplans`; pilihan katalog tersimpan di `vpscatalogs`. Order lama tetap memakai snapshot checkout.
 
+Admin juga bisa membagikan [undangan Jasa Install gratis](VPS_INSTALL_INVITES.md)
+melalui `/vpsadmin` → **Undangan Jasa Install Gratis**.
+
 ## Disable spek, OS, dan region
 
 Buka `/vpsadmin` → **Disable Spek / OS / Region** (juga tersedia di menu katalog).

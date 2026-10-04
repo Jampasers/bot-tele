@@ -445,6 +445,16 @@ test("logVpsOrder formats VPS purchase and Jasa Install correctly", () => runWit
   assert.ok(sentMessages[1]?.text.includes("123.45.67.89"));
   assert.ok(sentMessages[1]?.text.includes("35.000"));
   assert.ok(sentMessages[1]?.text.includes("QRIS"));
+
+  await ActivityLogService.logVpsOrder(mockApi, {
+    orderId: "install-invite-order", service: "install", planName: "Install Windows", os: "win-2022", sourceMode: "direct",
+    totalPrice: 0, catalogPrice: 35000, method: "Undangan Gratis", buyer: { telegramId: 112233, firstName: "Buyer Invite" },
+  });
+  assert.equal(sentMessages.length, 3);
+  assert.match(sentMessages[2]!.text, /AUDIT: ORDER JASA INSTALL VPS/);
+  assert.match(sentMessages[2]!.text, /Undangan Gratis/);
+  assert.match(sentMessages[2]!.text, /Harga Normal Jasa.*35\.000/);
+  assert.match(sentMessages[2]!.text, /Total Biaya:.*Rp[^\d]*0</);
 }));
 
 test("logVpsSuccess formats ready notification correctly", () => runWithTenant(platformContext(), async () => {

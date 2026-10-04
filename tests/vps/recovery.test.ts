@@ -38,6 +38,16 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
     };
 }
 
+test("failed invitation installs close with the ordinary worker and do not claim a wallet refund", async () => {
+    const order = orderFixture({ stage: "failed", paymentMethod: "invite", installInviteId: "a".repeat(32), dropletId: null, createAttemptedAt: null });
+    let refunded = 0;
+    await advanceVpsOrder(order, dependencies({ refund: async () => { refunded++; } }));
+    assert.equal(refunded, 1);
+    assert.equal(order.paymentStatus, "refunded");
+    assert.match(order.evidence, /Order undangan gratis ditutup/);
+    assert.doesNotMatch(order.evidence, /dikembalikan ke saldo/);
+});
+
 test("reboot recovery keeps durable intent until scheduling is actually attempted", async () => {
     const order = orderFixture(); const writes: Partial<IVpsOrder>[] = [];
     const deps = dependencies({ save: async (patch) => { writes.push(patch); }, scheduleInstallerReboot: async () => {

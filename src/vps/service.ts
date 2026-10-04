@@ -12,6 +12,7 @@ import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOB
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
+import { claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite, requireInstallInvite, VpsInstallInviteError } from "./installInvites.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
 
 const validId = (id: string): boolean => /^[a-f0-9-]{36}$/.test(id);
@@ -24,7 +25,7 @@ export async function ownedOrder(actor: string, orderId: string, includeSecret =
 }
 export function orderDto(order: IVpsOrder): VpsUiOrder {
   return { _id: order._id, serviceType: order.service, sourceMode: order.service === "install" && order.sourceUsername ? "direct" : "digitalocean", paymentStatus: order.paymentStatus, paymentMethod: order.paymentMethod, stage: order.stage,
-    price: order.snapshot.price, planName: order.snapshot.planName, sizeSlug: order.snapshot.size, os: order.snapshot.os,
+    price: order.paymentMethod === "invite" ? 0 : order.snapshot.price, ...(order.paymentMethod === "invite" ? { catalogPrice: order.snapshot.price } : {}), planName: order.snapshot.planName, sizeSlug: order.snapshot.size, os: order.snapshot.os,
     region: order.snapshot.region, installChrome: order.snapshot.installChrome === true, ip: order.publicIp, dropletId: order.dropletId, needsToken: order.stage === "needs_token",
     evidence: order.evidence, createdAt: order.createdAt, vcpus: order.snapshot.vcpus, memory: order.snapshot.memory, disk: order.snapshot.disk,
     provisionAttempt: order.provisionAttempt ?? 1, sshAttempts: order.sshAttempts ?? 0,
@@ -49,6 +50,10 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (!validId(input.requestId) || !/^\d{1,20}$/.test(input.actorTelegramId) || input.chatId !== input.actorTelegramId) throw new Error("Checkout hanya melalui chat pribadi.");
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
+  if (input.installInviteId) {
+    if (input.serviceType !== "install") throw new VpsInstallInviteError("Undangan hanya berlaku untuk Jasa Install.");
+    await requireInstallInvite(input.actorTelegramId, input.installInviteId, input.requestId, input.direct ? "direct" : "digitalocean");
+  }
   const catalog = await getVpsCatalog();
   const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType }).lean();
   if (plan) assertVpsSelectionAvailable(catalog.availabilityRules ?? [], { size: plan.sizeSlug, os: input.os, region: input.region });
@@ -98,6 +103,7 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   try {
     const order = await VpsOrder.create({ _id: input.requestId, tenantId: "platform", buyerId: input.actorTelegramId, chatId: input.chatId,
       service: input.serviceType, accountId, sourceUsername, sourcePasswordEncrypted, publicIp: input.direct?.ip ?? null, createName: `bt-vps-${input.requestId}`,
+      ...(input.installInviteId ? { installInviteId: input.installInviteId, paymentMethod: "invite" } : {}),
       passwordEncrypted: encryptSecret(password, `platform:vps:password:${input.requestId}`),
       snapshot: { planId: plan._id, planName: plan.name, size: plan.sizeSlug, region: input.region, os: input.os, image: selected.os.image,
         price, vcpus: selected.size.vcpus, memory: selected.size.memory, disk: selected.size.disk, installChrome: input.installChrome === true },
@@ -128,10 +134,10 @@ async function cancel(actor: string, orderId: string): Promise<void> {
   const order = await ownedOrder(actor, orderId);
   if (!order) throw new Error("Pesanan tidak ditemukan.");
   if (["cancelled", "refunded"].includes(order.paymentStatus)) { buyerTokens.delete(actor, orderId); return; }
-  const cancelled = await VpsOrder.findOneAndUpdate({ _id: orderId, tenantId: "platform", buyerId: actor, paymentStatus: { $in: ["unpaid", "paid"] },
+  const cancelled = await VpsOrder.findOneAndUpdate({ _id: orderId, tenantId: "platform", buyerId: actor, paymentStatus: { $in: order.paymentMethod === "invite" ? ["unpaid", "paying", "paid"] : ["unpaid", "paid"] },
     createAttemptedAt: null, dropletId: null, stage: { $in: ["queued", "needs_token", "failed"] },
     $or: [{ lockUntil: null }, { lockUntil: { $lt: new Date() } }],
-  }, { $set: { stage: "cancelled", ...(order.paymentStatus === "unpaid" ? { paymentStatus: "cancelled" } : {}), reservationActive: false } }, { returnDocument: "after" });
+  }, { $set: { stage: "cancelled", ...(order.paymentStatus !== "paid" ? { paymentStatus: "cancelled" } : {}), reservationActive: false } }, { returnDocument: "after" });
   if (!cancelled) throw new Error("Pembayaran/proses sudah berjalan; pembatalan belum dapat dilakukan.");
   buyerTokens.delete(actor, orderId);
   await releaseCapacityTicket(orderId);
@@ -189,6 +195,7 @@ async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
 }
 
 export const vpsService: VpsUiDependencies = {
+  claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite,
   enabled: vpsEnabled,
   listAvailabilityRules: listVpsAvailabilityRules,
   saveAvailabilityRule: saveVpsAvailabilityRule,
