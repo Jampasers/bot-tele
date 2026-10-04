@@ -1,8 +1,10 @@
 # Undangan Jasa Install Gratis
 
 Buka `/vpsadmin` → **Undangan Jasa Install Gratis** → **Buat undangan gratis**.
-Pilih DigitalOcean Buyer, VPS Buyer via SSH, atau keduanya; pilih masa berlaku
-1, 7, atau 30 hari. Kirim Telegram ID penerima, atau `-` untuk link yang bisa
+Pilih **Semua Installer (VPS Buyer + DO)** agar penerima bisa memilih Install
+VPS Buyer via SSH atau Install dari DO. Pilih **Tanpa batas waktu** agar undangan
+tidak kedaluwarsa. Batas 1, 7, atau 30 hari dan satu sumber VPS juga tersedia.
+Kirim Telegram ID penerima, atau `-` untuk link yang bisa
 diklaim satu orang. Bagikan link yang dibuat bot. Daftar undangan menampilkan
 status dan menyediakan tombol **Cabut undangan** sebelum digunakan.
 
@@ -19,6 +21,8 @@ undangan; token DO tetap sementara sehingga user mungkin perlu mengirim ulang.
 Link kedaluwarsa atau dicabut tidak dapat memulai instalasi baru. Undangan
 yang sudah digunakan tidak bisa dicabut, dan order yang telah aktif tetap jalan.
 Untuk melihat order lama gunakan Riwayat Pesanan jika link sudah kedaluwarsa.
+Undangan tanpa batas waktu tetap bisa dicabut sebelum digunakan dan tetap untuk
+satu order. Undangan lama dengan tanggal kedaluwarsa mempertahankan tanggalnya.
 
 Aktivasi memakai status payment `paid` dan worker/log/testimoni/struk yang sama
 dengan order biasa, dengan metode **Undangan Gratis** dan nominal transaksi

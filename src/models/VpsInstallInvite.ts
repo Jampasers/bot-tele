@@ -10,7 +10,7 @@ export interface IVpsInstallInvite {
   claimedBy: string | null;
   redeemedAt: Date | null;
   revokedAt: Date | null;
-  expiresAt: Date;
+  expiresAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -25,7 +25,7 @@ const schema = new Schema<IVpsInstallInvite>({
   claimedBy: { type: String, default: null },
   redeemedAt: { type: Date, default: null },
   revokedAt: { type: Date, default: null },
-  expiresAt: { type: Date, required: true },
+  expiresAt: { type: Date, default: null },
 }, { timestamps: true, versionKey: false, strict: "throw" });
 // Keep expired/redeemed records for audit and interrupted-payment recovery.
 schema.index({ tenantId: 1, createdAt: -1 });

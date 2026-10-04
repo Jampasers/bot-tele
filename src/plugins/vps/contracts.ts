@@ -82,10 +82,10 @@ export interface VpsUiInstallInvite {
   claimedBy: string | null;
   redeemedAt: Date | null;
   revokedAt: Date | null;
-  expiresAt: Date;
+  expiresAt: Date | null;
 }
 export interface VpsUiDependencies {
-  createInstallInvite(actor: string, input: { recipientId?: string; sourceMode: VpsUiInstallInvite["sourceMode"]; days: number }): Promise<VpsUiInstallInvite>;
+  createInstallInvite(actor: string, input: { recipientId?: string; sourceMode: VpsUiInstallInvite["sourceMode"]; days: number | null }): Promise<VpsUiInstallInvite>;
   listInstallInvites(actor: string, offset: number): Promise<VpsUiInstallInvite[]>;
   getInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite | null>;
   revokeInstallInvite(actor: string, id: string): Promise<void>;

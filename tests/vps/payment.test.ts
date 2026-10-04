@@ -122,6 +122,36 @@ function database(t: TestContext, balance = 100_000) {
 }
 const platform = <T>(fn: () => Promise<T>) => runWithTenant(platformContext(), fn);
 
+test("permanent invitations allow either installer without expiry and still enforce recipient and revocation", async t => {
+  const db = database(t, 0);
+  const previous = process.env.ADMIN_ID, enabled = process.env.VPS_ENABLED;
+  process.env.ADMIN_ID = "900"; process.env.VPS_ENABLED = "true";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; if (enabled === undefined) delete process.env.VPS_ENABLED; else process.env.VPS_ENABLED = enabled; });
+  t.mock.method(Date, "now", () => new Date("2100-01-01T00:00:00Z").getTime());
+  for (const direct of [false, true]) {
+    const created = await platform(() => createInstallInvite("900", { sourceMode: "any", days: null, recipientId: "101" }));
+    assert.equal(created.expiresAt, null);
+    await new VpsInstallInvite(db.invites.find(invite => invite._id === created.id)).validate();
+    await assert.rejects(platform(() => claimInstallInvite("102", created.id)), VpsInstallInviteError);
+    const claimed = await platform(() => claimInstallInvite("101", created.id));
+    assert.equal(claimed.expiresAt, null);
+    assert.equal(claimed.orderId, created.orderId);
+    await platform(() => requireInstallInvite("101", created.id, created.orderId, "direct"));
+    await platform(() => requireInstallInvite("101", created.id, created.orderId, "digitalocean"));
+    const order = db.addOrder({ _id: created.orderId, service: "install", paymentMethod: "invite", installInviteId: created.id, ...(direct ? { sourceUsername: "root" } : {}) });
+    const result = await platform(() => checkVpsPayment(order._id, "101"));
+    assert.equal(result.status, "paid");
+    assert.equal(db.users[0]!.balance, 0);
+    assert.equal(db.audit.length, 0);
+  }
+  const revoked = await platform(() => createInstallInvite("900", { sourceMode: "any", days: null, recipientId: "101" }));
+  await platform(() => claimInstallInvite("101", revoked.id));
+  await platform(() => revokeInstallInvite("900", revoked.id));
+  await assert.rejects(platform(() => claimInstallInvite("101", revoked.id)), VpsInstallInviteError);
+  await assert.rejects(platform(() => requireInstallInvite("101", revoked.id, revoked.orderId, "direct")), VpsInstallInviteError);
+  await assert.rejects(platform(() => createInstallInvite("900", { sourceMode: "any", days: 0 })), VpsInstallInviteError);
+});
+
 test("free install invitation settles once, sends normal order logs and testimonial, and never touches wallet or QRIS", async t => {
   const db = database(t, 0);
   const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
