@@ -9,6 +9,7 @@ export interface IVpsOrder {
   paymentStatus: "unpaid" | "paying" | "paid" | "refunding" | "refunded" | "cancelled";
   paymentMethod: "balance" | "qris" | "invite" | null; paymentPaidAt: Date | null;
   installInviteId?: string | null;
+  installInviteAcceptedAt?: Date | null;
   statusMessageId?: number | null;
   paymentInvoice?: { reference: string; merchantId: string; amount: number; createdAt: Date; expiresAt: Date; matchedTransactionId?: string; paidAt?: Date };
   paymentInvoiceLeaseUntil: Date | null; refundReason: string | null; refundedAt: Date | null;
@@ -40,6 +41,7 @@ const schema = new Schema<IVpsOrder>({
   paymentStatus: { type: String, enum: ["unpaid", "paying", "paid", "refunding", "refunded", "cancelled"], default: "unpaid" },
   paymentMethod: { type: String, enum: ["balance", "qris", "invite", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
   installInviteId: { type: String, default: null, immutable: true, match: /^[a-f0-9]{32}$/ },
+  installInviteAcceptedAt: { type: Date, default: null },
   statusMessageId: { type: Number, default: null },
   paymentInvoiceLeaseUntil: { type: Date, default: null }, refundReason: { type: String, default: null }, refundedAt: { type: Date, default: null },
   stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "replacing", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },

@@ -8,7 +8,7 @@ import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../pay
 import { ActivityLogService } from "../services/activityLog.js";
 import { TestimonialService } from "../services/testimonial.js";
 import { assertVpsOrderAcceptsNewPayment, assertVpsSelectionAvailable } from "./availability.js";
-import { consumeInstallInvite, requireInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "./installInvites.js";
+import { acceptInstallInvite, requireInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "./installInvites.js";
 import { getVpsCatalog } from "./catalog.js";
 import { VpsPlan } from "../models/VpsPlan.js";
 
@@ -227,16 +227,15 @@ export async function createVpsInvoice(orderId: string, buyerId: string) {
   return { orderId, invoice, qris: await generatePlatformQris(invoice.amount) };
 }
 
-/** No wallet or QRIS mutation. A consumed invite resumes only its preassigned order. */
+/** No wallet or QRIS mutation. Every free order has its own activation receipt. */
 export async function payVpsInstallInvite(orderId: string, buyerId: string): Promise<VpsPaymentResult> {
   let order = await loadOrder(orderId, buyerId);
   if (order.service !== "install" || order.paymentMethod !== "invite" || !order.installInviteId) throw new VpsInstallInviteError("Order bukan Jasa Install dengan undangan gratis.");
   if (order.paymentStatus !== "unpaid" && order.paymentStatus !== "paying") return { orderId, status: order.paymentStatus };
   const source = order.sourceUsername ? "direct" : "digitalocean";
   const invite = await requireInstallInvite(buyerId, order.installInviteId, orderId, source);
-  // An already consumed invitation is a durable settlement intent, just like a
-  // wallet receipt. New grants still obey all current catalog disable rules.
-  if (!invite.redeemedAt) {
+  // Accepted orders recover independently of subsequent grant/catalog changes.
+  if (!order.installInviteAcceptedAt && !(order.paymentStatus === "paying" && invite.orderId === orderId && invite.redeemedAt)) {
     const catalog = await getVpsCatalog();
     assertVpsSelectionAvailable(catalog.availabilityRules ?? [], { size: order.snapshot.size, os: order.snapshot.os, region: order.snapshot.region });
     const plan = await VpsPlan.findOne({ _id: order.snapshot.planId, tenantId: "platform" }).lean();
@@ -244,8 +243,8 @@ export async function payVpsInstallInvite(orderId: string, buyerId: string): Pro
   }
   order = await claimMethod(order, "invite");
   if (order.paymentStatus === "paid") return { orderId, status: "paid" };
-  const consumed = await consumeInstallInvite(buyerId, order.installInviteId!, orderId, source);
-  await markPaid(order, consumed.redeemedAt!);
+  const acceptedAt = await acceptInstallInvite(buyerId, order.installInviteId!, orderId, source);
+  await markPaid(order, acceptedAt);
   order = await loadOrder(orderId, buyerId);
   return { orderId, status: order.paymentStatus === "paying" ? "pending" : order.paymentStatus };
 }

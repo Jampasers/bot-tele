@@ -81,7 +81,7 @@ test("admin creates recipient-locked or bearer install invitation, shares a deep
     { recipient: "-", days: 30, sourceMode: "direct" as const },
   ]) {
     let saved: Parameters<VpsUiDependencies["createInstallInvite"]>[1] | undefined;
-    const invite = { ...INVITE, sourceMode, expiresAt: days === null ? null : INVITE.expiresAt };
+    const invite: VpsUiInstallInvite = { ...INVITE, sourceMode, expiresAt: days === null ? null : INVITE.expiresAt };
     const { bot, calls } = await harness({ listInstallInvites: async () => [],
       createInstallInvite: async (actor, input) => { assert.equal(actor, "42"); saved = input; return invite; },
       getInstallInvite: async () => invite,
@@ -102,8 +102,12 @@ test("admin creates recipient-locked or bearer install invitation, shares a deep
     assert.deepEqual(saved, { sourceMode, days, ...(recipient === "-" ? {} : { recipientId: recipient }) });
     if (days === null) assert.match(replies(calls), /Masa berlaku: Tanpa batas waktu/);
     assert.match(replies(calls), new RegExp(`https://t.me/vps_test_bot\\?start=install_${INVITE.id}`));
-    await bot.handleUpdate(update(8, callback(calls, "vpa_invrevoke_"), true));
+    invite.redeemedAt = new Date(); // Old invitations remain revocable after use.
+    await bot.handleUpdate(update(8, `vpa_invdetail_${INVITE.id}`, true));
+    assert.match(JSON.stringify(calls.at(-1)), /Aktif · gratis berulang|Cabut akses gratis/);
+    await bot.handleUpdate(update(9, callback(calls, "vpa_invrevoke_"), true));
     assert.match(replies(calls), /Dicabut/);
+    assert.doesNotMatch(JSON.stringify(calls.at(-1)), /vpa_invrevoke_/);
     for (const call of calls) {
       const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
       assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
@@ -133,7 +137,7 @@ test("free invitations use the ordinary direct/DO selection and require explicit
     let selected: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
     let order: VpsUiOrder | null = null, payments = 0;
     const { bot, calls } = await harness({ claimInstallInvite: async () => ({ ...INVITE, expiresAt: null }), getOwned: async () => order,
-      checkout: async input => { selected = structuredClone(input); order = { ...ORDER, sourceMode: direct ? "direct" : "digitalocean", price: 0, catalogPrice: 43210, paymentMethod: "invite" }; return order; },
+      checkout: async input => { selected = structuredClone(input); order = { ...ORDER, _id: input.requestId, sourceMode: direct ? "direct" : "digitalocean", price: 0, catalogPrice: 43210, paymentMethod: "invite" }; return order; },
       checkPayment: async () => { payments++; order!.paymentStatus = "paid"; return { status: "paid" }; },
     });
     let id = 0;
@@ -153,7 +157,7 @@ test("free invitations use the ordinary direct/DO selection and require explicit
       await bot.handleUpdate(update(++id, "synthetic-secret-password"));
     }
     await bot.handleUpdate(update(++id, callback(calls, "vps_chrome_"), true));
-    assert.equal(selected?.requestId, INVITE.orderId);
+    assert.match(selected!.requestId, /^[a-f0-9-]{36}$/); assert.notEqual(selected?.requestId, INVITE.orderId);
     assert.equal(selected?.installInviteId, INVITE.id);
     assert.equal(selected?.serviceType, "install");
     assert.equal(Boolean(selected?.direct), direct);
@@ -164,7 +168,8 @@ test("free invitations use the ordinary direct/DO selection and require explicit
     assert.equal(payments, 1);
     assert.match(replies(calls), /saldo tidak dipotong/);
     await bot.handleUpdate(update(++id, `vps_invite_${INVITE.id}`, true));
-    assert.equal(payments, 1, "Opening a used link only shows the existing order");
+    assert.equal(payments, 1, "Opening a used link offers a fresh installation without activating it");
+    assert.match(JSON.stringify(calls.at(-1)), /vps_free_do_|vps_free_direct_/);
   }
 });
 
@@ -180,9 +185,10 @@ test("invitation source restrictions and invalid invitations are explained witho
   assert.match(replies(invalid.calls), /Undangan kedaluwarsa/);
 });
 
-test("claimed invitations survive returning home and restarting the wizard through ordinary installer menus", async () => {
+test("claimed invitations survive restart and allow repeated direct and DO installs through ordinary menus", async () => {
   for (const direct of [true, false]) {
-    let claimed = false, order: VpsUiOrder | null = null, checkouts = 0;
+    let claimed = false, checkouts = 0, payments = 0;
+    const orders = new Map<string, VpsUiOrder>();
     let selected: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
     const deps: Partial<VpsUiDependencies> = {
       claimInstallInvite: async () => { claimed = true; return INVITE; },
@@ -191,12 +197,14 @@ test("claimed invitations survive returning home and restarting the wizard throu
         assert.ok(source === undefined || source === (direct ? "direct" : "digitalocean"));
         return claimed ? INVITE : null;
       },
-      getOwned: async (_actor, id) => id === INVITE.orderId ? order : null,
+      getOwned: async (_actor, id) => orders.get(id) ?? null,
       checkout: async input => {
         checkouts++; selected = structuredClone(input);
-        order = { ...ORDER, sourceMode: direct ? "direct" : "digitalocean", price: 0, paymentMethod: "invite" };
+        const order = { ...ORDER, _id: input.requestId, sourceMode: direct ? "direct" as const : "digitalocean" as const, price: 0, paymentMethod: "invite" as const };
+        orders.set(order._id, order);
         return order;
       },
+      checkPayment: async orderId => { payments++; orders.get(orderId)!.paymentStatus = "paid"; return { status: "paid" }; },
     };
     const first = await harness(deps);
     await first.bot.handleUpdate(update(1, `vps_invite_${INVITE.id}`, true));
@@ -206,25 +214,29 @@ test("claimed invitations survive returning home and restarting the wizard throu
     let id = 10;
     await bot.handleUpdate(update(++id, "vps_install", true));
     assert.match(JSON.stringify(calls.at(-1)), /Lanjut undangan gratis/);
-    await bot.handleUpdate(update(++id, `vps_install_${direct ? "direct" : "do"}`, true));
-    assert.match(replies(calls), /jasa install GRATIS/);
-    if (!direct) {
-      await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
-      await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
-      await bot.handleUpdate(update(++id, callback(calls, "vps_region_"), true));
+    for (let iteration = 0; iteration < 3; iteration++) {
+      await bot.handleUpdate(update(++id, `vps_install_${direct ? "direct" : "do"}`, true));
+      assert.match(replies(calls), /jasa install GRATIS/);
+      if (!direct) {
+        await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
+        await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
+        await bot.handleUpdate(update(++id, callback(calls, "vps_region_"), true));
+      }
+      await bot.handleUpdate(update(++id, callback(calls, "vps_os_"), true));
+      if (direct) {
+        await bot.handleUpdate(update(++id, "192.0.2.10"));
+        await bot.handleUpdate(update(++id, "root"));
+        await bot.handleUpdate(update(++id, "synthetic-password"));
+      }
+      await bot.handleUpdate(update(++id, callback(calls, "vps_chrome_"), true));
+      assert.notEqual(selected?.requestId, INVITE.orderId); assert.equal(selected?.installInviteId, INVITE.id);
+      assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
+      assert.doesNotMatch(JSON.stringify(calls), /vps_balance_|vps_qris_/);
+      await bot.handleUpdate(update(++id, callback(calls, "vps_check_"), true));
+      orders.get(selected!.requestId)!.stage = iteration === 0 ? "ready" : iteration === 1 ? "failed" : "cancelled";
+      await bot.handleUpdate(update(++id, "vps_home", true));
     }
-    await bot.handleUpdate(update(++id, callback(calls, "vps_os_"), true));
-    if (direct) {
-      await bot.handleUpdate(update(++id, "192.0.2.10"));
-      await bot.handleUpdate(update(++id, "root"));
-      await bot.handleUpdate(update(++id, "synthetic-password"));
-    }
-    await bot.handleUpdate(update(++id, callback(calls, "vps_chrome_"), true));
-    assert.equal(selected?.requestId, INVITE.orderId); assert.equal(selected?.installInviteId, INVITE.id);
-    assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
-    assert.doesNotMatch(JSON.stringify(calls), /vps_balance_|vps_qris_/);
-    await bot.handleUpdate(update(++id, `vps_install_${direct ? "direct" : "do"}`, true));
-    assert.equal(checkouts, 1); assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
+    assert.equal(checkouts, 3); assert.equal(payments, 3); assert.equal(orders.size, 3);
   }
 });
 

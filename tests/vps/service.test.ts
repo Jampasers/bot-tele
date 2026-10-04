@@ -43,13 +43,13 @@ test("invite checkout creates one encrypted install order with zero charge and i
   const base = directInstallPlan(defaultVpsCatalog());
   const plan = { ...base, _id: base.id, globalPrice: 15000 };
   const invite = { _id: inviteId, tenantId: "platform", claimedBy: "101", recipientId: "101", orderId: id, sourceMode: "direct", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000) };
-  t.mock.method(VpsInstallInvite, "findOne", (filter: any) => query(() => filter.orderId === invite.orderId && filter.claimedBy === invite.claimedBy ? invite : null));
+  t.mock.method(VpsInstallInvite, "findOne", (filter: any) => query(() => filter.claimedBy === invite.claimedBy ? invite : null));
   t.mock.method(VpsOrder, "findOne", () => query(() => saved));
   t.mock.method(VpsPlan, "findOne", () => query(() => plan));
   t.mock.method(VpsOrder, "create", async (input: Record<string, unknown>) => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
   const input = { actorTelegramId: "101", chatId: "101", requestId: id, installInviteId: inviteId, serviceType: "install" as const, planId: plan._id,
     os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" } };
-  await assert.rejects(platform(() => vpsService.checkout({ ...input, requestId: randomUUID() })), VpsInstallInviteError);
+  await assert.rejects(platform(() => vpsService.checkout({ ...input, actorTelegramId: "102", chatId: "102" })), VpsInstallInviteError);
   await assert.rejects(platform(() => vpsService.checkout({ ...input, serviceType: "purchase" })), VpsInstallInviteError);
   const first = await platform(() => vpsService.checkout(input));
   assert.equal(first.price, 0); assert.equal(first.catalogPrice, 15000);
@@ -78,23 +78,28 @@ test("buyer token vault isolates buyer/order, expires absolutely, cannot seriali
   await assert.rejects(runWithTenant({ tenantId: "rental-one", rentalId: "rental-one" }, async () => vault.put("101", "order-one", "not-accepted-token", "team:one")), /main bot/);
 });
 
-test("checkout recovers a claimed invite from its reserved order and rejects stale paid wizards", async t => {
+test("checkout reuses an active previously used invite for fresh order IDs and keeps wizard retries idempotent", async t => {
   env(t);
   const id = randomUUID(), inviteId = "b".repeat(32);
   const invite = { _id: inviteId, tenantId: "platform", claimedBy: "101", recipientId: "101", orderId: id, sourceMode: "direct",
-    redeemedAt: null, revokedAt: null, expiresAt: null };
-  let saved: IVpsOrder | null = null;
+    redeemedAt: new Date(), revokedAt: null, expiresAt: null };
+  const saved = new Map<string, IVpsOrder>();
   t.mock.method(VpsInstallInvite, "findOne", () => query(() => invite));
-  t.mock.method(VpsOrder, "findOne", () => query(() => saved));
+  t.mock.method(VpsOrder, "findOne", (filter: any) => query(() => saved.get(filter._id) ?? null));
   t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...directInstallPlan(defaultVpsCatalog()), globalPrice: 15000 })));
-  t.mock.method(VpsOrder, "create", async input => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
+  t.mock.method(VpsOrder, "create", async input => { const order = new VpsOrder(input).toObject(); saved.set(order._id, order); return { toObject: () => order }; });
   const input = { actorTelegramId: "101", chatId: "101", requestId: id, serviceType: "install" as const, planId: DIRECT_INSTALL_PLAN_ID,
     os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "root", password: "offline" } };
-  await assert.rejects(platform(() => vpsService.checkout({ ...input, requestId: randomUUID() })), VpsInstallInviteError);
-  assert.equal(saved, null);
-  const result = await platform(() => vpsService.checkout(input));
-  assert.equal(result.price, 0); assert.equal(result.paymentMethod, "invite");
-  assert.equal(saved!.installInviteId, inviteId); assert.equal(saved!.snapshot.price, 15000);
+  for (let i = 0; i < 3; i++) {
+    const requestId = randomUUID();
+    const result = await platform(() => vpsService.checkout({ ...input, requestId }));
+    assert.equal(result.price, 0); assert.equal(result.paymentMethod, "invite");
+    assert.equal(result._id, requestId); assert.notEqual(result._id, invite.orderId);
+    assert.equal(saved.get(requestId)!.installInviteId, inviteId);
+    assert.equal(saved.get(requestId)!.snapshot.price, 15000);
+    assert.deepEqual(await platform(() => vpsService.checkout({ ...input, requestId })), result);
+  }
+  assert.equal(saved.size, 3);
 });
 
 test("token recovery rejects a different team or buyer and resumes the existing order without persisting the token", async t => {
