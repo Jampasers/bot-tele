@@ -194,6 +194,41 @@ export async function testSsh(input: { ip: string; password: string; username?: 
     return (await inspectSsh(input, signal, deps)).ready;
 }
 
+export const MIN_INSTALL_DISK_BYTES = 50_000_000_000;
+const targetDiskPattern = /^\/dev\/[A-Za-z0-9._-]+$/;
+
+/** Inspect the physical disk backing /, not filesystem free space or attached data disks.
+ * Reinstall replaces the OS, so all of this disk's capacity is available to Windows. */
+export async function inspectInstallStorage(
+    input: { ip: string; password: string; username?: string },
+    signal?: AbortSignal,
+    deps: InstallerDependencies = {},
+): Promise<{ targetDisk: string; bytes: number }> {
+    validIp(input.ip);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    const script = `set -eu
+export LC_ALL=C
+root_source=$(findmnt -n -o SOURCE -T /)
+root_source=\${root_source%%\\[*}
+case "$root_source" in /dev/*) ;; *) exit 1 ;; esac
+disks=$(lsblk -srnpo NAME,TYPE "$root_source" | awk '$2 == "disk" {print $1}' | sort -u)
+[ "$(printf '%s\\n' "$disks" | wc -l)" -eq 1 ] && [ -n "$disks" ]
+bytes=$(lsblk -bdrn -o SIZE "$disks")
+printf '__VPS_INSTALL_DISK__:%s:%s\\n' "$disks" "$bytes"
+`;
+    const result = await (deps.ssh ?? executeSsh)({ ...input, username: input.username ?? "root",
+        command: input.username && input.username !== "root" ? "sudo -n bash -s" : "bash -s",
+        stdin: script, timeoutMs: 20_000 }, signal);
+    if (signal?.aborted) throw new InstallerError("cancelled");
+    const markers = [...result.output.matchAll(/^__VPS_INSTALL_DISK__:(\/dev\/[A-Za-z0-9._-]+):([0-9]+)\r?$/gm)];
+    const targetDisk = markers[0]?.[1] ?? "";
+    const bytes = Number(markers[0]?.[2]);
+    if (result.code !== 0 || markers.length !== 1 || !targetDiskPattern.test(targetDisk) || !Number.isSafeInteger(bytes) || bytes <= 0) {
+        throw new InstallerError("validation", false, "storage_detection");
+    }
+    return { targetDisk, bytes };
+}
+
 export function parseWindowsBootMode(output: string): WindowsBootMode {
     const virtualization = output.match(/^\*\*VPS_VIRTUALIZATION\*\*:(lxc|openvz)\r?$/m)?.[1];
     if (virtualization) throw new InstallerError("validation", false, "unsupported_virtualization");
@@ -282,11 +317,12 @@ export function extractInstallerLogUrl(text: string, ip: string): string | undef
     return undefined;
 }
 
-export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; bootMode: WindowsBootMode; imageUrl: string; installChrome?: boolean; wallpaperPath?: string; wallpaperBase64?: string; }
+export interface WindowsInstallInput { ip: string; password: string; username?: string; windowsPassword: string; os: string; orderId: string; bootMode: WindowsBootMode; imageUrl: string; targetDisk?: string; installChrome?: boolean; wallpaperPath?: string; wallpaperBase64?: string; }
 export interface WindowsInstallResult { state: "prepared" | "running" | "failed"; logUrl?: string; errorDetail?: string; bootMode: WindowsBootMode; imageUrl: string; }
 export async function launchWindows(input: WindowsInstallInput, signal?: AbortSignal, deps: InstallerDependencies = {}): Promise<WindowsInstallResult> {
     const os = getOs(input.os); validatePassword(input.windowsPassword); validIp(input.ip);
     if (os?.family !== "windows" || (input.bootMode !== "bios" && input.bootMode !== "efi")) throw new InstallerError("validation");
+    if (input.targetDisk && !targetDiskPattern.test(input.targetDisk)) throw new InstallerError("validation");
     const imageUrl = validateWindowsImageUrl(input.imageUrl);
     const passwordBase64 = Buffer.from(input.windowsPassword, "utf8").toString("base64");
     const configuredWallpaper = (() => {
@@ -1115,6 +1151,7 @@ else:
 '
 
 bash /root/reinstall.sh dd \\
+  ${input.targetDisk ? `--target-disk ${quote(input.targetDisk)} ` : ""}\\
   --img ${quote(imageUrl)} \\
   --username administrator \\
   --rdp-port 3389 \\

@@ -9,7 +9,7 @@ import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
-import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, catalogPlans, directInstallPlans } from "../../src/vps/catalogPlans.js";
+import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, catalogPlans, directInstallPlan, directInstallPlans } from "../../src/vps/catalogPlans.js";
 import { DigitalOceanClient } from "../../src/vps/digitalOcean.js";
 import { getOs } from "../../src/vps/installer.js";
 import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
@@ -39,7 +39,7 @@ test("invite checkout creates one encrypted install order with zero charge and i
   env(t);
   const id = randomUUID(), inviteId = "a".repeat(32);
   let saved: IVpsOrder | null = null;
-  const base = directInstallPlans(defaultVpsCatalog())[0]!;
+  const base = directInstallPlan(defaultVpsCatalog());
   const plan = { ...base, _id: base.id, globalPrice: 15000 };
   const invite = { _id: inviteId, tenantId: "platform", claimedBy: "101", recipientId: "101", orderId: id, sourceMode: "direct", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000) };
   t.mock.method(VpsInstallInvite, "findOne", (filter: any) => query(() => filter.orderId === invite.orderId && filter.claimedBy === invite.claimedBy ? invite : null));
@@ -129,7 +129,7 @@ test("direct Windows checkout stores buyer VPS access encrypted and never calls 
   env(t);
   let saved: IVpsOrder | null = null;
   const id = randomUUID();
-  const base = directInstallPlans(defaultVpsCatalog())[0]!;
+  const base = directInstallPlan(defaultVpsCatalog());
   const plan = { ...base, _id: base.id, globalPrice: 15000 };
   t.mock.method(VpsOrder, "findOne", () => query(() => saved));
   t.mock.method(VpsPlan, "findOne", () => query(() => plan));
@@ -197,12 +197,12 @@ test("service menu derives DO specs plus a separate buyer-owned install service"
   const plans = await platform(() => vpsService.listPlans("install"));
   const doPlans = plans.filter(plan => plan.sourceMode !== "direct");
   const direct = plans.find(plan => plan.sourceMode === "direct");
-  assert.equal(plans.filter(plan => plan.sourceMode === "direct").length, 5);
+  assert.equal(plans.filter(plan => plan.sourceMode === "direct").length, 1);
   assert.equal(doPlans.length, 7);
   assert.ok(doPlans.every(plan => plan.regions.length === 16 && plan.osPrices.length >= 14));
   assert.ok(doPlans.every(plan => plan.name !== "Old custom package"));
   assert.ok(direct);
-  assert.equal(direct.sizeSlug, "s-1vcpu-2gb");
+  assert.equal(direct.sizeSlug, "external-vps");
   assert.deepEqual(direct.regions, ["external"]);
   assert.deepEqual(direct.osPrices.map(os => os.os), ["windows2012r2", "windows2016", "windows2019", "windows2022"]);
 });
@@ -218,6 +218,29 @@ test("catalog checkout without an exact configured price cannot create order or 
   await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(),
     serviceType: "install", planId: plan.id, os: "windows2022", region: "sgp1" }), /harga/));
   assert.equal(writes, 0); assert.equal(provider, 0);
+});
+
+test("buyer install uses a global service without a saved spec and honors per-Windows overrides", async t => {
+  env(t);
+  let saved: IVpsOrder | null = null;
+  let directPrices: any = null;
+  const global = { _id: INSTALL_DIRECT_GLOBAL_PRICE_ID, globalPrice: 15000 };
+  t.mock.method(VpsOrder, "findOne", () => query(() => saved));
+  t.mock.method(VpsPlan, "findOne", (filter: any) => query(() => filter._id === INSTALL_DIRECT_GLOBAL_PRICE_ID ? global : directPrices));
+  t.mock.method(VpsPlan, "find", () => query(() => [global, ...(directPrices ? [directPrices] : [])]));
+  t.mock.method(VpsOrder, "create", async input => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
+  const input = { actorTelegramId: "101", chatId: "101", requestId: randomUUID(), serviceType: "install" as const,
+    planId: DIRECT_INSTALL_PLAN_ID, os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "root", password: "offline" } };
+  const first = await platform(() => vpsService.checkout(input));
+  assert.equal(first.price, 15000); assert.equal(first.sizeSlug, "external-vps");
+  assert.equal(first.disk, 0); // Actual disk is inspected after payment, not claimed by the buyer.
+  saved = null;
+  directPrices = { ...directInstallPlan(defaultVpsCatalog()), _id: DIRECT_INSTALL_PLAN_ID,
+    osPrices: [{ os: "windows2022", label: "Windows", price: 17500 }] };
+  const plan = (await platform(() => vpsService.listPlans("install"))).find(plan => plan.id === DIRECT_INSTALL_PLAN_ID)!;
+  assert.equal(plan.priceMatrix?.find(row => row.os === "windows2022")?.price, 17500);
+  const second = await platform(() => vpsService.checkout({ ...input, requestId: randomUUID() }));
+  assert.equal(second.price, 17500);
 });
 
 test("admin direct-install price is stored per Windows OS without spec or region matrix", async t => {
@@ -242,6 +265,12 @@ test("admin direct-install price is stored per Windows OS without spec or region
   assert.equal(set.osPrices.find((os: any) => os.os === "windows2022")?.price, 17500);
   assert.equal(set.osPrices.find((os: any) => os.os === "windows2019")?.price, null);
   assert.deepEqual(set.priceMatrix, []);
+  writes.length = 0;
+  await platform(() => vpsService.updatePlan("101", DIRECT_INSTALL_PLAN_ID, { globalPrice: 18000 }));
+  assert.equal(writes[0]!.update.$set.globalPrice, 18000);
+  writes.length = 0;
+  await platform(() => vpsService.updatePlan("101", DIRECT_INSTALL_PLAN_ID, { os: "windows2022", region: "external", price: null }));
+  assert.equal(writes[0]!.update.$set.osPrices.find((os: any) => os.os === "windows2022")?.price, null);
 });
 
 test("admin combination price validates catalog membership before any write and targets an atomic matrix update", async t => {

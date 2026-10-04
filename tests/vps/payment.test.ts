@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { User } from "../../src/models/User.js";
-import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
 import { VpsInstallInvite } from "../../src/models/VpsInstallInvite.js";
 import { claimInstallInvite, createInstallInvite, requireInstallInvite, revokeInstallInvite, VpsInstallInviteError } from "../../src/vps/installInvites.js";
 import { ActivityLogService } from "../../src/services/activityLog.js";
@@ -12,7 +12,7 @@ import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
 import { VpsSelectionDisabledError } from "../../src/vps/availability.js";
 import { VpsAccount } from "../../src/models/VpsCredential.js";
-import { VpsWorker } from "../../src/vps/worker.js";
+import { VpsWorker, advanceVpsOrder, type VpsStepDependencies } from "../../src/vps/worker.js";
 import { BalanceLog } from "../../src/models/BalanceLog.js";
 import { PaymentAmountReservation, PaymentSettlementClaim } from "../../src/models/PaymentLedger.js";
 import { GopayMerchant } from "../../src/services/payment/gopay-merchant.js";
@@ -344,6 +344,35 @@ test("exhausted SSH retries refund a settled QRIS invoice to buyer balance inclu
   await Promise.all([platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted")), platform(() => refundVpsOrder(order._id, "ssh_retry_exhausted"))]);
   assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded"); assert.equal(db.users[0]!.balance, 125_007);
 });
+
+for (const method of ["balance", "qris", "invite"] as const) {
+  test(`undersized buyer VPS ${method} payment returns the actual paid amount to balance once`, async t => {
+    const db = database(t);
+    const order = db.addOrder({ service: "install", stage: "installing", sourceUsername: "root", publicIp: "192.0.2.10",
+      evidence: "", stageStartedAt: new Date(), sourcePasswordEncrypted: "offline", paymentStatus: "paid", paymentMethod: method,
+      ...(method === "invite" ? { installInviteId: "a".repeat(32) } : {}),
+      ...(method === "qris" ? { paymentInvoice: { amount: 25_007, matchedTransactionId: "settled-storage-invoice" } } : {}),
+      snapshot: { price: 25000, planName: "Install Windows di VPS Buyer", os: "windows2022", size: "external-vps", region: "external" } });
+    if (method === "balance") {
+      db.users[0]!.balance = 75000;
+      db.users[0]!.appliedVpsPaymentEffectIds.push(`vps:debit:${order._id}`);
+    }
+    const unexpected = async (): Promise<never> => { throw new Error("No installer or provider mutation expected"); };
+    const deps: VpsStepDependencies = { save: async patch => { Object.assign(order, patch); },
+      client: unexpected, reserve: unexpected, releaseCapacity: async () => {},
+      refund: async reason => { await refundVpsOrder(order._id, reason); }, password: () => "offline", clearToken: () => {},
+      inspectSsh: unexpected, inspectInstallStorage: async () => ({ bytes: 25_000_000_000, targetDisk: "/dev/vda" }),
+      detectWindowsBootMode: unexpected, resolveWindowsDdImageCandidates: () => { throw new Error("No image selection expected"); },
+      selectWindowsImage: unexpected, launchWindows: unexpected, scheduleInstallerReboot: unexpected, inspectWindows: unexpected,
+      now: Date.now, signal: new AbortController().signal };
+    await platform(() => advanceVpsOrder(order as IVpsOrder, deps));
+    await Promise.all(Array.from({ length: 8 }, () => platform(() => refundVpsOrder(order._id, "validation_failed"))));
+    assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "refunded");
+    assert.equal(order.lastError, "storage_insufficient");
+    assert.equal(db.users[0]!.balance, method === "qris" ? 125007 : 100000);
+    assert.equal(db.audit.filter(row => row.type === "REFUND").length, method === "invite" ? 0 : 1);
+  });
+}
 
 test("worker publishes failed SSH reason and completed refund by editing the existing status message", async t => {
   const db = database(t);

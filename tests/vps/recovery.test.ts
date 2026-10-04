@@ -29,6 +29,7 @@ function dependencies(patch: Partial<VpsStepDependencies> = {}): VpsStepDependen
         reserve: async () => { throw new Error("No new capacity may be reserved"); }, password: () => "MockPassword123!xyz",
         releaseCapacity: async () => {}, refund: async () => { throw new Error("No refund expected in this step"); },
         inspectSsh: async () => { throw new Error("Linux SSH must not be checked again"); },
+        inspectInstallStorage: async () => { throw new Error("Storage must not be inspected in this step"); },
         detectWindowsBootMode: async () => { throw new Error("Boot detection must not be repeated"); },
         resolveWindowsDdImageCandidates: () => { throw new Error("Image candidates must not be resolved again"); },
         selectWindowsImage: async () => { throw new Error("Image selection must not be repeated"); },
@@ -70,6 +71,10 @@ test("direct buyer VPS fast-path reaches reboot monitoring in one leased worker 
             assert.deepEqual(input, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
             return readySsh();
         },
+        inspectInstallStorage: async input => {
+            assert.deepEqual(input, { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" });
+            return { bytes: 50_000_000_000, targetDisk: "/dev/vda" };
+        },
         detectWindowsBootMode: async () => "efi",
         resolveWindowsDdImageCandidates: () => ["https://images.example.test/windows2022-efi.xz"],
         selectWindowsImage: async input => input.candidates[0]!,
@@ -78,6 +83,7 @@ test("direct buyer VPS fast-path reaches reboot monitoring in one leased worker 
             assert.equal(input.ip, "192.0.2.10"); assert.equal(input.username, "ubuntu");
             assert.equal(input.password, "synthetic-source-password"); assert.equal(input.windowsPassword, "MockPassword123!xyz");
             assert.equal(input.bootMode, "efi"); assert.match(input.imageUrl, /windows2022-efi/);
+            assert.equal(input.targetDisk, "/dev/vda");
             return { state: "prepared", bootMode: input.bootMode, imageUrl: input.imageUrl };
         },
         scheduleInstallerReboot: async () => { reboots++; return "scheduled"; },
@@ -104,6 +110,47 @@ test("persisted Windows image selection skips detection and resolution on retry"
     }));
     assert.equal(launches, 1);
     assert.equal(order.stage, "monitoring");
+});
+
+test("undersized buyer disks refund before any installer preparation, including legacy installing orders", async () => {
+    for (const initialStage of ["queued", "installing"] as const) {
+        for (const paymentMethod of ["balance", "qris", "invite"] as const) {
+            const order = orderFixture({ stage: initialStage, paymentMethod, sourceUsername: "root", sourcePasswordEncrypted: "source", dropletId: null, createAttemptedAt: null });
+            const refunds: string[] = [];
+            const deps = dependencies({ inspectSsh: async () => readySsh(),
+                inspectInstallStorage: async () => ({ targetDisk: "/dev/vda", bytes: 49_999_999_999 }),
+                refund: async reason => { assert.equal(order.stage, "failed"); refunds.push(reason); },
+            });
+            await advanceVpsOrder(order, deps);
+            assert.equal(order.lastError, "storage_insufficient"); assert.equal(order.stage, "failed");
+            assert.equal(order.paymentStatus, "refunded"); assert.deepEqual(refunds, ["validation_failed"]);
+            assert.match(order.evidence, /minimum 50 GB.*sebelum perubahan disk/);
+            assert.match(order.evidence, paymentMethod === "invite" ? /Tidak ada dana/ : /dikembalikan ke saldo/);
+            await advanceVpsOrder(order, deps);
+            assert.equal(refunds.length, 1);
+        }
+    }
+});
+
+test("unverified disk size waits safely without refund and retries the same buyer VPS", async () => {
+    const order = orderFixture({ stage: "installing", sourceUsername: "root", dropletId: null, createAttemptedAt: null });
+    let checks = 0;
+    const deps = dependencies({ inspectInstallStorage: async () => { checks++; throw new InstallerError("validation", false, "storage_detection"); } });
+    await advanceVpsOrder(order, deps);
+    assert.equal(order.stage, "review"); assert.equal(order.resumeStage, "installing"); assert.equal(order.paymentStatus, "paid");
+    await advanceVpsOrder(order, deps);
+    assert.equal(checks, 2); assert.equal(order.paymentStatus, "paid");
+});
+
+test("a crash after undersized disk validation recovers the pending refund without rechecking or installing", async () => {
+    const order = orderFixture({ stage: "installing", sourceUsername: "root", dropletId: null, createAttemptedAt: null });
+    await assert.rejects(advanceVpsOrder(order, dependencies({
+        inspectInstallStorage: async () => ({ targetDisk: "/dev/vda", bytes: 25_000_000_000 }),
+        refund: async () => { throw new Error("process interrupted"); },
+    })), /interrupted/);
+    assert.equal(order.stage, "failed"); assert.equal(order.paymentStatus, "paid");
+    await advanceVpsOrder(order, dependencies({ refund: async reason => { assert.equal(reason, "validation_failed"); } }));
+    assert.equal(order.paymentStatus, "refunded");
 });
 
 test("installer cannot launch until detected mode and image are durably saved", async () => {

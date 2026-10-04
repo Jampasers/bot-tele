@@ -1,6 +1,6 @@
 export type SshConnectionFailure = "network_unreachable" | "connection_refused" | "connection_timeout" | "handshake_timeout" | "connection_reset";
 export type SshReadinessFailure = SshConnectionFailure | "authentication" | "cloud_init" | "permission" | "ssh";
-export type InstallerErrorReason = "unsupported_virtualization" | "boot_detection" | "image_unreachable" | SshConnectionFailure;
+export type InstallerErrorReason = "unsupported_virtualization" | "boot_detection" | "storage_detection" | "image_unreachable" | SshConnectionFailure;
 
 /** Only these fixed messages may reach order evidence; never include raw SSH output/errors. */
 export const SSH_READINESS_DETAILS: Readonly<Record<SshReadinessFailure, string>> = Object.freeze({

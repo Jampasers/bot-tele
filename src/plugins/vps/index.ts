@@ -117,7 +117,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           const keyboard = new InlineKeyboard();
           if (draft?.plan && draft.region) keyboard.text("Ganti OS", `vps_backos_${draft.id}`).row();
           if (draft?.plan && !draft.directMode) keyboard.text("Ganti Region", `vps_backregion_${draft.id}`).row();
-          if (draft) keyboard.text("Ganti Spek", `vps_page_${draft.id}_0`).row();
+          if (draft && !draft.directMode) keyboard.text("Ganti Spek", `vps_page_${draft.id}_0`).row();
           keyboard.text("🔙 VPS", "vps_home");
           await ctx.reply(`🚫 ${err.message}`, { reply_markup: keyboard });
           return;
@@ -173,16 +173,15 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
     await refreshRules(draft);
+    if (draft.directMode) { await showDirectOs(ctx, draft); return; }
     const keyboard = new InlineKeyboard();
     draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${disabledMessage(draft, plan) ? "🚫 " : ""}${sizeLabel(plan)}`, `vps_plan_${draft.id}_${index + offset}`).row());
     if (offset) keyboard.text("← Sebelumnya", `vps_page_${draft.id}_${Math.max(0, offset - 10)}`);
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
     keyboard.text("🔙 VPS", "vps_home");
-    const notice = draft.installInviteId ? inviteNotice : draft.directMode
-      ? "Pembayaran ke toko hanya biaya instalasi Windows. VPS disediakan oleh buyer."
-      : draft.serviceType === "install" ? feeNotice : "";
-    const stepLabel = draft.directMode ? "Pilih spek VPS milik kamu (minimal 1 core, RAM 2 GB, storage 50 GB):" : draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
+    const notice = draft.installInviteId ? inviteNotice : draft.serviceType === "install" ? feeNotice : "";
+    const stepLabel = draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
     await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? stepLabel : "Belum ada paket aktif. Hubungi admin."}${notice ? `\n\n${notice}` : ""}`, keyboard);
   }
   async function refreshRules(draft: Draft): Promise<void> {
@@ -201,7 +200,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   async function showInstallSources(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
-    await vpsReply(ctx, "🛠 Jasa Install\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Pilih spek sesuai VPS kamu; Windows memerlukan minimal 1 core, RAM 2 GB, dan storage 50 GB.", new InlineKeyboard()
+    await vpsReply(ctx, "🛠 Jasa Install\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Storage VPS dicek otomatis sebelum instalasi, minimal 50 GB.", new InlineKeyboard()
       .text("🌊 Buat VPS di akun DO saya", "vps_install_do").row()
       .text("🖥 Install Windows di VPS saya", "vps_install_direct").row()
       .text("🔙 Kembali", "vps_home"));
@@ -211,8 +210,8 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     const options = pricedOs(draft.plan, "external", true);
     const keyboard = new InlineKeyboard();
     options.forEach((os, index) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, "external") ? "🚫 " : ""}${os.label} · ${os.price === null ? "Belum tersedia" : draftPrice(draft, os.price)}`, `vps_os_${draft.id}_${index}`).row());
-    keyboard.text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-    await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 2/6) Pilih Windows yang mau di-install.\nSpek: ${sizeLabel(draft.plan)}\nHarga di bawah adalah biaya jasa install saja. Pastikan spek VPS sesuai pilihan dan storage minimal 50 GB.`, keyboard);
+    keyboard.text("🔙 Jasa Install", "vps_install").text("Batal", "vps_home");
+    await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 1/5) Pilih Windows yang mau di-install.\n${draft.installInviteId ? inviteNotice : "Harga di bawah adalah biaya jasa install saja."}\nStorage VPS dicek otomatis sebelum instalasi. Jika kapasitas disk kurang dari 50 GB, instalasi dibatalkan${draft.installInviteId ? "." : " dan pembayaran dikembalikan ke saldo bot."}`, keyboard);
   }
 
   async function beginDirectCredentials(ctx: Context, draft: Draft): Promise<void> {
@@ -233,16 +232,16 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           ready.direct.password = password;
           const selectedOs = pricedOs(ready.plan, "external", true).find(item => item.os === ready.os);
           if (!selectedOs) throw new Error("OS tidak tersedia.");
-          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${draftPrice(ready, selectedOs.price)}\n\n(Langkah 6/6) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
+          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${draftPrice(ready, selectedOs.price)}\n\n(Langkah 5/5) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
             .text("Lanjut tanpa Chrome", `vps_chrome_${ready.id}_no`).row()
             .text("+ Chrome (Gratis)", `vps_chrome_${ready.id}_yes`).row()
             .text("🔙 Ganti OS", `vps_backos_${ready.id}`).text("Batal", "vps_home"));
         } });
-        await usernameCtx.reply("(Langkah 5/6) Kirim password SSH VPS. Pesan akan dihapus otomatis.\n\nKetik /batal untuk membatalkan.");
+        await usernameCtx.reply("(Langkah 4/5) Kirim password SSH VPS. Pesan akan dihapus otomatis.\n\nKetik /batal untuk membatalkan.");
       } });
-      await ipCtx.reply("(Langkah 4/6) Kirim username SSH VPS, contoh: root atau ubuntu.\n\nKetik /batal untuk membatalkan.");
+      await ipCtx.reply("(Langkah 3/5) Kirim username SSH VPS, contoh: root atau ubuntu.\n\nKetik /batal untuk membatalkan.");
     } });
-    await vpsReply(ctx, "🖥 Akses VPS Buyer\n\n(Langkah 3/6) Kirim IP VPS. VPS harus sedang online dan bisa diakses via SSH.\n\nCredential hanya dipakai untuk proses instalasi; pesan password akan dihapus otomatis.", new InlineKeyboard()
+    await vpsReply(ctx, "🖥 Akses VPS Buyer\n\n(Langkah 2/5) Kirim IP VPS. VPS harus sedang online dan bisa diakses via SSH.\n\nCredential hanya dipakai untuk proses instalasi; pesan password akan dihapus otomatis.", new InlineKeyboard()
       .text("🔙 Ganti OS", `vps_backos_${draft.id}`).text("Batal", "vps_home"));
   }
 
@@ -262,12 +261,15 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     drafts.set(actor, draft);
 
     if (direct) {
-      const plan = plans[0];
+      const plan = draft.plans[0];
       if (!plan) {
         await vpsReply(ctx, "Jasa install Windows untuk VPS buyer belum tersedia. Hubungi admin.", new InlineKeyboard().text("🔙 Jasa Install", "vps_install").text("🔙 VPS", "vps_home"));
         return;
       }
-      await choosePlan(ctx, draft);
+      draft.plan = plan;
+      draft.region = "external";
+      await refreshRules(draft);
+      await showDirectOs(ctx, draft);
       return;
     }
 
