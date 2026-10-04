@@ -7,7 +7,10 @@ import { generatePlatformQris, getPlatformPaymentClients } from "../payments/pla
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
 import { ActivityLogService } from "../services/activityLog.js";
 import { TestimonialService } from "../services/testimonial.js";
-import { assertVpsOrderAcceptsNewPayment } from "./availability.js";
+import { assertVpsOrderAcceptsNewPayment, assertVpsSelectionAvailable } from "./availability.js";
+import { consumeInstallInvite, requireInstallInvite, VpsInstallInviteError } from "./installInvites.js";
+import { getVpsCatalog } from "./catalog.js";
+import { VpsPlan } from "../models/VpsPlan.js";
 
 export type VpsBalanceResult =
   | { status: "paid"; orderId: string; remainingBalance: number }
@@ -38,9 +41,9 @@ async function loadOrder(orderId: string, buyerId?: string): Promise<IVpsOrder> 
   return order;
 }
 
-async function claimMethod(order: IVpsOrder, method: "balance" | "qris"): Promise<IVpsOrder> {
+async function claimMethod(order: IVpsOrder, method: "balance" | "qris" | "invite"): Promise<IVpsOrder> {
   if (order.paymentStatus === "unpaid") {
-    await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "unpaid", stage: { $in: ["queued", "needs_token"] }, paymentMethod: null }, {
+    await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "unpaid", stage: { $in: ["queued", "needs_token"] }, paymentMethod: method === "invite" ? "invite" : null }, {
       $set: { paymentStatus: "paying", paymentMethod: method },
     });
     order = await loadOrder(order._id, order.buyerId);
@@ -52,12 +55,12 @@ async function claimMethod(order: IVpsOrder, method: "balance" | "qris"): Promis
 }
 
 async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: string): Promise<void> {
-  const result = await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "paying", paymentMethod: order.paymentMethod }, { $set: {
+  const result = await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "paying", paymentMethod: order.paymentMethod, stage: { $in: ["queued", "needs_token"] } }, { $set: {
     paymentStatus: "paid", paymentPaidAt: paidAt, nextRunAt: new Date(),
     ...(transactionId === undefined ? {} : { "paymentInvoice.matchedTransactionId": transactionId, "paymentInvoice.paidAt": paidAt }),
   } });
   if (result.modifiedCount > 0) {
-    if (order.paymentMethod === "qris") {
+    if (order.paymentMethod === "qris" || order.paymentMethod === "invite") {
       try {
         await User.updateOne({ telegramId: order.buyerId, tenantId: PLATFORM_TENANT_ID }, { $inc: { totalOrders: 1 } });
       } catch {}
@@ -67,7 +70,8 @@ async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: s
         const buyer = await User.findOne({ telegramId: order.buyerId, tenantId: PLATFORM_TENANT_ID })
           .select("telegramId firstName username balance")
           .lean();
-        const totalPrice = order.paymentMethod === "qris" ? (order.paymentInvoice?.amount ?? order.snapshot.price) : order.snapshot.price;
+        const totalPrice = order.paymentMethod === "invite" ? 0 : order.paymentMethod === "qris" ? (order.paymentInvoice?.amount ?? order.snapshot.price) : order.snapshot.price;
+        const method = order.paymentMethod === "invite" ? "Undangan Gratis" : order.paymentMethod === "qris" ? "QRIS" : "SALDO";
         const buyerInfo = {
           telegramId: order.buyerId,
           firstName: buyer?.firstName,
@@ -89,7 +93,8 @@ async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: s
           sourceMode: order.service === "install" && order.sourceUsername ? "direct" : "digitalocean",
           publicIp: order.publicIp ?? undefined,
           totalPrice,
-          method: order.paymentMethod === "qris" ? "QRIS" : "SALDO",
+          method,
+          catalogPrice: order.paymentMethod === "invite" ? order.snapshot.price : undefined,
           buyer: buyerInfo,
           remainingBalance: buyer?.balance,
           date: paidAt,
@@ -105,7 +110,7 @@ async function markPaid(order: IVpsOrder, paidAt = new Date(), transactionId?: s
             os: order.snapshot.os,
             region: order.snapshot.region,
             totalPrice,
-            method: order.paymentMethod === "qris" ? "QRIS" : "Saldo Akun",
+            method: order.paymentMethod === "balance" ? "Saldo Akun" : method,
             buyer: buyerInfo,
             date: paidAt,
           });
@@ -152,6 +157,7 @@ async function applyWalletEffect(order: IVpsOrder, kind: "debit" | "refund", amo
 
 export async function payVpsFromBalance(orderId: string, buyerId: string): Promise<VpsBalanceResult> {
   let order = await loadOrder(orderId, buyerId);
+  if (order.paymentMethod === "invite" || order.installInviteId) throw new VpsInstallInviteError("Order undangan gratis tidak memakai saldo atau QRIS.");
   await assertVpsOrderAcceptsNewPayment(order);
   const wallet = await User.findOne({ telegramId: buyerId, tenantId: PLATFORM_TENANT_ID }).select("balance").lean();
   if (order.paymentStatus === "paid") return { status: "paid", orderId, remainingBalance: wallet?.balance ?? 0 };
@@ -177,6 +183,7 @@ export async function payVpsFromBalance(orderId: string, buyerId: string): Promi
 
 export async function createVpsInvoice(orderId: string, buyerId: string) {
   let order = await loadOrder(orderId, buyerId);
+  if (order.paymentMethod === "invite" || order.installInviteId) throw new VpsInstallInviteError("Order undangan gratis tidak memakai saldo atau QRIS.");
   await assertVpsOrderAcceptsNewPayment(order);
   order = await claimMethod(order, "qris");
   if (order.paymentStatus === "paid") throw new Error("Pesanan VPS sudah dibayar.");
@@ -210,10 +217,34 @@ export async function createVpsInvoice(orderId: string, buyerId: string) {
   return { orderId, invoice, qris: await generatePlatformQris(invoice.amount) };
 }
 
+/** No wallet or QRIS mutation. A consumed invite resumes only its preassigned order. */
+export async function payVpsInstallInvite(orderId: string, buyerId: string): Promise<VpsPaymentResult> {
+  let order = await loadOrder(orderId, buyerId);
+  if (order.service !== "install" || order.paymentMethod !== "invite" || !order.installInviteId) throw new VpsInstallInviteError("Order bukan Jasa Install dengan undangan gratis.");
+  if (order.paymentStatus !== "unpaid" && order.paymentStatus !== "paying") return { orderId, status: order.paymentStatus };
+  const source = order.sourceUsername ? "direct" : "digitalocean";
+  const invite = await requireInstallInvite(buyerId, order.installInviteId, orderId, source);
+  // An already consumed invitation is a durable settlement intent, just like a
+  // wallet receipt. New grants still obey all current catalog disable rules.
+  if (!invite.redeemedAt) {
+    const catalog = await getVpsCatalog();
+    assertVpsSelectionAvailable(catalog.availabilityRules ?? [], { size: order.snapshot.size, os: order.snapshot.os, region: order.snapshot.region });
+    const plan = await VpsPlan.findOne({ _id: order.snapshot.planId, tenantId: "platform" }).lean();
+    if (plan?.enabled === false) throw new VpsInstallInviteError("Paket Jasa Install sedang dinonaktifkan admin.");
+  }
+  order = await claimMethod(order, "invite");
+  if (order.paymentStatus === "paid") return { orderId, status: "paid" };
+  const consumed = await consumeInstallInvite(buyerId, order.installInviteId!, orderId, source);
+  await markPaid(order, consumed.redeemedAt!);
+  order = await loadOrder(orderId, buyerId);
+  return { orderId, status: order.paymentStatus === "paying" ? "pending" : order.paymentStatus };
+}
+
 export async function checkVpsPayment(orderId: string, buyerId?: string, signal?: AbortSignal): Promise<VpsPaymentResult> {
   signal?.throwIfAborted();
   const order = await loadOrder(orderId, buyerId);
   signal?.throwIfAborted();
+  if (order.paymentMethod === "invite" && ["unpaid", "paying"].includes(order.paymentStatus)) return payVpsInstallInvite(orderId, order.buyerId);
   if (order.paymentStatus !== "paying") return { orderId, status: order.paymentStatus };
   if (order.paymentMethod === "balance") {
     const result = await payVpsFromBalance(orderId, order.buyerId);
@@ -270,13 +301,16 @@ export async function refundVpsOrder(orderId: string, reason: VpsRefundReason): 
   }
   if (order.paymentStatus === "refunded") return { orderId, status: "refunded" };
   if (order.paymentStatus !== "refunding") throw new Error("Transisi refund VPS tidak tersedia.");
-  if (order.paymentMethod !== "balance" && order.paymentMethod !== "qris") throw new Error("Bukti pembayaran untuk refund VPS tidak tersedia.");
-  const amount = order.paymentMethod === "qris" ? order.paymentInvoice?.amount : order.snapshot.price;
-  if (!amount || !Number.isSafeInteger(amount) || amount < 1 || (order.paymentMethod === "qris" && !order.paymentInvoice?.matchedTransactionId)) {
+  const freeInstall = order.paymentMethod === "invite" && order.service === "install" && Boolean(order.installInviteId);
+  if (!freeInstall && order.paymentMethod !== "balance" && order.paymentMethod !== "qris") throw new Error("Bukti pembayaran untuk refund VPS tidak tersedia.");
+  const amount = freeInstall ? 0 : order.paymentMethod === "qris" ? order.paymentInvoice?.amount : order.snapshot.price;
+  if (amount === undefined || !Number.isSafeInteger(amount) || (!freeInstall && amount < 1) || (order.paymentMethod === "qris" && !order.paymentInvoice?.matchedTransactionId)) {
     throw new Error("Bukti pembayaran untuk refund VPS tidak tersedia.");
   }
-  const effect = await applyWalletEffect(order, "refund", amount);
-  if (!effect) throw new Error("Refund VPS menunggu pemulihan wallet; pesanan tetap tercatat.");
+  if (!freeInstall) {
+    const effect = await applyWalletEffect(order, "refund", amount);
+    if (!effect) throw new Error("Refund VPS menunggu pemulihan wallet; pesanan tetap tercatat.");
+  }
   const updated = await VpsOrder.updateOne({ ...scope(orderId, order.buyerId), paymentStatus: "refunding" }, { $set: { paymentStatus: "refunded", refundedAt: new Date() } });
   if (updated.modifiedCount > 0) {
     void (async () => {

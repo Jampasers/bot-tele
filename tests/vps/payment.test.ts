@@ -3,6 +3,10 @@ import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { User } from "../../src/models/User.js";
 import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsInstallInvite } from "../../src/models/VpsInstallInvite.js";
+import { claimInstallInvite, createInstallInvite, requireInstallInvite, revokeInstallInvite, VpsInstallInviteError } from "../../src/vps/installInvites.js";
+import { ActivityLogService } from "../../src/services/activityLog.js";
+import { TestimonialService } from "../../src/services/testimonial.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { defaultVpsCatalog } from "../../src/vps/catalog.js";
@@ -56,7 +60,7 @@ function update(row: Row, change: Row): void {
 }
 function query<T>(load: () => T) {
   return {
-    lean: () => query(load), select: () => query(load), sort: () => query(load), limit: () => query(load),
+    lean: () => query(load), select: () => query(load), sort: () => query(load), limit: () => query(load), skip: () => query(load),
     then: <R>(resolve: (value: T) => R, reject?: (error: unknown) => R) => Promise.resolve().then(load).then(resolve, reject),
     cursor: async function* () { for (const row of load() as Row[]) yield row; },
   };
@@ -65,12 +69,13 @@ function database(t: TestContext, balance = 100_000) {
   t.mock.method(VpsCatalog, "findById", () => query(() => defaultVpsCatalog()));
   t.mock.method(VpsPlan, "findOne", () => query(() => null));
   const orders: Row[] = [];
+  const invites: Row[] = [];
   const users: Row[] = [{ tenantId: "platform", telegramId: "101", balance, totalOrders: 0, appliedVpsPaymentEffectIds: [] }];
   const claims: Row[] = [];
   const audit: Row[] = [];
   let failPaidOnce = false;
   let failRefundedOnce = false;
-  for (const [model, rows] of [[VpsOrder, orders], [User, users], [PaymentSettlementClaim, claims]] as const) {
+  for (const [model, rows] of [[VpsOrder, orders], [VpsInstallInvite, invites], [User, users], [PaymentSettlementClaim, claims]] as const) {
     t.mock.method(model, "findOne", (filter: Row) => query(() => structuredClone(rows.find(row => matches(row, filter)) ?? null)));
     t.mock.method(model, "find", (filter: Row) => query(() => structuredClone(rows.filter(row => matches(row, filter)))));
     t.mock.method(model, "findOneAndUpdate", (filter: Row, change: Row) => query(() => {
@@ -94,6 +99,11 @@ function database(t: TestContext, balance = 100_000) {
     if (claims.some(row => row._id === value._id)) throw Object.assign(new Error("duplicate"), { code: 11000 });
     claims.push(structuredClone(value)); return value;
   });
+  t.mock.method(VpsInstallInvite, "create", async (value: Row) => {
+    const invite = new VpsInstallInvite(value).toObject();
+    invites.push(invite);
+    return { toObject: () => invite };
+  });
   t.mock.method(PaymentSettlementClaim, "findById", (id: string) => query(() => structuredClone(claims.find(row => row._id === id) ?? null)));
   t.mock.method(PaymentAmountReservation, "findOneAndUpdate", async () => ({}));
   t.mock.method(BalanceLog, "create", async (value: Row) => { audit.push(value); return value; });
@@ -103,9 +113,115 @@ function database(t: TestContext, balance = 100_000) {
       snapshot: { price: 25_000, planName: "Basic" }, ...overrides };
     orders.push(order); return order as Row;
   };
-  return { orders, users, claims, audit, addOrder, failPaid: () => { failPaidOnce = true; }, failRefunded: () => { failRefundedOnce = true; } };
+  const addInvite = (orderId = randomUUID(), overrides: Row = {}) => {
+    const invite = { _id: "a".repeat(32), tenantId: "platform", createdBy: "900", recipientId: "101", sourceMode: "any", orderId,
+      claimedBy: "101", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000), ...overrides };
+    invites.push(invite); return invite;
+  };
+  return { orders, invites, users, claims, audit, addOrder, addInvite, failPaid: () => { failPaidOnce = true; }, failRefunded: () => { failRefundedOnce = true; } };
 }
 const platform = <T>(fn: () => Promise<T>) => runWithTenant(platformContext(), fn);
+
+test("free install invitation settles once, sends normal order logs and testimonial, and never touches wallet or QRIS", async t => {
+  const db = database(t, 0);
+  const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
+  const invite = db.addInvite(order._id);
+  const logs: any[] = [], testimonials: any[] = [];
+  t.mock.method(ActivityLogService, "getDefaultApi", () => ({}) as never);
+  t.mock.method(ActivityLogService, "logVpsOrder", async (_api, data) => { logs.push(data); return true; });
+  t.mock.method(TestimonialService, "sendVpsPurchaseTestimonial", async (_api, data) => { testimonials.push(data); return true; });
+  const results = await Promise.all(Array.from({ length: 8 }, () => platform(() => checkVpsPayment(order._id, "101"))));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.ok(results.every(result => result.status === "paid"));
+  assert.ok(invite.redeemedAt);
+  assert.equal(order.paymentStatus, "paid");
+  assert.equal(db.users[0]!.balance, 0);
+  assert.equal(db.users[0]!.totalOrders, 1);
+  assert.equal(db.users[0]!.appliedVpsPaymentEffectIds.length, 0);
+  assert.equal(db.audit.length, 0);
+  assert.equal(order.paymentInvoice, undefined);
+  assert.equal(logs.length, 1); assert.equal(testimonials.length, 1);
+  assert.equal(logs[0].totalPrice, 0); assert.equal(logs[0].catalogPrice, 25000);
+  assert.equal(logs[0].method, "Undangan Gratis");
+  assert.equal(testimonials[0].orderId, order._id); assert.equal(testimonials[0].totalPrice, 0);
+  assert.equal(testimonials[0].method, "Undangan Gratis");
+  await assert.rejects(platform(() => payVpsFromBalance(order._id, "101")), VpsInstallInviteError);
+  await assert.rejects(platform(() => createVpsInvoice(order._id, "101")), VpsInstallInviteError);
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "999")), /access denied/);
+});
+
+test("consumed free invitation survives interrupted payment, expiry and disabled catalog; cancellation refunds zero", async t => {
+  const db = database(t, 5000);
+  const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
+  const invite = db.addInvite(order._id);
+  const logs: any[] = [];
+  t.mock.method(ActivityLogService, "logVpsCancelled", async (_api, data) => { logs.push(data); return true; });
+  db.failPaid();
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), /interruption/);
+  assert.equal(order.paymentStatus, "paying"); assert.ok(invite.redeemedAt);
+  invite.expiresAt = new Date(0);
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ enabled: false })));
+  await platform(reconcileVpsPayments);
+  assert.equal(order.paymentStatus, "paid");
+  assert.equal(db.users[0]!.totalOrders, 1);
+  order.stage = "cancelled";
+  db.failRefunded();
+  await assert.rejects(platform(() => refundVpsOrder(order._id, "cancelled_before_create")), /interruption/);
+  await platform(reconcileVpsPayments);
+  await platform(() => refundVpsOrder(order._id, "cancelled_before_create"));
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(order.paymentStatus, "refunded");
+  assert.equal(db.users[0]!.balance, 5000);
+  assert.equal(db.audit.length, 0);
+  assert.equal(db.users[0]!.appliedVpsPaymentEffectIds.length, 0);
+  assert.equal(logs.length, 1); assert.equal(logs[0].refundAmount, 0);
+});
+
+test("expired, revoked, disabled, wrong-source and wrong-order invites cannot start free installs", async t => {
+  const db = database(t);
+  const order = db.addOrder({ service: "install", paymentMethod: "invite", installInviteId: "a".repeat(32) });
+  const invite = db.addInvite(order._id);
+  invite.revokedAt = new Date();
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
+  invite.revokedAt = null; invite.expiresAt = new Date(0);
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
+  invite.expiresAt = new Date(Date.now() + 86400_000); invite.sourceMode = "direct";
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
+  invite.sourceMode = "any";
+  await assert.rejects(platform(() => requireInstallInvite("101", invite._id, randomUUID(), "direct")), VpsInstallInviteError);
+  order.service = "purchase";
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
+  order.service = "install";
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ enabled: false })));
+  await assert.rejects(platform(() => checkVpsPayment(order._id, "101")), VpsInstallInviteError);
+  assert.equal(order.paymentStatus, "unpaid"); assert.equal(invite.redeemedAt, null);
+  assert.equal(db.users[0]!.balance, 100000);
+});
+
+test("invite creation and revocation require platform admin; claiming locks a link to one recipient and stable order", async t => {
+  const db = database(t);
+  const previous = process.env.ADMIN_ID, enabled = process.env.VPS_ENABLED;
+  process.env.ADMIN_ID = "900"; process.env.VPS_ENABLED = "true";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; if (enabled === undefined) delete process.env.VPS_ENABLED; else process.env.VPS_ENABLED = enabled; });
+  await assert.rejects(platform(() => createInstallInvite("101", { sourceMode: "any", days: 7 })), /admin/);
+  await assert.rejects(runWithTenant({ tenantId: "rental", rentalId: "rental" }, () => createInstallInvite("900", { sourceMode: "any", days: 7 })), /main bot/);
+  await assert.rejects(platform(() => createInstallInvite("900", { sourceMode: "direct", days: 7, recipientId: "@user" })), VpsInstallInviteError);
+  const created = await platform(() => createInstallInvite("900", { sourceMode: "any", days: 7 }));
+  assert.match(created.id, /^[a-f0-9]{32}$/); assert.equal(created.recipientId, null);
+  const results = await Promise.allSettled(["101", "102"].map(actor => platform(() => claimInstallInvite(actor, created.id))));
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  const claimed = await platform(() => claimInstallInvite("101", created.id));
+  assert.equal(claimed.orderId, created.orderId);
+  await assert.rejects(platform(() => revokeInstallInvite("101", created.id)), /admin/);
+  await platform(() => revokeInstallInvite("900", created.id));
+  await assert.rejects(platform(() => claimInstallInvite("101", created.id)), VpsInstallInviteError);
+  const targeted = await platform(() => createInstallInvite("900", { sourceMode: "direct", days: 1, recipientId: "101" }));
+  await assert.rejects(platform(() => claimInstallInvite("102", targeted.id)), VpsInstallInviteError);
+  await platform(() => claimInstallInvite("101", targeted.id));
+  const row = db.invites.find(item => item._id === targeted.id)!;
+  row.redeemedAt = new Date();
+  await assert.rejects(platform(() => revokeInstallInvite("900", targeted.id)), VpsInstallInviteError);
+});
 
 test("new balance payments and QRIS invoices are rejected before any money or method mutation when disabled", async t => {
   const db = database(t);

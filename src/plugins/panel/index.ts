@@ -316,6 +316,18 @@ const panelPlugin: Plugin = {
           referredBy,
         );
 
+        const installInvite = /^install_([a-f0-9]{32})$/.exec(payload);
+        if (installInvite) {
+          if (!hasVpsCatalog() || ctx.chat.type !== "private") {
+            await ctx.reply("Undangan Jasa Install hanya tersedia melalui chat pribadi bot utama saat layanan VPS aktif.");
+            return;
+          }
+          await ctx.reply("Kamu mendapat undangan Jasa Install gratis. Buka undangan untuk memilih VPS dan OS. Biaya VPS/akun DO tetap kamu tanggung.", {
+            reply_markup: new InlineKeyboard().text("Buka undangan gratis", `vps_invite_${installInvite[1]}`),
+          });
+          return;
+        }
+
         await ctx.reply(buildWelcomeText(user), {
           parse_mode: "HTML",
           reply_markup: buildMainMenuReplyKeyboard(),

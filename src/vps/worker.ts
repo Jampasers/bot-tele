@@ -63,6 +63,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   };
   if (deps.signal.aborted || order.paymentStatus !== "paid") return;
   const directInstall = order.service === "install" && !!order.sourceUsername;
+  const refundAction = order.paymentMethod === "invite" ? "penutupan order gratis" : "refund ke saldo buyer";
   const provisionAttempt = order.provisionAttempt ?? 1;
   const sshBootGraceMs = () => boundedEnv("VPS_SSH_BOOT_GRACE_SECONDS", 300, 60, 1800) * 1000;
   const sshStartedAt = () => order.sshStartedAt ?? order.stageStartedAt;
@@ -74,7 +75,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
     await deps.releaseCapacity();
     await deps.refund(reason);
     await save({ paymentStatus: "refunded", refundReason: reason,
-      evidence: `${order.evidence}\nPembayaran telah dikembalikan ke saldo buyer.` });
+      evidence: `${order.evidence}\n${order.paymentMethod === "invite" ? "Order undangan gratis ditutup. Tidak ada dana yang dikembalikan." : "Pembayaran telah dikembalikan ke saldo buyer."}` });
     deps.clearToken();
   };
   if (["failed", "cancelled"].includes(order.stage) && !order.dropletId && !order.createAttemptedAt) {
@@ -133,7 +134,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
       installerBootMode: null, installerImageUrl: null, installerLogUrl: null, rdpSuccesses: 0, resumeStage: null };
     if (provisionAttempt >= 3) {
       await stage("failed", { ...reset, provisionAttempt: 3, sshAttempts: 3, lastError: "ssh_retry_exhausted",
-        evidence: `Failed: SSH belum siap pada 3 VPS setelah masa boot (3 percobaan per VPS, total 9 percobaan).${sshDiagnostic()} Semua VPS telah dihapus. Refund ke saldo buyer diproses.` });
+        evidence: `Failed: SSH belum siap pada 3 VPS setelah masa boot (3 percobaan per VPS, total 9 percobaan).${sshDiagnostic()} Semua VPS telah dihapus. ${refundAction} diproses.` });
       await refundTerminal();
     } else {
       await stage("queued", { ...reset, provisionAttempt: provisionAttempt + 1, sshAttempts: 0, sshLastFailure: null, lastError: null,
@@ -249,7 +250,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
   if (order.stage === "ssh") {
     if (order.sshNextAttemptAt && deps.now() < order.sshNextAttemptAt.getTime()) return;
     if (!directInstall && (order.sshAttempts ?? 0) >= 3 && deps.now() - sshStartedAt().getTime() >= sshBootGraceMs()) {
-      await stage("replacing", { evidence: `SSH gagal 3 kali setelah masa boot pada VPS ${provisionAttempt}/3.${sshDiagnostic()} Menghapus VPS sebelum ${provisionAttempt >= 3 ? "refund ke saldo buyer" : "membuat VPS pengganti"}.` });
+      await stage("replacing", { evidence: `SSH gagal 3 kali setelah masa boot pada VPS ${provisionAttempt}/3.${sshDiagnostic()} Menghapus VPS sebelum ${provisionAttempt >= 3 ? refundAction : "membuat VPS pengganti"}.` });
       return;
     }
     const inspection = await deps.inspectSsh({ ip: order.publicIp, password: sourcePassword, username: sourceUsername,
@@ -289,7 +290,7 @@ export async function advanceVpsOrder(order: IVpsOrder, deps: VpsStepDependencie
         }
         const sshAttempts = (order.sshAttempts ?? 0) + 1;
         if (sshAttempts >= 3) await stage("replacing", { ...observation, sshAttempts: 3, replacementDeleteRequestedAt: null,
-          evidence: `SSH gagal 3 kali setelah masa boot pada VPS ${provisionAttempt}/3. ${detail} Menghapus VPS sebelum ${provisionAttempt >= 3 ? "refund ke saldo buyer" : "membuat VPS pengganti"}.` });
+          evidence: `SSH gagal 3 kali setelah masa boot pada VPS ${provisionAttempt}/3. ${detail} Menghapus VPS sebelum ${provisionAttempt >= 3 ? refundAction : "membuat VPS pengganti"}.` });
         else await save({ ...observation, sshAttempts, lastError: `ssh_${inspection.reason}`,
           evidence: `SSH belum siap setelah masa boot. ${detail} Percobaan ${sshAttempts}/3 pada VPS ${provisionAttempt}/3; mencoba SSH kembali.` });
       } else await save({ ...observation, ...(deps.now() - order.stageStartedAt.getTime() > 30 * 60_000 ? { stage: "review", resumeStage: "ssh" } : {}),

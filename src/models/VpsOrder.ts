@@ -7,7 +7,8 @@ export interface IVpsOrder {
   service: "purchase" | "install";
   snapshot: { planId: string; planName: string; size: string; region: string; os: string; image: string; price: number; vcpus: number; memory: number; disk: number; installChrome?: boolean };
   paymentStatus: "unpaid" | "paying" | "paid" | "refunding" | "refunded" | "cancelled";
-  paymentMethod: "balance" | "qris" | null; paymentPaidAt: Date | null;
+  paymentMethod: "balance" | "qris" | "invite" | null; paymentPaidAt: Date | null;
+  installInviteId?: string | null;
   statusMessageId?: number | null;
   paymentInvoice?: { reference: string; merchantId: string; amount: number; createdAt: Date; expiresAt: Date; matchedTransactionId?: string; paidAt?: Date };
   paymentInvoiceLeaseUntil: Date | null; refundReason: string | null; refundedAt: Date | null;
@@ -37,7 +38,8 @@ const schema = new Schema<IVpsOrder>({
   buyerId: { type: String, required: true }, chatId: { type: String, required: true }, service: { type: String, required: true, enum: ["purchase", "install"] },
   snapshot: { type: new Schema({ planId: String, planName: String, size: String, region: String, os: String, image: String, price: { type: Number, min: 1, required: true }, vcpus: Number, memory: Number, disk: Number, installChrome: { type: Boolean, default: false } }, { _id: false }), required: true, immutable: true },
   paymentStatus: { type: String, enum: ["unpaid", "paying", "paid", "refunding", "refunded", "cancelled"], default: "unpaid" },
-  paymentMethod: { type: String, enum: ["balance", "qris", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
+  paymentMethod: { type: String, enum: ["balance", "qris", "invite", null], default: null }, paymentPaidAt: { type: Date, default: null }, paymentInvoice: { type: invoice, default: undefined },
+  installInviteId: { type: String, default: null, immutable: true, match: /^[a-f0-9]{32}$/ },
   statusMessageId: { type: Number, default: null },
   paymentInvoiceLeaseUntil: { type: Date, default: null }, refundReason: { type: String, default: null }, refundedAt: { type: Date, default: null },
   stage: { type: String, enum: ["queued", "creating", "droplet", "ssh", "replacing", "installing", "rebooting", "monitoring", "ready", "needs_token", "review", "failed", "cancelled"], default: "queued" },

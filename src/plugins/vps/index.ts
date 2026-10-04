@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
 import { vpsService } from "../../vps/service.js";
-import type { AvailabilityMap, VpsServiceType, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "./contracts.js";
+import type { AvailabilityMap, VpsServiceType, VpsUiDependencies, VpsUiInstallInvite, VpsUiOrder, VpsUiPlan } from "./contracts.js";
 import { clearVpsInput, setVpsInput } from "./input.js";
 import { getOs } from "../../vps/installer.js";
 import { DIRECT_INSTALL_PLAN_ID, planPrice } from "../../vps/catalogPlans.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 import { DigitalOceanError } from "../../vps/digitalOcean.js";
 import { DEFAULT_DISABLED_MESSAGE, disabledVpsSelection, VpsSelectionDisabledError, type VpsAvailabilityRule } from "../../vps/availability.js";
+import { VpsInstallInviteError } from "../../vps/installInvites.js";
 
 interface Draft {
   id: string;
@@ -26,6 +27,7 @@ interface Draft {
   direct?: { ip: string; username: string; password: string };
   directMode?: boolean;
   availability?: AvailabilityMap;
+  installInviteId?: string;
 }
 
 function filterRegions(regions: string[], sizeSlug: string, availability?: AvailabilityMap): string[] {
@@ -42,6 +44,8 @@ const baseHomeKeyboard = (): InlineKeyboard => new InlineKeyboard()
 const homeKeyboard = (): InlineKeyboard => baseHomeKeyboard();
 const serviceLabel = (service: VpsServiceType): string => service === "install" ? "Jasa install" : "VPS DO";
 const feeNotice = "Pembayaran ke toko hanya biaya jasa install. Biaya DigitalOcean ditagihkan ke akun buyer dan menjadi tanggungan buyer.";
+const inviteNotice = "Undangan aktif: jasa install GRATIS. Biaya DigitalOcean/VPS tetap ditanggung kamu.";
+const draftPrice = (draft: Draft, price: number | null): string => draft.installInviteId && price !== null ? "Gratis (undangan)" : priceLabel(price);
 function pricedOs(plan: VpsUiPlan, region?: string, windowsOnly = false): VpsUiPlan["osPrices"] {
   return plan.osPrices.filter(os => !windowsOnly || (os.family ?? getOs(os.os)?.family) === "windows")
     .map(os => ({ ...os, price: region ? planPrice(plan, region, os.os) ?? null : os.price }));
@@ -61,15 +65,17 @@ function validInstallerLogUrl(order: VpsUiOrder): string | null {
 export function vpsOrderText(order: VpsUiOrder): string {
   const direct = order.serviceType === "install" && order.sourceMode === "direct";
   const chrome = order.installChrome ? "\nChrome: + Chrome (gratis)" : "";
+  const free = order.paymentMethod === "invite" ? "\nMetode: Undangan Gratis" : "";
   if (direct) {
     return `🛠️ Jasa Install Windows\n\nOrder: ${order._id}\nSumber: VPS milik buyer (Direct SSH)\nOS: ${order.os}${chrome}\nHarga jasa: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP VPS: ${order.ip || "belum tersedia"}`
-      + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "");
+      + free + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "");
   }
   return `🖥️ ${serviceLabel(order.serviceType)}\n\nOrder: ${order._id}\nPaket: ${order.planName}\nSpek: ${order.sizeSlug}\nOS: ${order.os}\nRegion: ${order.region}\n${order.serviceType === "install" ? "Harga jasa" : "Harga checkout"}: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP publik: ${order.ip || "belum tersedia"}`
     + (order.vcpus !== undefined && order.memory !== undefined && order.disk !== undefined ? `\nCPU: ${order.vcpus} vCPU · RAM: ${order.memory} MB · Disk: ${order.disk} GB` : "")
     + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "")
     + (order.provisionAttempt ? `\nPercobaan VPS: ${order.provisionAttempt}/3 · SSH: ${order.sshAttempts ?? 0}/3` : "")
     + chrome
+    + free
     + (order.needsToken || order.stage === "needs_token" ? "\n\nToken sementara tidak tersedia. Kirim ulang token akun/team yang sama untuk melanjutkan order ini." : "")
     + (order.serviceType === "install" ? `\n\n${feeNotice}` : "");
 }
@@ -102,6 +108,10 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       }
       try { await handler(ctx); }
       catch (err) {
+        if (err instanceof VpsInstallInviteError) {
+          await ctx.reply(err.message, { reply_markup: homeKeyboard() });
+          return;
+        }
         if (err instanceof VpsSelectionDisabledError) {
           const draft = drafts.get(actorOf(ctx));
           const keyboard = new InlineKeyboard();
@@ -169,7 +179,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
     keyboard.text("🔙 VPS", "vps_home");
-    const notice = draft.directMode
+    const notice = draft.installInviteId ? inviteNotice : draft.directMode
       ? "Pembayaran ke toko hanya biaya instalasi Windows. VPS disediakan oleh buyer."
       : draft.serviceType === "install" ? feeNotice : "";
     const stepLabel = draft.directMode ? "Pilih spek VPS milik kamu (minimal 1 core, RAM 2 GB, storage 50 GB):" : draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
@@ -200,7 +210,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan) throw new Error("Paket install belum tersedia.");
     const options = pricedOs(draft.plan, "external", true);
     const keyboard = new InlineKeyboard();
-    options.forEach((os, index) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, "external") ? "🚫 " : ""}${os.label} · ${os.price === null ? "Belum tersedia" : vpsPrice(os.price)}`, `vps_os_${draft.id}_${index}`).row());
+    options.forEach((os, index) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, "external") ? "🚫 " : ""}${os.label} · ${os.price === null ? "Belum tersedia" : draftPrice(draft, os.price)}`, `vps_os_${draft.id}_${index}`).row());
     keyboard.text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
     await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 2/6) Pilih Windows yang mau di-install.\nSpek: ${sizeLabel(draft.plan)}\nHarga di bawah adalah biaya jasa install saja. Pastikan spek VPS sesuai pilihan dan storage minimal 50 GB.`, keyboard);
   }
@@ -223,7 +233,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           ready.direct.password = password;
           const selectedOs = pricedOs(ready.plan, "external", true).find(item => item.os === ready.os);
           if (!selectedOs) throw new Error("OS tidak tersedia.");
-          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${priceLabel(selectedOs.price)}\n\n(Langkah 6/6) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
+          await vpsReply(passwordCtx, `🛠 Install Windows di VPS Buyer\n\nOS: ${selectedOs.label}\nIP: ${ready.direct.ip}\nUsername SSH: ${ready.direct.username}\nHarga jasa: ${draftPrice(ready, selectedOs.price)}\n\n(Langkah 6/6) Tambahkan Google Chrome? Gratis dan hanya dipasang jika dipilih.`, new InlineKeyboard()
             .text("Lanjut tanpa Chrome", `vps_chrome_${ready.id}_no`).row()
             .text("+ Chrome (Gratis)", `vps_chrome_${ready.id}_yes`).row()
             .text("🔙 Ganti OS", `vps_backos_${ready.id}`).text("Batal", "vps_home"));
@@ -236,7 +246,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       .text("🔙 Ganti OS", `vps_backos_${draft.id}`).text("Batal", "vps_home"));
   }
 
-  async function start(ctx: Context, serviceType: VpsServiceType, direct = false): Promise<void> {
+  async function start(ctx: Context, serviceType: VpsServiceType, direct = false, invite?: VpsUiInstallInvite): Promise<void> {
     if (!deps.enabled()) { await ctx.reply("Pemesanan VPS belum diaktifkan oleh admin.", { reply_markup: homeKeyboard() }); return; }
     const actor = actorOf(ctx);
     clearVpsInput(actor);
@@ -248,7 +258,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       : listedPlans;
     // Draft status updates must not mutate shared DTOs returned by a dependency.
     const draftPlans = plans.map(plan => ({ ...plan }));
-    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: draftPlans, rules: [], ...(direct ? { directMode: true } : {}) };
+    const draft: Draft = { id: invite?.orderId ?? randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: draftPlans, rules: [], ...(direct ? { directMode: true } : {}), ...(invite ? { installInviteId: invite.id } : {}) };
     drafts.set(actor, draft);
 
     if (direct) {
@@ -280,26 +290,30 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         await choosePlan(inputCtx, current);
       },
     });
-    await vpsReply(ctx, `🛠 Jasa Install · DigitalOcean Buyer\n\n${feeNotice}\n\n(Langkah 1/5) Kirim token DigitalOcean di chat pribadi ini. Pesan harus berhasil dihapus sebelum token divalidasi. Token hanya disimpan sementara di memori; jika sesi habis atau bot restart, kirim ulang token akun/team yang sama.\n\nKetik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vps_home"));
+    await vpsReply(ctx, `🛠 Jasa Install · DigitalOcean Buyer\n\n${invite ? inviteNotice : feeNotice}\n\n(Langkah 1/5) Kirim token DigitalOcean di chat pribadi ini. Pesan harus berhasil dihapus sebelum token divalidasi. Token hanya disimpan sementara di memori; jika sesi habis atau bot restart, kirim ulang token akun/team yang sama.\n\nKetik /batal untuk membatalkan.`, new InlineKeyboard().text("Batal", "vps_home"));
   }
   async function showOrder(ctx: Context, orderId: string): Promise<void> {
     const order = await deps.getOwned(actorOf(ctx), orderId);
     if (!order) { await ctx.reply("Pesanan tidak ditemukan.", { reply_markup: homeKeyboard() }); return; }
     const keyboard = new InlineKeyboard().text("🔄 Perbarui status", `vps_order_${order._id}`).row();
-    if (["unpaid", "paying"].includes(order.paymentStatus)) {
+    if (["unpaid", "paying"].includes(order.paymentStatus) && order.paymentMethod === "invite") {
+      keyboard.text("Mulai install gratis", `vps_check_${order._id}`).row();
+    } else if (["unpaid", "paying"].includes(order.paymentStatus)) {
       if (order.paymentMethod !== "qris") keyboard.text("💳 Bayar saldo", `vps_balance_${order._id}`);
       if (order.paymentMethod !== "balance") keyboard.text("📱 Bayar QRIS", `vps_qris_${order._id}`);
       keyboard.row();
       if (order.paymentStatus === "paying") keyboard.text("🔎 Cek pembayaran", `vps_check_${order._id}`).row();
     }
-    if (order.paymentStatus === "unpaid" || (order.paymentStatus === "paid" && !order.dropletId && ["queued", "needs_token", "failed"].includes(order.stage))) keyboard.text("Batalkan pesanan", `vps_cancel_${order._id}`).row();
+    if (order.paymentStatus === "unpaid" || (order.paymentMethod === "invite" && order.paymentStatus === "paying") || (order.paymentStatus === "paid" && !order.dropletId && ["queued", "needs_token", "failed"].includes(order.stage))) keyboard.text("Batalkan pesanan", `vps_cancel_${order._id}`).row();
     if (order.serviceType === "install" && order.sourceMode !== "direct" && !["ready", "failed", "cancelled"].includes(order.stage)) keyboard.text("🔑 Kirim ulang token", `vps_token_${order._id}`).row();
     if (order.paymentStatus === "paid" && order.ip && (order.dropletId || order.sourceMode === "direct")) keyboard.text("🔐 Lihat akses VPS", `vps_access_${order._id}`).row();
     const installerLogUrl = validInstallerLogUrl(order);
     if (installerLogUrl) keyboard.url("📄 Log installer", installerLogUrl).row();
     if (order.serviceType === "purchase" && order.dropletId && order.paymentStatus === "paid" && ["ready", "review"].includes(order.stage)) keyboard.text("🔄 Reboot/Restart", `vps_reboot_${order._id}`).row();
     keyboard.text("📋 Riwayat", "vps_history_0").text("🔙 VPS", "vps_home");
-    await vpsReply(ctx, vpsOrderText(order), keyboard);
+    const confirmation = order.paymentMethod === "invite" && order.paymentStatus === "unpaid"
+      ? "\n\nTekan Mulai install gratis untuk menjalankan order ini." + (order.sourceMode === "direct" ? " Install Windows akan mengganti OS dan menghapus data VPS. Pastikan backup sudah dibuat." : "") : "";
+    await vpsReply(ctx, vpsOrderText(order) + confirmation, keyboard);
   }
   async function checkout(ctx: Context, draft: Draft): Promise<void> {
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
@@ -316,7 +330,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     }
     const actor = actorOf(ctx);
     if (!draft.order) {
-      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.serviceType === "install" && !draft.directMode ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: { ...draft.direct } } : {}) });
+      draft.checkout ??= deps.checkout({ actorTelegramId: actor, chatId: String(ctx.chat!.id), requestId: draft.id, serviceType: draft.serviceType, planId: draft.plan.id, os: draft.os, region: draft.region, installChrome: draft.installChrome === true, ...(draft.installInviteId ? { installInviteId: draft.installInviteId } : {}), ...(draft.serviceType === "install" && !draft.directMode ? { buyerSessionId: draft.id } : {}), ...(draft.direct ? { direct: { ...draft.direct } } : {}) });
       try {
         draft.order = await draft.checkout;
         // Only clear password after a confirmed successful checkout, so retries still work.
@@ -351,6 +365,25 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const data = ctx.callbackQuery!.data!;
         const actor = actorOf(ctx);
         clearVpsInput(actor);
+        const invitation = /^vps_(?:invite|free_(do|direct))_([a-f0-9]{32})$/.exec(data);
+        if (invitation) {
+          const invite = await deps.claimInstallInvite(actor, invitation[2]!);
+          const existing = await deps.getOwned(actor, invite.orderId);
+          if (existing) { await showOrder(ctx, existing._id); return; }
+          if (invitation[1]) {
+            const direct = invitation[1] === "direct";
+            if (invite.sourceMode !== "any" && invite.sourceMode !== (direct ? "direct" : "digitalocean")) throw new VpsInstallInviteError("Sumber VPS tidak sesuai undangan.");
+            await start(ctx, "install", direct, invite);
+            return;
+          }
+          clearVpsInput(actor); dropDraft(actor);
+          const keyboard = new InlineKeyboard();
+          if (invite.sourceMode !== "direct") keyboard.text("Buat VPS di DO saya", `vps_free_do_${invite.id}`).row();
+          if (invite.sourceMode !== "digitalocean") keyboard.text("Install ke VPS saya (SSH)", `vps_free_direct_${invite.id}`).row();
+          keyboard.text("Batal", "vps_home");
+          await vpsReply(ctx, `Undangan Jasa Install Gratis\n\n${inviteNotice}\n\nBerlaku sampai: ${vpsDate(invite.expiresAt)}\nPilih sumber VPS kamu.`, keyboard);
+          return;
+        }
         if (data === "vps_home") { await showHome(ctx); return; }
         if (data === "vps_buy") { await start(ctx, "purchase"); return; }
         if (data === "vps_install") { await showInstallSources(ctx); return; }
@@ -377,7 +410,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             }
           });
           keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-          await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+          await vpsReply(ctx, `🖥️ ${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${draft.installInviteId ? inviteNotice : feeNotice}` : ""}`, keyboard);
           return;
         }
         const selection = /^vps_(plan|os|region)_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
@@ -409,7 +442,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
               }
             });
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(plan)}${plan.transfer ? `\nTransfer: ${plan.transfer}` : ""}${plan.providerPrice ? `\nBiaya dasar DigitalOcean: ${plan.providerPrice}` : ""}\n\n${draft.serviceType === "install" ? "(Langkah 3/5)" : "(Langkah 2/3)"} Pilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${draft.installInviteId ? inviteNotice : feeNotice}` : ""}`, keyboard);
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
@@ -421,9 +454,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             }
             delete draft.os;
             const keyboard = new InlineKeyboard();
-            pricedOs(draft.plan, region, Boolean(draft.directMode)).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, region) ? "🚫 " : ""}${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+            pricedOs(draft.plan, region, Boolean(draft.directMode)).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, region) ? "🚫 " : ""}${os.label} · ${draftPrice(draft, os.price)}`, `vps_os_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
-            await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n${draft.serviceType === "install" ? "(Langkah 4/5)" : "(Langkah 3/3)"} Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+            await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n${draft.serviceType === "install" ? "(Langkah 4/5)" : "(Langkah 3/3)"} Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${draft.installInviteId ? inviteNotice : feeNotice}` : ""}`, keyboard);
           } else {
             const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.directMode))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
@@ -451,7 +484,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
                 }
               });
               keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
-              await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
+              await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\nOS: ${os.label}\n\nPilih lokasi/region VPS:${draft.serviceType === "install" ? `\n\n${draft.installInviteId ? inviteNotice : feeNotice}` : ""}`, keyboard);
               return;
             }
             if ((os.family ?? getOs(os.os)?.family) === "windows") {
@@ -479,7 +512,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             return;
           }
           const keyboard = new InlineKeyboard();
-          pricedOs(draft.plan, draft.region, false).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, draft.region) ? "🚫 " : ""}${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+          pricedOs(draft.plan, draft.region, false).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, draft.region) ? "🚫 " : ""}${os.label} · ${draftPrice(draft, os.price)}`, `vps_os_${draft.id}_${i}`).row());
           keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
           await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(draft.region)}\n\nPilih Sistem Operasi (OS):`, keyboard);
           return;
@@ -520,13 +553,14 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           await ctx.replyWithPhoto(new InputFile(invoice.buffer, "vps-qris.png"), { caption: `Pembayaran VPS\nOrder: ${orderId}\nTotal: ${vpsPrice(invoice.amount)}\nBerlaku sampai: ${vpsDate(invoice.expiresAt)}\n\nBayar tepat sesuai nominal. Pembayaran diperiksa otomatis.`, reply_markup: new InlineKeyboard().text("Cek pembayaran", `vps_check_${orderId}`).row().text("Detail pesanan", `vps_order_${orderId}`) });
           return;
         } else if (action[1] === "check") {
+          const order = await deps.getOwned(actor, orderId);
           const result = await deps.checkPayment(actor, orderId);
-          const message = await ctx.reply(result.status === "paid" ? "Pembayaran terkonfirmasi. Pesanan diproses di background." : result.status === "expired" ? "Invoice kedaluwarsa. Periksa status order sebelum membuat pembayaran baru." : "Pembayaran belum terkonfirmasi; pemeriksaan otomatis tetap berjalan.");
+          const message = await ctx.reply(result.status === "paid" ? order?.paymentMethod === "invite" ? "Undangan gratis berhasil digunakan. Jasa install diproses di background; saldo tidak dipotong." : "Pembayaran terkonfirmasi. Pesanan diproses di background." : result.status === "expired" ? "Invoice kedaluwarsa. Periksa status order sebelum membuat pembayaran baru." : "Pembayaran belum terkonfirmasi; pemeriksaan otomatis tetap berjalan.");
           if (result.status === "paid") await deps.setStatusMessage?.(actor, orderId, message.message_id);
         } else if (action[1] === "cancel") {
           const order = await deps.getOwned(actor, orderId);
           if (!order) throw new Error("Order unavailable");
-          await vpsReply(ctx, `Batalkan pesanan ${orderId}?\n\n${order.paymentStatus === "paid" ? "Pembatalan dan refund hanya dapat diproses jika droplet belum dibuat dan pesanan memenuhi syarat pembatalan." : "Pesanan yang belum dibayar akan dibatalkan."}`, new InlineKeyboard().text("Ya, batalkan", `vps_canceldo_${orderId}`).row().text("Kembali", `vps_order_${orderId}`));
+          await vpsReply(ctx, `Batalkan pesanan ${orderId}?\n\n${order.paymentMethod === "invite" ? "Order undangan gratis bisa dibatalkan sebelum proses dimulai. Tidak ada dana yang dikembalikan dan undangan tetap untuk order ini saja." : order.paymentStatus === "paid" ? "Pembatalan dan refund hanya dapat diproses jika droplet belum dibuat dan pesanan memenuhi syarat pembatalan." : "Pesanan yang belum dibayar akan dibatalkan."}`, new InlineKeyboard().text("Ya, batalkan", `vps_canceldo_${orderId}`).row().text("Kembali", `vps_order_${orderId}`));
           return;
         } else if (action[1] === "canceldo") {
           await deps.cancel(actor, orderId);

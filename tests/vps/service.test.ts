@@ -3,6 +3,8 @@ import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { BuyerTokenVault, buyerTokens } from "../../src/vps/security.js";
 import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsInstallInvite } from "../../src/models/VpsInstallInvite.js";
+import { VpsInstallInviteError } from "../../src/vps/installInvites.js";
 import { VpsAccount, VpsCredential } from "../../src/models/VpsCredential.js";
 import { VpsPlan } from "../../src/models/VpsPlan.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
@@ -32,6 +34,31 @@ function env(t: TestContext): void {
   process.env.VPS_ENABLED = "true"; process.env.CREDENTIAL_ENCRYPTION_KEY = "ab".repeat(32);
   t.after(() => { for (const [name, value] of [["VPS_ENABLED", before.enabled], ["CREDENTIAL_ENCRYPTION_KEY", before.key]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } buyerTokens.clear(); });
 }
+
+test("invite checkout creates one encrypted install order with zero charge and immutable normal price", async t => {
+  env(t);
+  const id = randomUUID(), inviteId = "a".repeat(32);
+  let saved: IVpsOrder | null = null;
+  const base = directInstallPlans(defaultVpsCatalog())[0]!;
+  const plan = { ...base, _id: base.id, globalPrice: 15000 };
+  const invite = { _id: inviteId, tenantId: "platform", claimedBy: "101", recipientId: "101", orderId: id, sourceMode: "direct", redeemedAt: null, revokedAt: null, expiresAt: new Date(Date.now() + 86400_000) };
+  t.mock.method(VpsInstallInvite, "findOne", (filter: any) => query(() => filter.orderId === invite.orderId && filter.claimedBy === invite.claimedBy ? invite : null));
+  t.mock.method(VpsOrder, "findOne", () => query(() => saved));
+  t.mock.method(VpsPlan, "findOne", () => query(() => plan));
+  t.mock.method(VpsOrder, "create", async (input: Record<string, unknown>) => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
+  const input = { actorTelegramId: "101", chatId: "101", requestId: id, installInviteId: inviteId, serviceType: "install" as const, planId: plan._id,
+    os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "ubuntu", password: "synthetic-source-password" } };
+  await assert.rejects(platform(() => vpsService.checkout({ ...input, requestId: randomUUID() })), VpsInstallInviteError);
+  await assert.rejects(platform(() => vpsService.checkout({ ...input, serviceType: "purchase" })), VpsInstallInviteError);
+  const first = await platform(() => vpsService.checkout(input));
+  assert.equal(first.price, 0); assert.equal(first.catalogPrice, 15000);
+  assert.equal(first.paymentMethod, "invite"); assert.equal(first.paymentStatus, "unpaid");
+  assert.equal(saved!.snapshot.price, 15000); assert.equal(saved!.installInviteId, inviteId);
+  assert.doesNotMatch(JSON.stringify(first), /synthetic-source-password|passwordEncrypted|installInviteId/);
+  const second = await platform(() => vpsService.checkout(input));
+  assert.deepEqual(second, first);
+  assert.equal(BACKUP_COLLECTIONS.find(item => item.name === "vpsinstallinvites")?.exportOnly, true);
+});
 
 test("buyer token vault isolates buyer/order, expires absolutely, cannot serialize secrets, and clears at shutdown", async () => {
   let now = 1; const vault = new BuyerTokenVault(100, () => now);

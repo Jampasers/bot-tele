@@ -6,6 +6,10 @@ import { DigitalStock } from "../models/DigitalStock.js";
 import { TopupSession } from "../models/TopupSession.js";
 import { VpsOrder } from "../models/VpsOrder.js";
 
+// Invitation snapshots keep the normal catalog price for audit, but no money
+// was received. Order counts still include these installations.
+const vpsRevenueValue = { $cond: [{ $eq: ["$paymentMethod", "invite"] }, 0, "$snapshot.price"] };
+
 // ============================================================================
 //  Types & Interfaces for Statistics
 // ============================================================================
@@ -264,7 +268,7 @@ export class BotStatsService {
         {
           $group: {
             _id: null,
-            revenue: { $sum: "$snapshot.price" },
+            revenue: { $sum: vpsRevenueValue },
             orders: { $sum: 1 },
           },
         },
@@ -396,7 +400,7 @@ export class BotStatsService {
         {
           $group: {
             _id: null,
-            totalRev: { $sum: "$snapshot.price" },
+            totalRev: { $sum: vpsRevenueValue },
             count: { $sum: 1 },
           },
         },
@@ -406,7 +410,7 @@ export class BotStatsService {
         {
           $group: {
             _id: null,
-            totalRev: { $sum: "$snapshot.price" },
+            totalRev: { $sum: vpsRevenueValue },
             count: { $sum: 1 },
           },
         },

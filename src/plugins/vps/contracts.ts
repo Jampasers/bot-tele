@@ -26,7 +26,8 @@ export interface VpsUiOrder {
   serviceType: VpsServiceType;
   sourceMode?: "digitalocean" | "direct";
   paymentStatus: string;
-  paymentMethod?: "balance" | "qris" | null;
+  paymentMethod?: "balance" | "qris" | "invite" | null;
+  catalogPrice?: number;
   stage: string;
   provisionAttempt?: number;
   sshAttempts?: number;
@@ -73,7 +74,22 @@ export interface VpsUiCatalog {
   sizes: { slug: string; label: string }[];
   os: { id: string; label: string; family: "linux" | "windows" }[];
 }
+export interface VpsUiInstallInvite {
+  id: string;
+  recipientId: string | null;
+  sourceMode: "any" | "digitalocean" | "direct";
+  orderId: string;
+  claimedBy: string | null;
+  redeemedAt: Date | null;
+  revokedAt: Date | null;
+  expiresAt: Date;
+}
 export interface VpsUiDependencies {
+  createInstallInvite(actor: string, input: { recipientId?: string; sourceMode: VpsUiInstallInvite["sourceMode"]; days: number }): Promise<VpsUiInstallInvite>;
+  listInstallInvites(actor: string, offset: number): Promise<VpsUiInstallInvite[]>;
+  getInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite | null>;
+  revokeInstallInvite(actor: string, id: string): Promise<void>;
+  claimInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite>;
   enabled(): boolean;
   listOs(): { id: string; label: string; family?: "linux" | "windows" }[];
   listCatalog?(): Promise<VpsUiCatalog>;
@@ -95,7 +111,7 @@ export interface VpsUiDependencies {
    * Returns null if no active credential is configured or the DO API call fails.
    */
   fetchPlatformAvailability?(): Promise<AvailabilityMap | null>;
-  checkout(input: { actorTelegramId: string; chatId: string; requestId: string; serviceType: VpsServiceType; planId: string; os: string; region: string; installChrome?: boolean; buyerSessionId?: string; direct?: { ip: string; username: string; password: string } }): Promise<VpsUiOrder>;
+  checkout(input: { actorTelegramId: string; chatId: string; requestId: string; serviceType: VpsServiceType; planId: string; os: string; region: string; installChrome?: boolean; buyerSessionId?: string; installInviteId?: string; direct?: { ip: string; username: string; password: string } }): Promise<VpsUiOrder>;
   listOwned(actor: string, options: { purchaseOnly: boolean; offset: number; limit: number }): Promise<VpsUiOrder[]>;
   getOwned(actor: string, orderId: string): Promise<VpsUiOrder | null>;
   credentials(actor: string, orderId: string): Promise<{ ip: string; username: string; password: string; evidence: string }>;

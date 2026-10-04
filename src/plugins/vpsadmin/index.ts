@@ -9,6 +9,8 @@ import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
 import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setVpsWallpaperJpeg } from "../../vps/wallpaper.js";
 import { createAvailabilityAdmin } from "./availability.js";
+import { createInstallInviteAdmin } from "./installInvites.js";
+import { VpsInstallInviteError } from "../../vps/installInvites.js";
 
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
@@ -18,6 +20,7 @@ const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token
   .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🚫 Disable Spek / OS / Region", "vpa_availability").row()
+  .text("Undangan Jasa Install Gratis", "vpa_invites_0").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
   .text("🔙 Admin", "adm_home");
@@ -50,7 +53,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         return;
       }
       try { await handler(ctx); }
-      catch { await ctx.reply("Pengaturan VPS belum dapat diproses. Periksa input atau status akun dan coba kembali.", { reply_markup: homeKeyboard() }).catch(() => {}); }
+      catch (err) { await ctx.reply(err instanceof VpsInstallInviteError ? err.message : "Pengaturan VPS belum dapat diproses. Periksa input atau status akun dan coba kembali.", { reply_markup: homeKeyboard() }).catch(() => {}); }
     };
   }
   function input(actor: string, receive: (ctx: Context, value: string) => Promise<void>, secret = false): void {
@@ -64,6 +67,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     wallpaperUploads.delete(actorOf(ctx));
     await vpsReply(ctx, `🖥️ Admin VPS DigitalOcean\n\nPemesanan baru: ${deps.enabled() ? "aktif" : "nonaktif (VPS_ENABLED)"}\n\nAtur token toko dan harga dari database. Token buyer hanya berada sementara di memori dan tidak ditampilkan pada admin.\n\nPemeriksaan akun menggunakan GET tanpa membuat droplet percobaan.`, homeKeyboard());
   }
+  const installInviteAdmin = createInstallInviteAdmin(deps, input);
   async function wallpaperMenu(ctx: Context): Promise<void> {
     const status = await getVpsWallpaperStatus();
     const source = status.custom ? "Custom dari admin" : "Default bawaan bot (Wallpaper.png)";
@@ -301,7 +305,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         : "🖥️ VPS DigitalOcean (Akun Toko)";
 
     const invoiceAmount = order.paymentInvoice?.amount;
-    const priceDisplay = invoiceAmount ? `${vpsPrice(invoiceAmount)} (QRIS)` : vpsPrice(order.snapshot.price);
+    const priceDisplay = order.paymentMethod === "invite" ? `${vpsPrice(0)} (Undangan Gratis; harga normal ${vpsPrice(order.snapshot.price)})` : invoiceAmount ? `${vpsPrice(invoiceAmount)} (QRIS)` : vpsPrice(order.snapshot.price);
 
     const sourceDetail = isDirect
       ? `Target: VPS milik buyer (Direct SSH)\n` +
@@ -394,6 +398,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         clearVpsInput(actor);
         wallpaperUploads.delete(actor);
         if (data.startsWith("vpa_av")) { await availabilityAdmin(ctx, data); return; }
+        if (data.startsWith("vpa_inv")) { await installInviteAdmin(ctx, data); return; }
         if (data === "vpa_home") { await home(ctx); return; }
         if (data === "vpa_wallpaper") { await wallpaperMenu(ctx); return; }
         if (data === "vpa_wallpaper_set") { await beginWallpaperUpload(ctx); return; }

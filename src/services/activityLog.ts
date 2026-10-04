@@ -293,6 +293,7 @@ export interface VpsOrderLogData {
   sourceMode?: "digitalocean" | "direct" | undefined;
   publicIp?: string | undefined;
   totalPrice: number;
+  catalogPrice?: number | undefined;
   method: "SALDO" | "QRIS" | string;
   buyer: LogUserInfo;
   remainingBalance?: number | undefined;
@@ -1477,6 +1478,7 @@ export class ActivityLogService {
       osLine +
       ipLine +
       `💰 <b>Total Biaya:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
+      (data.catalogPrice !== undefined ? `🏷️ <b>Harga Normal Jasa:</b> ${formatPrice(data.catalogPrice)}\n` : "") +
       `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method)}</code>\n` +
       remainingLine +
       `🆔 <b>Order ID:</b> <code>${escapeHtml(data.orderId)}</code>\n` +
