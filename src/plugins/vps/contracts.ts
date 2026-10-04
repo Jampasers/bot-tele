@@ -1,6 +1,7 @@
 /** sizeSlug → Set of regionSlugs that support that size on a specific DO account. */
 export type AvailabilityMap = Map<string, Set<string>>;
 /** Sanitized UI contracts. Tokens and decrypted passwords never occur in order/list DTOs. */
+import type { VpsAvailabilityInput, VpsAvailabilityRule } from "../../vps/availability.js";
 export type VpsServiceType = "purchase" | "install";
 export interface VpsUiPlan {
   id: string;
@@ -67,11 +68,19 @@ export interface VpsUiCredential {
   lastCreateResult?: string | null;
   lastCreateAt?: Date | string | null;
 }
+export interface VpsUiCatalog {
+  regions: { slug: string; name: string; country: string }[];
+  sizes: { slug: string; label: string }[];
+  os: { id: string; label: string; family: "linux" | "windows" }[];
+}
 export interface VpsUiDependencies {
   enabled(): boolean;
   listOs(): { id: string; label: string; family?: "linux" | "windows" }[];
-  listCatalog?(): Promise<{ regions: { slug: string; name: string; country: string }[]; sizes: { slug: string; label: string }[]; os: { id: string; label: string; family: "linux" | "windows" }[] }>;
+  listCatalog?(): Promise<VpsUiCatalog>;
   addCatalogEntry?(actor: string, input: { kind: "region" | "size" | "os"; value: string[] }): Promise<void>;
+  listAvailabilityRules(): Promise<VpsAvailabilityRule[]>;
+  saveAvailabilityRule(actor: string, input: VpsAvailabilityInput): Promise<VpsAvailabilityRule>;
+  updateAvailabilityRule(actor: string, id: string, input: { enabled?: boolean; message?: string }): Promise<void>;
   listPlans(serviceType?: VpsServiceType, includeDisabled?: boolean): Promise<VpsUiPlan[]>;
   acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }>;
   clearBuyerToken(actor: string, orderId: string): void;
@@ -107,4 +116,3 @@ export interface VpsUiDependencies {
   adminCancelOrder?(actor: string, orderId: string): Promise<{ status: "cancelled" | "refunded" }>;
   adminResolveOrder?(actor: string, orderId: string, resolution: "ready" | "failed"): Promise<void>;
 }
-

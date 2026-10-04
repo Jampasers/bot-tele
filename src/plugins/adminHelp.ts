@@ -116,7 +116,7 @@ const ADMIN_HELP_SECTIONS: Readonly<Record<AdminHelpSectionId, AdminHelpSection>
       "<code>/unban &lt;telegramId&gt;</code>",
       "<code>/rental</code> — kelola paket dan bot rental",
       "<code>/cancelrental</code> — batalkan/hentikan bot rental",
-      "<code>/vpsadmin</code> — token DigitalOcean, pemeriksaan akun, paket & harga VPS",
+      "<code>/vpsadmin</code> — token DigitalOcean, harga VPS, disable spek/OS/region & pesan",
       "<code>/vps</code> — katalog VPS, jasa install dan riwayat pesanan",
     ],
   },

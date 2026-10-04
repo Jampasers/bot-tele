@@ -11,6 +11,7 @@ import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
 import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
+import { DEFAULT_DISABLED_MESSAGE, type VpsAvailabilityRule, type VpsAvailabilityInput } from "../../../src/vps/availability.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
@@ -56,6 +57,7 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   });
   const deps: Partial<VpsUiDependencies> = {
     enabled: () => true, listOs: () => [{ id: "windows2022", label: "Windows Server 2022" }],
+    listAvailabilityRules: async () => [],
     listPlans: async serviceType => serviceType === "purchase" ? [PLAN] : [PLAN, DIRECT_PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
     checkout: async () => ORDER, getOwned: async () => ORDER, listOwned: async () => [ORDER],
     listCredentials: async () => [], ...overrides,
@@ -63,6 +65,123 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   await (options.admin ? createVpsAdminPlugin(deps) : createVpsPlugin(deps)).register(bot);
   return { bot, calls };
 }
+
+test("admin disable wizard covers every scope, custom messages, reenable and message edits", async t => {
+  const previous = process.env.ADMIN_ID;
+  process.env.ADMIN_ID = "42";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  const catalog = { regions: [{ slug: "sgp1", name: "Singapore", country: "Singapore" }],
+    sizes: [{ slug: PLAN.sizeSlug, label: "1 CPU / 2 GB" }], os: [{ id: "windows2022", label: "Windows 2022", family: "windows" as const }] };
+  const cases: { kind: VpsAvailabilityRule["kind"]; scope?: string; size: string | null; os: string | null }[] = [
+    { kind: "size", size: null, os: null },
+    { kind: "os", scope: "all", size: null, os: null }, { kind: "os", scope: "size", size: PLAN.sizeSlug, os: null },
+    { kind: "region", scope: "all", size: null, os: null }, { kind: "region", scope: "os", size: null, os: "windows2022" },
+    { kind: "region", scope: "size", size: PLAN.sizeSlug, os: null }, { kind: "region", scope: "both", size: PLAN.sizeSlug, os: "windows2022" },
+  ];
+  for (const scenario of cases) {
+    const rules: VpsAvailabilityRule[] = [];
+    let saved: VpsAvailabilityInput | undefined;
+    const { bot, calls } = await harness({ listCatalog: async () => catalog, listAvailabilityRules: async () => structuredClone(rules),
+      saveAvailabilityRule: async (actor, input) => { assert.equal(actor, "42"); saved = input; const rule = { ...input, id: "a".repeat(24), enabled: true }; rules.push(rule); return rule; },
+      updateAvailabilityRule: async (actor, id, input) => { assert.equal(actor, "42"); assert.equal(id, rules[0]!.id); Object.assign(rules[0]!, input); },
+    }, { admin: true });
+    let id = 0;
+    await bot.handleUpdate(update(++id, "/vpsadmin"));
+    assert.match(JSON.stringify(calls), /vpa_availability/);
+    await bot.handleUpdate(update(++id, `vpa_avnew_${scenario.kind}`, true));
+    const target = callback(calls, "vpa_avpick_");
+    await bot.handleUpdate(update(++id, target, true));
+    if (scenario.scope) {
+      const token = /^vpa_avpick_([a-f0-9]{8})_/.exec(target)![1]!;
+      await bot.handleUpdate(update(++id, `vpa_avscope_${token}_${scenario.scope}`, true));
+      if (scenario.os) await bot.handleUpdate(update(++id, callback(calls, `vpa_avpick_${token}_os_`), true));
+      if (scenario.size) await bot.handleUpdate(update(++id, callback(calls, `vpa_avpick_${token}_size_`), true));
+    }
+    assert.equal(saved, undefined, "Nothing persists before the admin supplies a message");
+    await bot.handleUpdate(update(++id, "Maintenance hari ini"));
+    assert.deepEqual(saved, { kind: scenario.kind, target: scenario.kind === "size" ? PLAN.sizeSlug : scenario.kind === "os" ? "windows2022" : "sgp1",
+      size: scenario.size, os: scenario.os, message: "Maintenance hari ini" });
+    assert.match(replies(calls), /Maintenance hari ini/);
+    await bot.handleUpdate(update(++id, callback(calls, "vpa_avtoggle_"), true));
+    assert.equal(rules[0]!.enabled, false);
+    await bot.handleUpdate(update(++id, callback(calls, "vpa_avmessage_"), true));
+    await bot.handleUpdate(update(++id, "-"));
+    assert.equal(rules[0]!.message, DEFAULT_DISABLED_MESSAGE);
+    await bot.handleUpdate(update(++id, callback(calls, "vpa_avtoggle_"), true));
+    assert.equal(rules[0]!.enabled, true);
+    for (const call of calls) {
+      const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+      assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
+    }
+  }
+});
+
+test("nonadmins and rental bots cannot read or change disable rules", async t => {
+  const previous = process.env.ADMIN_ID;
+  process.env.ADMIN_ID = "42";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  let reads = 0, writes = 0;
+  const overrides = { listAvailabilityRules: async () => { reads++; return []; }, updateAvailabilityRule: async () => { writes++; } };
+  for (const tenant of [platformContext(), { tenantId: "rental", rentalId: "rental" }]) {
+    const { bot } = await harness(overrides, { admin: true, tenant });
+    await bot.handleUpdate(update(1, "vpa_availability", true, tenant.rentalId ? 42 : 999));
+    await bot.handleUpdate(update(2, `vpa_avtoggle_${"a".repeat(24)}_1`, true, tenant.rentalId ? 42 : 999));
+  }
+  assert.equal(reads, 0); assert.equal(writes, 0);
+});
+
+test("disabled choices stay visible and show custom messages; live rules block stale buyer callbacks", async () => {
+  let rules: VpsAvailabilityRule[] = [];
+  let checkouts = 0;
+  const disabled: VpsAvailabilityRule = { id: "a".repeat(24), kind: "size", target: PLAN.sizeSlug, size: null, os: null, message: "Spek sedang maintenance", enabled: true };
+  const { bot, calls } = await harness({ listAvailabilityRules: async () => structuredClone(rules), checkout: async () => { checkouts++; return ORDER; } });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  const plan = callback(calls, "vps_plan_");
+  rules = [{ ...disabled }];
+  await bot.handleUpdate(update(2, plan, true));
+  assert.match(replies(calls), /Spek sedang maintenance/);
+  await bot.handleUpdate(update(3, callback(calls, "vps_page_"), true));
+  assert.match(JSON.stringify(calls.at(-1)), /🚫/);
+  rules[0]!.enabled = false;
+  await bot.handleUpdate(update(4, plan, true));
+  rules = [{ ...disabled, kind: "region", target: "sgp1", size: PLAN.sizeSlug, os: "windows2022", message: "Windows SG sementara off" }];
+  await bot.handleUpdate(update(5, callback(calls, "vps_region_"), true));
+  assert.match(JSON.stringify(calls.at(-1)), /🚫.*Windows Server/);
+  const os = callback(calls, "vps_os_");
+  await bot.handleUpdate(update(6, os, true));
+  assert.match(replies(calls), /Windows SG sementara off/);
+  assert.equal(checkouts, 0);
+  rules = [];
+  await bot.handleUpdate(update(7, os, true));
+  const chrome = callback(calls, "vps_chrome_");
+  rules = [{ ...disabled, kind: "os", target: "windows2022", message: "OS disabled just before checkout" }];
+  await bot.handleUpdate(update(8, chrome, true));
+  assert.match(replies(calls), /OS disabled just before checkout/);
+  assert.equal(checkouts, 0);
+  rules = [];
+  await bot.handleUpdate(update(9, chrome, true));
+  assert.equal(checkouts, 1);
+});
+
+test("direct buyer VPS installation also respects global OS disable rules", async () => {
+  let checkouts = 0;
+  const { bot, calls } = await harness({ listAvailabilityRules: async () => [{ id: "b".repeat(24), kind: "os", target: "windows2022", size: null, os: null,
+    message: "Windows installer sedang diperbaiki", enabled: true }], checkout: async () => { checkouts++; return ORDER; } });
+  await bot.handleUpdate(update(1, "vps_install_direct", true));
+  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+  assert.match(JSON.stringify(calls.at(-1)), /🚫.*Windows Server/);
+  await bot.handleUpdate(update(3, callback(calls, "vps_os_"), true));
+  assert.match(replies(calls), /Windows installer sedang diperbaiki/);
+  assert.equal(checkouts, 0);
+});
+
+test("legacy disabled specs remain visible with a default disable message", async () => {
+  const { bot, calls } = await harness({ listPlans: async (_service, includeDisabled) => includeDisabled ? [{ ...PLAN, enabled: false }] : [] });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  assert.match(JSON.stringify(calls.at(-1)), /🚫/);
+  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+  assert.match(replies(calls), /dinonaktifkan oleh admin/);
+});
 
 test("VPS catalog is visible only when enabled on the platform", async t => {
   const previous = process.env["VPS_ENABLED"];

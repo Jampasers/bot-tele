@@ -7,6 +7,7 @@ import { generatePlatformQris, getPlatformPaymentClients } from "../payments/pla
 import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../payments/paymentLedger.service.js";
 import { ActivityLogService } from "../services/activityLog.js";
 import { TestimonialService } from "../services/testimonial.js";
+import { assertVpsOrderAcceptsNewPayment } from "./availability.js";
 
 export type VpsBalanceResult =
   | { status: "paid"; orderId: string; remainingBalance: number }
@@ -151,6 +152,7 @@ async function applyWalletEffect(order: IVpsOrder, kind: "debit" | "refund", amo
 
 export async function payVpsFromBalance(orderId: string, buyerId: string): Promise<VpsBalanceResult> {
   let order = await loadOrder(orderId, buyerId);
+  await assertVpsOrderAcceptsNewPayment(order);
   const wallet = await User.findOne({ telegramId: buyerId, tenantId: PLATFORM_TENANT_ID }).select("balance").lean();
   if (order.paymentStatus === "paid") return { status: "paid", orderId, remainingBalance: wallet?.balance ?? 0 };
   // A normal insufficient-balance result does not choose a method, allowing QRIS.
@@ -174,7 +176,9 @@ export async function payVpsFromBalance(orderId: string, buyerId: string): Promi
 }
 
 export async function createVpsInvoice(orderId: string, buyerId: string) {
-  let order = await claimMethod(await loadOrder(orderId, buyerId), "qris");
+  let order = await loadOrder(orderId, buyerId);
+  await assertVpsOrderAcceptsNewPayment(order);
+  order = await claimMethod(order, "qris");
   if (order.paymentStatus === "paid") throw new Error("Pesanan VPS sudah dibayar.");
   if (!order.paymentInvoice) {
     const now = new Date();

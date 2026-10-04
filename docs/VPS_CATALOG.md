@@ -6,6 +6,51 @@ Di `/vpsadmin`, pilih **Harga per spek / region / OS**, pilih layanan dan spek, 
 
 Menu **Katalog OS/region/spek** menerima tambahan satu field per pesan. Entri baru langsung ditampilkan dalam menu; tidak perlu membuat paket bernama atau menyalin semua kombinasi. Harga dan status tersimpan di `vpsplans`; pilihan katalog tersimpan di `vpscatalogs`. Order lama tetap memakai snapshot checkout.
 
+## Disable spek, OS, dan region
+
+Buka `/vpsadmin` → **Disable Spek / OS / Region** (juga tersedia di menu katalog).
+Pilih jenis dan target, tentukan cakupan, lalu kirim pesan disable maksimal 500
+karakter. Kirim `-` untuk pesan bawaan. Aturan baru disimpan setelah pesan
+dikirim; `/batal` membatalkan input.
+
+| Jenis | Cakupan |
+| --- | --- |
+| Spek | Satu spek untuk semua OS dan region |
+| OS global | Satu OS untuk semua spek dan region |
+| OS per spek | Satu OS untuk satu spek, semua region |
+| Region global | Satu region untuk semua OS dan spek |
+| Region per OS | Satu region dan satu OS, semua spek |
+| Region per spek | Satu region dan satu spek, semua OS |
+| Region per OS + spek | Satu region untuk pasangan OS dan spek tertentu |
+
+Aturan berlaku pada VPS DO dan jasa install DO buyer. Disable spek/OS juga
+berlaku pada install melalui SSH di VPS milik buyer; aturan region tidak
+berlaku pada VPS eksternal. Cakupan global mencakup entri katalog baru juga.
+
+Pilihan nonaktif tetap tampil dengan tanda 🚫 dan menampilkan pesan aturan
+saat dipilih. Karena region dipilih sebelum OS, aturan region yang dibatasi
+pada OS tertentu diperiksa ketika OS dipilih. User bisa mengganti pilihan
+tanpa membuat pembayaran. Aturan dibaca ulang saat memilih dan checkout,
+termasuk dari tombol sesi lama. Backend juga memeriksa sebelum checkout,
+pemotongan saldo baru, dan pembuatan invoice QRIS baru.
+
+Buka aturan dari daftar untuk **Aktifkan kembali pilihan**, **Disable lagi**,
+atau **Ubah pesan disable**. Aturan untuk target/cakupan yang sama memperbarui
+aturan yang sudah ada. Bila beberapa aturan cocok, pesan paling spesifik
+dipakai. Mematikan satu aturan tidak membatalkan aturan lain yang masih aktif
+atau status spek nonaktif dari menu harga.
+
+Pesanan yang sudah dibayar, invoice QRIS yang sudah terbit, dan pembayaran
+saldo yang sudah dimulai tetap diselesaikan agar rekonsiliasi pembayaran
+tidak terganggu. Disable mengatur pembelian baru; tidak menghapus VPS atau
+membatalkan pesanan yang sedang diproses.
+
+Konfigurasi tersimpan pada `vpscatalogs.availabilityRules` dan ikut dalam
+ekspor backup katalog. Katalog lama tanpa field ini dianggap tidak memiliki
+aturan; tidak perlu migrasi atau reset katalog. Build dan restart bot setelah
+memperbarui source. Perubahan aturan berikutnya berlaku langsung tanpa restart.
+Reset katalog yang sengaja dijalankan operator juga mengosongkan aturan disable.
+
 ## Penggantian paket lama
 
 `npm.cmd run vps:reset-catalog` hanya memeriksa database dari `.env` dan menampilkan fingerprint konfigurasi. Untuk reset yang sudah disetujui operator:

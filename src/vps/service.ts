@@ -7,6 +7,7 @@ import { encryptSecret, decryptSecret } from "../services/crypto.js";
 import { DigitalOceanClient } from "./digitalOcean.js";
 import { OS_CATALOG, getOs, generatePassword } from "./installer.js";
 import { defaultVpsCatalog, getVpsCatalog } from "./catalog.js";
+import { assertVpsSelectionAvailable, listVpsAvailabilityRules, saveVpsAvailabilityRule, updateVpsAvailabilityRule, VpsSelectionDisabledError } from "./availability.js";
 import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOBAL_PRICE_ID, catalogPlans, directInstallPlan, directInstallPlans, supportsWindows, mergeCatalogPrices, planPrice } from "./catalogPlans.js";
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
@@ -49,7 +50,9 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
   const catalog = await getVpsCatalog();
-  const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType, enabled: true }).lean();
+  const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType }).lean();
+  if (plan) assertVpsSelectionAvailable(catalog.availabilityRules ?? [], { size: plan.sizeSlug, os: input.os, region: input.region });
+  if (plan?.enabled === false) throw new VpsSelectionDisabledError();
   const serviceGlobal = plan?.serviceType === "install"
     ? await VpsPlan.findOne({ _id: input.direct ? INSTALL_DIRECT_GLOBAL_PRICE_ID : INSTALL_DO_GLOBAL_PRICE_ID, tenantId: "platform" }).lean()
     : null;
@@ -187,6 +190,9 @@ async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
 
 export const vpsService: VpsUiDependencies = {
   enabled: vpsEnabled,
+  listAvailabilityRules: listVpsAvailabilityRules,
+  saveAvailabilityRule: saveVpsAvailabilityRule,
+  updateAvailabilityRule: updateVpsAvailabilityRule,
   listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name, family: os.family })),
   async listCatalog() {
     assertVpsPlatform();
