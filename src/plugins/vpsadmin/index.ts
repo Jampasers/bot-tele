@@ -8,6 +8,7 @@ import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "..
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
 import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setVpsWallpaperJpeg } from "../../vps/wallpaper.js";
+import { createAvailabilityAdmin } from "./availability.js";
 
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
@@ -16,6 +17,7 @@ const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token
   .text("💰 Global Jasa Install VPS Buyer", `vpa_global_service_${INSTALL_DIRECT_GLOBAL_PRICE_ID}`).row()
   .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
+  .text("🚫 Disable Spek / OS / Region", "vpa_availability").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
   .text("🔙 Admin", "adm_home");
@@ -196,7 +198,8 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     const catalog = await deps.listCatalog?.();
     if (!catalog) throw new Error("Katalog belum tersedia");
     await vpsReply(ctx, `🧩 Katalog VPS\n\nRegion: ${catalog.regions.length}\nSpek: ${catalog.sizes.length}\nOS: ${catalog.os.length}\n\nEntri baru langsung tersedia di menu pembeli. Atur harga kombinasinya melalui menu harga.`, new InlineKeyboard()
-      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row().text("🔙 Admin VPS", "vpa_home"));
+      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row()
+      .text("🚫 Disable Spek / OS / Region", "vpa_availability").row().text("🔙 Admin VPS", "vpa_home"));
   }
   async function addCatalog(ctx: Context, kind: "region" | "size" | "os"): Promise<void> {
     if (!deps.addCatalogEntry) throw new Error("Catalog unavailable");
@@ -218,6 +221,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     }
     await prompt(ctx, 0);
   }
+  const availabilityAdmin = createAvailabilityAdmin(deps, input);
 
   type VpsOrderFilter = "all" | "paid" | "ready" | "review" | "unpaid";
 
@@ -343,7 +347,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   return {
     name: "vpsadmin", version: "1.0.0", internalOnly: true,
     commands: [
-      { command: "vpsadmin", description: "[Admin] Token DigitalOcean dan harga VPS" },
+      { command: "vpsadmin", description: "[Admin] Token DO, harga dan disable spek/OS/region" },
       { command: "vpswallpaper", description: "[Admin] Wallpaper instalasi Windows" },
     ],
     register(bot: Bot<Context>): void {
@@ -389,6 +393,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const actor = actorOf(ctx);
         clearVpsInput(actor);
         wallpaperUploads.delete(actor);
+        if (data.startsWith("vpa_av")) { await availabilityAdmin(ctx, data); return; }
         if (data === "vpa_home") { await home(ctx); return; }
         if (data === "vpa_wallpaper") { await wallpaperMenu(ctx); return; }
         if (data === "vpa_wallpaper_set") { await beginWallpaperUpload(ctx); return; }

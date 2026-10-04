@@ -8,12 +8,14 @@ import { getOs } from "../../vps/installer.js";
 import { DIRECT_INSTALL_PLAN_ID, planPrice } from "../../vps/catalogPlans.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 import { DigitalOceanError } from "../../vps/digitalOcean.js";
+import { DEFAULT_DISABLED_MESSAGE, disabledVpsSelection, VpsSelectionDisabledError, type VpsAvailabilityRule } from "../../vps/availability.js";
 
 interface Draft {
   id: string;
   serviceType: VpsServiceType;
   expiresAt: number;
   plans: VpsUiPlan[];
+  rules: VpsAvailabilityRule[];
   accountId?: string;
   plan?: VpsUiPlan;
   os?: string;
@@ -100,6 +102,16 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       }
       try { await handler(ctx); }
       catch (err) {
+        if (err instanceof VpsSelectionDisabledError) {
+          const draft = drafts.get(actorOf(ctx));
+          const keyboard = new InlineKeyboard();
+          if (draft?.plan && draft.region) keyboard.text("Ganti OS", `vps_backos_${draft.id}`).row();
+          if (draft?.plan && !draft.directMode) keyboard.text("Ganti Region", `vps_backregion_${draft.id}`).row();
+          if (draft) keyboard.text("Ganti Spek", `vps_page_${draft.id}_0`).row();
+          keyboard.text("🔙 VPS", "vps_home");
+          await ctx.reply(`🚫 ${err.message}`, { reply_markup: keyboard });
+          return;
+        }
         const ref = randomUUID();
         if (err instanceof Error && err.message === "Expired VPS selection") {
           console.warn("[VPS_SESSION_EXPIRED]", ref);
@@ -150,8 +162,9 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     await vpsReply(ctx, `🖥️ VPS & Jasa Install\n\n• VPS DO: beli VPS dari akun toko.\n• Jasa Install: buat VPS dari akun DigitalOcean kamu atau install Windows ke VPS yang sudah kamu punya.\n\n${deps.enabled() ? "" : "Pemesanan baru sementara dinonaktifkan."}`, homeKeyboard());
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
+    await refreshRules(draft);
     const keyboard = new InlineKeyboard();
-    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(sizeLabel(plan), `vps_plan_${draft.id}_${index + offset}`).row());
+    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${disabledMessage(draft, plan) ? "🚫 " : ""}${sizeLabel(plan)}`, `vps_plan_${draft.id}_${index + offset}`).row());
     if (offset) keyboard.text("← Sebelumnya", `vps_page_${draft.id}_${Math.max(0, offset - 10)}`);
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
@@ -161,6 +174,19 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       : draft.serviceType === "install" ? feeNotice : "";
     const stepLabel = draft.directMode ? "Pilih spek VPS milik kamu (minimal 1 core, RAM 2 GB, storage 50 GB):" : draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
     await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? stepLabel : "Belum ada paket aktif. Hubungi admin."}${notice ? `\n\n${notice}` : ""}`, keyboard);
+  }
+  async function refreshRules(draft: Draft): Promise<void> {
+    draft.rules = await deps.listAvailabilityRules();
+    const plans = await deps.listPlans(draft.serviceType, true);
+    for (const plan of draft.plans) plan.enabled = plans.find(current => current.id === plan.id)?.enabled ?? false;
+  }
+  function disabledMessage(draft: Draft, plan: VpsUiPlan, os?: string, region?: string): string | undefined {
+    return disabledVpsSelection(draft.rules, { size: plan.sizeSlug, ...(os ? { os } : {}), ...(region ? { region } : {}) })?.message
+      ?? (plan.enabled ? undefined : DEFAULT_DISABLED_MESSAGE);
+  }
+  function requireAvailable(draft: Draft, plan: VpsUiPlan, os?: string, region?: string): void {
+    const message = disabledMessage(draft, plan, os, region);
+    if (message) throw new VpsSelectionDisabledError(message);
   }
   async function showInstallSources(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
@@ -174,7 +200,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     if (!draft.plan) throw new Error("Paket install belum tersedia.");
     const options = pricedOs(draft.plan, "external", true);
     const keyboard = new InlineKeyboard();
-    options.forEach((os, index) => keyboard.text(`${os.label} · ${os.price === null ? "Belum tersedia" : vpsPrice(os.price)}`, `vps_os_${draft.id}_${index}`).row());
+    options.forEach((os, index) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, "external") ? "🚫 " : ""}${os.label} · ${os.price === null ? "Belum tersedia" : vpsPrice(os.price)}`, `vps_os_${draft.id}_${index}`).row());
     keyboard.text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
     await vpsReply(ctx, `🛠 Install Windows di VPS Buyer\n\n${notice ? `${notice}\n\n` : ""}(Langkah 2/6) Pilih Windows yang mau di-install.\nSpek: ${sizeLabel(draft.plan)}\nHarga di bawah adalah biaya jasa install saja. Pastikan spek VPS sesuai pilihan dan storage minimal 50 GB.`, keyboard);
   }
@@ -216,11 +242,13 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     clearVpsInput(actor);
     dropDraft(actor);
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
-    const listedPlans = await deps.listPlans(serviceType);
+    const listedPlans = await deps.listPlans(serviceType, true);
     const plans = serviceType === "install"
       ? listedPlans.filter(plan => direct ? plan.sourceMode === "direct" : plan.sourceMode !== "direct" && plan.id !== DIRECT_INSTALL_PLAN_ID)
       : listedPlans;
-    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans, ...(direct ? { directMode: true } : {}) };
+    // Draft status updates must not mutate shared DTOs returned by a dependency.
+    const draftPlans = plans.map(plan => ({ ...plan }));
+    const draft: Draft = { id: randomUUID(), serviceType, expiresAt: Date.now() + 15 * 60_000, plans: draftPlans, rules: [], ...(direct ? { directMode: true } : {}) };
     drafts.set(actor, draft);
 
     if (direct) {
@@ -275,6 +303,10 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function checkout(ctx: Context, draft: Draft): Promise<void> {
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
+    if (!draft.order) {
+      await refreshRules(draft);
+      requireAvailable(draft, draft.plan, draft.os, draft.region);
+    }
     if (!planPrice(draft.plan, draft.region, draft.os)) {
       await vpsReply(ctx, draft.directMode
         ? "Harga jasa untuk OS ini belum diatur admin. Belum ada tagihan yang dibuat."
@@ -329,6 +361,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const backRegion = /^vps_backregion_([a-f0-9-]{36})$/.exec(data);
         if (backRegion) {
           const draft = currentDraft(actor, backRegion[1]!);
+          await refreshRules(draft);
           if (!draft.plan) throw new Error("Unknown plan");
           delete draft.region; delete draft.os;
           const regions = filterRegions(draft.plan.regions, draft.plan.sizeSlug, draft.availability);
@@ -340,7 +373,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           const keyboard = new InlineKeyboard();
           draft.plan.regions.forEach((region, i) => {
             if (regions.includes(region)) {
-              keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row();
+              keyboard.text(`${disabledMessage(draft, draft.plan!, undefined, region) ? "🚫 " : ""}${regionLabel(draft.plan!, region)}`, `vps_region_${draft.id}_${i}`).row();
             }
           });
           keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
@@ -350,10 +383,12 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const selection = /^vps_(plan|os|region)_([a-f0-9-]{36})_(\d{1,3})$/.exec(data);
         if (selection) {
           const draft = currentDraft(actor, selection[2]!);
+          await refreshRules(draft);
           const index = Number(selection[3]);
           if (selection[1] === "plan") {
             const plan = draft.plans[index];
             if (!plan) throw new Error("Unknown plan");
+            requireAvailable(draft, plan);
             draft.plan = plan;
             delete draft.region; delete draft.os;
             if (draft.directMode) {
@@ -370,7 +405,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             const keyboard = new InlineKeyboard();
             plan.regions.forEach((region, i) => {
               if (regions.includes(region)) {
-                keyboard.text(regionLabel(plan, region), `vps_region_${draft.id}_${i}`).row();
+                keyboard.text(`${disabledMessage(draft, plan, undefined, region) ? "🚫 " : ""}${regionLabel(plan, region)}`, `vps_region_${draft.id}_${i}`).row();
               }
             });
             keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
@@ -378,6 +413,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
+            requireAvailable(draft, draft.plan, draft.os, region);
             draft.region = region;
             if (draft.os) {
               await checkout(ctx, draft);
@@ -385,12 +421,13 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             }
             delete draft.os;
             const keyboard = new InlineKeyboard();
-            pricedOs(draft.plan, region, Boolean(draft.directMode)).forEach((os, i) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+            pricedOs(draft.plan, region, Boolean(draft.directMode)).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, region) ? "🚫 " : ""}${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
             keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
             await vpsReply(ctx, `🖥️ ${sizeLabel(draft.plan)}\n📍 Lokasi: ${regionLabel(draft.plan, region)}\n\n${draft.serviceType === "install" ? "(Langkah 4/5)" : "(Langkah 3/3)"} Pilih Sistem Operasi (OS):${draft.serviceType === "install" ? `\n\n${feeNotice}` : ""}`, keyboard);
           } else {
             const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.directMode))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
+            requireAvailable(draft, draft.plan, os.os, draft.region);
             if (os.price === null) {
               if (draft.directMode) {
                 await showDirectOs(ctx, draft, `❌ ${os.label} belum tersedia karena harga jasa belum diatur.`);
@@ -410,7 +447,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
               const keyboard = new InlineKeyboard();
               draft.plan.regions.forEach((region, i) => {
                 if (regions.includes(region)) {
-                  keyboard.text(regionLabel(draft.plan!, region), `vps_region_${draft.id}_${i}`).row();
+                  keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, region) ? "🚫 " : ""}${regionLabel(draft.plan!, region)}`, `vps_region_${draft.id}_${i}`).row();
                 }
               });
               keyboard.row().text("🔙 Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
@@ -433,6 +470,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
         const backOs = /^vps_backos_([a-f0-9-]{36})$/.exec(data);
         if (backOs) {
           const draft = currentDraft(actor, backOs[1]!);
+          await refreshRules(draft);
           if (!draft.plan || !draft.region) throw new Error("Unknown selection");
           if (draft.direct) draft.direct.password = "";
           delete draft.direct; delete draft.os; delete draft.installChrome;
@@ -441,7 +479,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
             return;
           }
           const keyboard = new InlineKeyboard();
-          pricedOs(draft.plan, draft.region, false).forEach((os, i) => keyboard.text(`${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
+          pricedOs(draft.plan, draft.region, false).forEach((os, i) => keyboard.text(`${disabledMessage(draft, draft.plan!, os.os, draft.region) ? "🚫 " : ""}${os.label} · ${priceLabel(os.price)}`, `vps_os_${draft.id}_${i}`).row());
           keyboard.row().text("🔙 Ganti Region", `vps_backregion_${draft.id}`).text("Batal", "vps_home");
           await vpsReply(ctx, `${draft.plan.name} · ${formatSize(draft.plan.sizeSlug)}\n📍 Lokasi: ${formatRegion(draft.region)}\n\nPilih Sistem Operasi (OS):`, keyboard);
           return;

@@ -102,7 +102,10 @@ test("same user conversational state is tenant-specific, including clear and ite
   assert.throws(() => values.get("user"), /Tenant context/);
 });
 
-test("real plugin loader excludes internal handlers and dynamically gates rental plan features", async () => {
+test("real plugin loader excludes internal handlers and dynamically gates rental plan features", async t => {
+  // Discovery logs are not asserted. Keep non-ASCII logs out of Node 22's test IPC stream:
+  // https://github.com/nodejs/node/issues/65934
+  t.mock.method(console, "log", () => {});
   const context: TenantContext = { tenantId: "loader_test", rentalId: "loader_test", ownerTelegramId: "100", enabledFeatures: [] };
   const bot = new Bot("100:offline-plugin-test-token", { botInfo: {
     id: 100, username: "loader_test_bot", is_bot: true, first_name: "Test", can_join_groups: true,

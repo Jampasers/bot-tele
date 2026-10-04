@@ -3,6 +3,10 @@ import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
 import { User } from "../../src/models/User.js";
 import { VpsOrder } from "../../src/models/VpsOrder.js";
+import { VpsCatalog } from "../../src/models/VpsCatalog.js";
+import { VpsPlan } from "../../src/models/VpsPlan.js";
+import { defaultVpsCatalog } from "../../src/vps/catalog.js";
+import { VpsSelectionDisabledError } from "../../src/vps/availability.js";
 import { VpsAccount } from "../../src/models/VpsCredential.js";
 import { VpsWorker } from "../../src/vps/worker.js";
 import { BalanceLog } from "../../src/models/BalanceLog.js";
@@ -58,6 +62,8 @@ function query<T>(load: () => T) {
   };
 }
 function database(t: TestContext, balance = 100_000) {
+  t.mock.method(VpsCatalog, "findById", () => query(() => defaultVpsCatalog()));
+  t.mock.method(VpsPlan, "findOne", () => query(() => null));
   const orders: Row[] = [];
   const users: Row[] = [{ tenantId: "platform", telegramId: "101", balance, totalOrders: 0, appliedVpsPaymentEffectIds: [] }];
   const claims: Row[] = [];
@@ -100,6 +106,21 @@ function database(t: TestContext, balance = 100_000) {
   return { orders, users, claims, audit, addOrder, failPaid: () => { failPaidOnce = true; }, failRefunded: () => { failRefundedOnce = true; } };
 }
 const platform = <T>(fn: () => Promise<T>) => runWithTenant(platformContext(), fn);
+
+test("new balance payments and QRIS invoices are rejected before any money or method mutation when disabled", async t => {
+  const db = database(t);
+  const order = db.addOrder({ snapshot: { planId: "plan", price: 25000, size: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" } });
+  t.mock.method(VpsCatalog, "findById", () => query(() => ({ ...defaultVpsCatalog(), availabilityRules: [{
+    id: "a".repeat(24), kind: "os", target: "windows2022", size: null, os: null, message: "Maintenance Windows", enabled: true,
+  }] })));
+  await assert.rejects(platform(() => payVpsFromBalance(order._id, "101")), error => error instanceof VpsSelectionDisabledError && error.message === "Maintenance Windows");
+  await assert.rejects(platform(() => createVpsInvoice(order._id, "101")), VpsSelectionDisabledError);
+  assert.equal(db.users[0]!.balance, 100000);
+  assert.equal(order.paymentStatus, "unpaid");
+  assert.equal(order.paymentMethod, null);
+  assert.equal(order.paymentInvoice, undefined);
+  assert.equal(db.audit.length, 0);
+});
 
 test("concurrent balance callbacks debit once and an interrupted order update recovers without another debit", async t => {
   const db = database(t); const order = db.addOrder(); db.failPaid();

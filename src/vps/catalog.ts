@@ -1,5 +1,6 @@
 import { VpsCatalog } from "../models/VpsCatalog.js";
 import { registerOs } from "./installer.js";
+import type { VpsAvailabilityRule } from "./availability.js";
 
 export const DEFAULT_REGIONS = [
   ["nyc1", "New York 1", "USA"], ["nyc2", "New York 2", "USA"], ["nyc3", "New York 3", "USA"], ["ams3", "Amsterdam", "Netherlands"],
@@ -23,6 +24,7 @@ export const DEFAULT_OS = [
 
 export interface VpsCatalogData {
   _id: string;
+  availabilityRules?: VpsAvailabilityRule[];
   regions: { slug: string; name: string; country: string }[];
   sizes: { slug: string; cpu: number; ram: string; disk: string; transfer: string; price: string }[];
   os: { key: string; name: string; slug: string; family: "linux" | "windows"; installerImage?: string | null; windowsImageName?: string | null }[];
@@ -40,5 +42,5 @@ export async function getVpsCatalog(): Promise<VpsCatalogData> {
     const image = entry.installerImage || (entry.family === "windows" ? "ubuntu-24-04-x64" : entry.slug);
     registerOs({ key: entry.key, name: entry.name, family: entry.family, image, ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });
   }
-  return catalog;
+  return { ...catalog, availabilityRules: (catalog.availabilityRules ?? []).map(rule => ({ ...rule, size: rule.size ?? null, os: rule.os ?? null })) };
 }
