@@ -90,6 +90,7 @@ export interface VpsUiDependencies {
   getInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite | null>;
   revokeInstallInvite(actor: string, id: string): Promise<void>;
   claimInstallInvite(actor: string, id: string): Promise<VpsUiInstallInvite>;
+  findClaimedInstallInvite(actor: string, sourceMode?: "digitalocean" | "direct"): Promise<VpsUiInstallInvite | null>;
   enabled(): boolean;
   listOs(): { id: string; label: string; family?: "linux" | "windows" }[];
   listCatalog?(): Promise<VpsUiCatalog>;

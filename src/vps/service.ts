@@ -12,7 +12,7 @@ import { DIRECT_INSTALL_PLAN_ID, INSTALL_DO_GLOBAL_PRICE_ID, INSTALL_DIRECT_GLOB
 import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEnabled } from "./security.js";
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
-import { claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite, requireInstallInvite, VpsInstallInviteError } from "./installInvites.js";
+import { claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite, requireInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "./installInvites.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
 
 const validId = (id: string): boolean => /^[a-f0-9-]{36}$/.test(id);
@@ -50,6 +50,13 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (!validId(input.requestId) || !/^\d{1,20}$/.test(input.actorTelegramId) || input.chatId !== input.actorTelegramId) throw new Error("Checkout hanya melalui chat pribadi.");
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
+  if (input.serviceType === "install" && !input.installInviteId) {
+    const claimed = await findClaimedInstallInvite(input.actorTelegramId, input.direct ? "direct" : "digitalocean");
+    if (claimed) {
+      if (claimed.orderId !== input.requestId) throw new VpsInstallInviteError("Kamu punya undangan gratis yang sudah diklaim. Buka menu Jasa Install lagi untuk melanjutkan tanpa pembayaran.");
+      input = { ...input, installInviteId: claimed.id };
+    }
+  }
   if (input.installInviteId) {
     if (input.serviceType !== "install") throw new VpsInstallInviteError("Undangan hanya berlaku untuk Jasa Install.");
     await requireInstallInvite(input.actorTelegramId, input.installInviteId, input.requestId, input.direct ? "direct" : "digitalocean");
@@ -199,7 +206,7 @@ async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
 }
 
 export const vpsService: VpsUiDependencies = {
-  claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite,
+  claimInstallInvite, createInstallInvite, getInstallInvite, listInstallInvites, revokeInstallInvite, findClaimedInstallInvite,
   enabled: vpsEnabled,
   listAvailabilityRules: listVpsAvailabilityRules,
   saveAvailabilityRule: saveVpsAvailabilityRule,
