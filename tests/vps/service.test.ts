@@ -310,3 +310,18 @@ test("checkout rejects old Windows prices on undersized specs before contacting 
   t.mock.method(DigitalOceanClient.prototype, "account", async () => { throw new Error("Should not contact DO"); });
   await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(), serviceType: "purchase", planId: base.id, os: "windows2022", region: "sgp1" }), /minimal/));
 });
+
+test("checkout rejects a newly disabled combination before contacting provider or creating order", async t => {
+  env(t);
+  const plan = { _id: randomUUID(), name: "Basic", serviceType: "purchase", enabled: true, sizeSlug: "s-1vcpu-2gb", regions: ["sgp1"], osPrices: [{ os: "windows2022", label: "Windows", price: 25000 }] };
+  t.mock.method(VpsCatalog, "findById", () => query(() => ({ ...defaultVpsCatalog(), disabledRules: { rule: { kind: "region", region: "sgp1", size: plan.sizeSlug, os: "windows2022", message: "SG Windows unavailable" } } })));
+  t.mock.method(VpsOrder, "findOne", () => query(() => null));
+  t.mock.method(VpsPlan, "findOne", () => query(() => plan));
+  let effects = 0;
+  t.mock.method(VpsCredential, "find", () => { effects++; throw new Error("Unexpected provider access"); });
+  t.mock.method(VpsOrder, "create", async () => { effects++; throw new Error("Unexpected order"); });
+  await platform(async () => {
+    await assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(), serviceType: "purchase", planId: plan._id, os: "windows2022", region: "sgp1" }), /SG Windows unavailable/);
+    assert.equal(effects, 0);
+  });
+});

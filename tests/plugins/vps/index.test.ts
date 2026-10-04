@@ -55,6 +55,7 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
     return next();
   });
   const deps: Partial<VpsUiDependencies> = {
+    assertSelectionEnabled: async () => {},
     enabled: () => true, listOs: () => [{ id: "windows2022", label: "Windows Server 2022" }],
     listPlans: async serviceType => serviceType === "purchase" ? [PLAN] : [PLAN, DIRECT_PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
     checkout: async () => ORDER, getOwned: async () => ORDER, listOwned: async () => [ORDER],
@@ -615,4 +616,54 @@ test("admin sets global prices for each service and can clear combination overri
       assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
     }
   }
+});
+
+test("disabled selections show the configured message and cannot proceed using old buttons", async () => {
+  const { VpsDisabledError } = await import("../../../src/vps/availability.js");
+  let blocked = "size", checkouts = 0;
+  const { bot, calls } = await harness({
+    assertSelectionEnabled: async selection => {
+      if ((blocked === "size" && selection.size) || (blocked === "region" && selection.region) || (blocked === "os" && selection.os)) throw new VpsDisabledError(`Maintenance ${blocked}`);
+    },
+    checkout: async () => { checkouts++; return ORDER; },
+  });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  const plan = callback(calls, "vps_plan_");
+  await bot.handleUpdate(update(2, plan, true));
+  assert.match(replies(calls), /Maintenance size/);
+  blocked = "region";
+  await bot.handleUpdate(update(3, plan, true));
+  const region = callback(calls, "vps_region_");
+  await bot.handleUpdate(update(4, region, true));
+  assert.match(replies(calls), /Maintenance region/);
+  blocked = "os";
+  await bot.handleUpdate(update(5, region, true));
+  await bot.handleUpdate(update(6, callback(calls, "vps_os_"), true));
+  assert.match(replies(calls), /Maintenance os/);
+  assert.equal(checkouts, 0);
+});
+
+test("admin region wizard saves scoped rule/message and enables by stable rule id", async t => {
+  const previous = process.env.ADMIN_ID; process.env.ADMIN_ID = "42";
+  t.after(() => { if (previous === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = previous; });
+  const saved: any[] = [], removed: string[] = [];
+  const id = "a".repeat(24);
+  const { bot, calls } = await harness({
+    listCatalog: async () => ({ sizes: [{ slug: "s-1vcpu-2gb", label: "2 GB" }], os: [{ id: "windows2022", label: "Windows", family: "windows" }], regions: [{ slug: "sgp1", name: "Singapore", country: "SG" }] }),
+    listDisableRules: async () => saved.map(rule => ({ ...rule, id })),
+    setDisableRule: async (_actor, rule) => { saved.push(rule); },
+    removeDisableRule: async (_actor, ruleId) => { removed.push(ruleId); },
+  }, { admin: true });
+  await bot.handleUpdate(update(1, "vpa_disable_region", true));
+  await bot.handleUpdate(update(2, callback(calls, "vpa_disable_pick_"), true));
+  const osCallback = callback(calls, "vpa_disable_pick_").replace(/_0$/, "_1");
+  await bot.handleUpdate(update(3, osCallback, true));
+  // Scope: one OS, all sizes.
+  await bot.handleUpdate(update(4, callback(calls, "vpa_disable_pick_"), true));
+  await bot.handleUpdate(update(5, "Singapore Windows maintenance"));
+  assert.deepEqual(saved, [{ kind: "region", region: "sgp1", os: "windows2022", message: "Singapore Windows maintenance" }]);
+  await bot.handleUpdate(update(6, `vpa_enable_rule_${id}`, true));
+  assert.deepEqual(removed, [id]);
+  await bot.handleUpdate(update(7, `vpa_enable_rule_${id}`, true, 99));
+  assert.equal(removed.length, 1);
 });

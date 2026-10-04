@@ -1,3 +1,4 @@
+import type { VpsDisableRule } from "./availability.js";
 import { VpsCatalog } from "../models/VpsCatalog.js";
 import { registerOs } from "./installer.js";
 
@@ -23,6 +24,7 @@ export const DEFAULT_OS = [
 
 export interface VpsCatalogData {
   _id: string;
+  disabledRules?: Record<string, VpsDisableRule>;
   regions: { slug: string; name: string; country: string }[];
   sizes: { slug: string; cpu: number; ram: string; disk: string; transfer: string; price: string }[];
   os: { key: string; name: string; slug: string; family: "linux" | "windows"; installerImage?: string | null; windowsImageName?: string | null }[];
@@ -40,5 +42,8 @@ export async function getVpsCatalog(): Promise<VpsCatalogData> {
     const image = entry.installerImage || (entry.family === "windows" ? "ubuntu-24-04-x64" : entry.slug);
     registerOs({ key: entry.key, name: entry.name, family: entry.family, image, ...(entry.windowsImageName ? { windowsImageName: entry.windowsImageName } : {}) });
   }
-  return catalog;
+  return { ...catalog, disabledRules: Object.fromEntries(Object.entries(catalog.disabledRules ?? {}).map(([id, rule]) => [id, {
+    kind: rule.kind, message: rule.message,
+    ...(rule.size ? { size: rule.size } : {}), ...(rule.os ? { os: rule.os } : {}), ...(rule.region ? { region: rule.region } : {}),
+  }])) };
 }

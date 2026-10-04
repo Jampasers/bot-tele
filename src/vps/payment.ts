@@ -1,3 +1,4 @@
+import { assertSelectionEnabled } from "./availability.js";
 import { User } from "../models/User.js";
 import { BalanceLog } from "../models/BalanceLog.js";
 import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
@@ -39,6 +40,7 @@ async function loadOrder(orderId: string, buyerId?: string): Promise<IVpsOrder> 
 
 async function claimMethod(order: IVpsOrder, method: "balance" | "qris"): Promise<IVpsOrder> {
   if (order.paymentStatus === "unpaid") {
+    await assertSelectionEnabled({ size: order.snapshot.size, os: order.snapshot.os, region: order.snapshot.region });
     await VpsOrder.updateOne({ ...scope(order._id, order.buyerId), paymentStatus: "unpaid", stage: { $in: ["queued", "needs_token"] }, paymentMethod: null }, {
       $set: { paymentStatus: "paying", paymentMethod: method },
     });

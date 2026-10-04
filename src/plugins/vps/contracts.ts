@@ -1,3 +1,4 @@
+import type { VpsDisableRule, VpsSelection } from "../../vps/availability.js";
 /** sizeSlug → Set of regionSlugs that support that size on a specific DO account. */
 export type AvailabilityMap = Map<string, Set<string>>;
 /** Sanitized UI contracts. Tokens and decrypted passwords never occur in order/list DTOs. */
@@ -69,6 +70,10 @@ export interface VpsUiCredential {
 }
 export interface VpsUiDependencies {
   enabled(): boolean;
+  assertSelectionEnabled(selection: VpsSelection): Promise<void>;
+  listDisableRules(actor: string): Promise<(VpsDisableRule & { id: string })[]>;
+  setDisableRule(actor: string, rule: VpsDisableRule): Promise<void>;
+  removeDisableRule(actor: string, id: string): Promise<void>;
   listOs(): { id: string; label: string; family?: "linux" | "windows" }[];
   listCatalog?(): Promise<{ regions: { slug: string; name: string; country: string }[]; sizes: { slug: string; label: string }[]; os: { id: string; label: string; family: "linux" | "windows" }[] }>;
   addCatalogEntry?(actor: string, input: { kind: "region" | "size" | "os"; value: string[] }): Promise<void>;

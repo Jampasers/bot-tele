@@ -1,3 +1,4 @@
+import { VpsDisabledError } from "../../vps/availability.js";
 import { randomUUID } from "node:crypto";
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
@@ -100,6 +101,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       }
       try { await handler(ctx); }
       catch (err) {
+        if (err instanceof VpsDisabledError) { await ctx.reply(err.message); return; }
         const ref = randomUUID();
         if (err instanceof Error && err.message === "Expired VPS selection") {
           console.warn("[VPS_SESSION_EXPIRED]", ref);
@@ -275,6 +277,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function checkout(ctx: Context, draft: Draft): Promise<void> {
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
+    await deps.assertSelectionEnabled({ size: draft.plan.sizeSlug, os: draft.os, region: draft.region });
     if (!planPrice(draft.plan, draft.region, draft.os)) {
       await vpsReply(ctx, draft.directMode
         ? "Harga jasa untuk OS ini belum diatur admin. Belum ada tagihan yang dibuat."
@@ -354,6 +357,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (selection[1] === "plan") {
             const plan = draft.plans[index];
             if (!plan) throw new Error("Unknown plan");
+            await deps.assertSelectionEnabled({ size: plan.sizeSlug });
             draft.plan = plan;
             delete draft.region; delete draft.os;
             if (draft.directMode) {
@@ -378,6 +382,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
+            await deps.assertSelectionEnabled({ size: draft.plan.sizeSlug, region, ...(draft.os ? { os: draft.os } : {}) });
             draft.region = region;
             if (draft.os) {
               await checkout(ctx, draft);
@@ -391,6 +396,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           } else {
             const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.directMode))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
+            await deps.assertSelectionEnabled({ size: draft.plan.sizeSlug, os: os.os, ...(draft.region ? { region: draft.region } : {}) });
             if (os.price === null) {
               if (draft.directMode) {
                 await showDirectOs(ctx, draft, `❌ ${os.label} belum tersedia karena harga jasa belum diatur.`);
