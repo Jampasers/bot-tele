@@ -1,5 +1,6 @@
 import { VpsCatalog } from "../models/VpsCatalog.js";
 import { registerOs } from "./installer.js";
+import type { VpsDisableRule } from "./availability.js";
 
 export const DEFAULT_REGIONS = [
   ["nyc1", "New York 1", "USA"], ["nyc2", "New York 2", "USA"], ["nyc3", "New York 3", "USA"], ["ams3", "Amsterdam", "Netherlands"],
@@ -23,6 +24,7 @@ export const DEFAULT_OS = [
 
 export interface VpsCatalogData {
   _id: string;
+  disableRules?: VpsDisableRule[];
   regions: { slug: string; name: string; country: string }[];
   sizes: { slug: string; cpu: number; ram: string; disk: string; transfer: string; price: string }[];
   os: { key: string; name: string; slug: string; family: "linux" | "windows"; installerImage?: string | null; windowsImageName?: string | null }[];

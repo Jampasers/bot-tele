@@ -14,6 +14,7 @@ import { vpsService, requestVpsReboot } from "../../src/vps/service.js";
 import { decryptSecret } from "../../src/services/crypto.js";
 import { platformContext, runWithTenant } from "../../src/tenant/context.js";
 import { BACKUP_COLLECTIONS, executeRollback } from "../../src/services/backup.js";
+import { validateVpsDisableRule, VpsSelectionDisabledError, type VpsDisableRuleInput } from "../../src/vps/availability.js";
 
 const platform = <T>(fn: () => Promise<T> | T) => runWithTenant(platformContext(), fn);
 function fixture(overrides: Partial<IVpsOrder> = {}): IVpsOrder {
@@ -32,6 +33,105 @@ function env(t: TestContext): void {
   process.env.VPS_ENABLED = "true"; process.env.CREDENTIAL_ENCRYPTION_KEY = "ab".repeat(32);
   t.after(() => { for (const [name, value] of [["VPS_ENABLED", before.enabled], ["CREDENTIAL_ENCRYPTION_KEY", before.key]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } buyerTokens.clear(); });
 }
+
+test("new checkout enforces disable rules before provider calls or order creation, including direct SSH", async t => {
+  env(t);
+  let providerCalls = 0, writes = 0;
+  t.mock.method(VpsOrder, "findOne", () => query(() => null));
+  t.mock.method(VpsOrder, "create", async () => { writes++; throw new Error("Order must not be created"); });
+  t.mock.method(DigitalOceanClient.prototype, "account", async () => { providerCalls++; throw new Error("Provider must not be contacted"); });
+  for (const service of ["purchase", "install-do", "install-direct"] as const) {
+    const plan = service === "install-direct" ? directInstallPlans(defaultVpsCatalog())[0]!
+      : catalogPlans(defaultVpsCatalog(), service === "purchase" ? "purchase" : "install")[2]!;
+    const rule = validateVpsDisableRule({ service, target: "os", sizeSlug: plan.sizeSlug,
+      os: "windows2022", region: "*", message: `Maintenance ${service}` }, defaultVpsCatalog());
+    t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...plan, _id: plan.id, globalPrice: 10000 })));
+    t.mock.method(VpsCatalog, "findById", () => query(() => ({ ...defaultVpsCatalog(), disableRules: [rule] })));
+    await platform(() => assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: randomUUID(),
+      planId: plan.id, serviceType: plan.serviceType, os: "windows2022", region: service === "install-direct" ? "external" : "sgp1",
+      ...(service === "install-direct" ? { direct: { ip: "192.0.2.10", username: "root", password: "offline" } } : {}),
+    }), error => error instanceof VpsSelectionDisabledError && error.message === `Maintenance ${service}`));
+  }
+  assert.equal(providerCalls, 0); assert.equal(writes, 0);
+});
+
+test("checkout rechecks rules added during provider validation and preserves already-created orders", async t => {
+  env(t);
+  const plan = catalogPlans(defaultVpsCatalog(), "install")[2]!;
+  const catalog = defaultVpsCatalog(); catalog.disableRules = [];
+  let writes = 0;
+  t.mock.method(VpsCatalog, "findById", () => query(() => catalog));
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...plan, _id: plan.id, globalPrice: 10000 })));
+  t.mock.method(VpsOrder, "findOne", () => query(() => null));
+  t.mock.method(VpsOrder, "create", async () => { writes++; throw new Error("Order must not be created"); });
+  t.mock.method(DigitalOceanClient.prototype, "account", async () => ({ identity: "team:test", status: "active" }) as never);
+  t.mock.method(DigitalOceanClient.prototype, "validateSelection", async () => {
+    catalog.disableRules = [validateVpsDisableRule({ service: "install-do", target: "region", sizeSlug: plan.sizeSlug,
+      os: "windows2022", region: "sgp1", message: "Baru dinonaktifkan" }, catalog)];
+    return { os: { image: "ubuntu-24-04-x64" }, size: { vcpus: 1, memory: 2048, disk: 50 } } as never;
+  });
+  await platform(async () => {
+    const id = randomUUID(); buyerTokens.put("101", id, "offline-token", "team:test");
+    await assert.rejects(vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: id,
+      planId: plan.id, serviceType: "install", os: "windows2022", region: "sgp1" }), /Baru dinonaktifkan/);
+    assert.equal(writes, 0);
+    const existing = fixture({ _id: id });
+    t.mock.method(VpsOrder, "findOne", () => query(() => existing));
+    const replay = await vpsService.checkout({ actorTelegramId: "101", chatId: "101", requestId: id,
+      planId: plan.id, serviceType: "install", os: "windows2022", region: "sgp1" });
+    assert.equal(replay._id, id); assert.equal(writes, 0);
+  });
+});
+
+test("disable API requires platform admin and validates scope before atomic replace or removal", async t => {
+  env(t);
+  const before = process.env.ADMIN_ID; process.env.ADMIN_ID = "101";
+  t.after(() => { if (before === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = before; });
+  const writes: { filter: any; patch: any; options: any }[] = [];
+  t.mock.method(VpsCatalog, "updateOne", async (filter, patch, options) => {
+    writes.push({ filter, patch, options }); return { matchedCount: 1 } as never;
+  });
+  const input: VpsDisableRuleInput = { service: "all", target: "region", sizeSlug: "*", os: "*", region: "sgp1", message: "$literal & <text>" };
+  await platform(async () => {
+    await assert.rejects(vpsService.listDisableRules!("999"), /admin/);
+    await assert.rejects(vpsService.saveDisableRule!("999", input), /admin/);
+    await assert.rejects(vpsService.removeDisableRule!("999", "a".repeat(24)), /admin/);
+    await assert.rejects(vpsService.saveDisableRule!("101", { ...input, region: "unknown" }), /valid/);
+    assert.equal(writes.length, 0);
+    const rule = await vpsService.saveDisableRule!("101", input);
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1]!.filter._id, "platform");
+    assert.equal(writes[1]!.options.updatePipeline, true);
+    const concat = writes[1]!.patch[0].$set.disableRules.$concatArrays;
+    assert.equal(concat[0].$filter.cond.$ne[1], rule.id);
+    assert.deepEqual(concat[1].$literal, [rule]);
+    await assert.rejects(vpsService.removeDisableRule!("101", "invalid"), /valid/);
+    await vpsService.removeDisableRule!("101", rule.id);
+    assert.deepEqual(writes[2]!.patch, { $pull: { disableRules: { id: rule.id } } });
+  });
+  const count = writes.length;
+  await assert.rejects(runWithTenant({ tenantId: "rental", rentalId: "one" }, () => vpsService.saveDisableRule!("101", input)), /main bot/);
+  assert.equal(writes.length, count);
+});
+
+test("selection checks honor existing spec toggles and reflect updated rules without caching", async t => {
+  env(t);
+  const catalog = defaultVpsCatalog(); catalog.disableRules = [];
+  let enabled = false;
+  t.mock.method(VpsCatalog, "findById", () => query(() => catalog));
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ enabled })));
+  await platform(async () => {
+    const selection = { planId: "plan", serviceType: "purchase" as const, sizeSlug: "s-1vcpu-2gb" };
+    assert.match((await vpsService.disabledSelection!(selection))!, /dinonaktifkan/);
+    enabled = true;
+    assert.equal(await vpsService.disabledSelection!(selection), null);
+    catalog.disableRules = [validateVpsDisableRule({ service: "all", target: "size", sizeSlug: selection.sizeSlug,
+      os: "*", region: "*", message: "Sedang maintenance" }, catalog)];
+    assert.equal(await vpsService.disabledSelection!(selection), "Sedang maintenance");
+    catalog.disableRules = [];
+    assert.equal(await vpsService.disabledSelection!(selection), null);
+  });
+});
 
 test("buyer token vault isolates buyer/order, expires absolutely, cannot serialize secrets, and clears at shutdown", async () => {
   let now = 1; const vault = new BuyerTokenVault(100, () => now);

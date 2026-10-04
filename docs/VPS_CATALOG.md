@@ -6,6 +6,42 @@ Di `/vpsadmin`, pilih **Harga per spek / region / OS**, pilih layanan dan spek, 
 
 Menu **Katalog OS/region/spek** menerima tambahan satu field per pesan. Entri baru langsung ditampilkan dalam menu; tidak perlu membuat paket bernama atau menyalin semua kombinasi. Harga dan status tersimpan di `vpsplans`; pilihan katalog tersimpan di `vpscatalogs`. Order lama tetap memakai snapshot checkout.
 
+## Disable spek, OS, dan region
+
+Di `/vpsadmin`, buka **Disable Spek / OS / Region** → **Tambah aturan disable**.
+Pilih layanan (semua layanan, VPS DO toko, jasa install DO buyer, atau jasa install
+VPS buyer), jenis pilihan, lalu cakupannya:
+
+| Jenis | Cakupan |
+| --- | --- |
+| Spek | Satu spek, untuk semua OS dan region |
+| OS | Satu OS di semua spek, atau hanya di satu spek |
+| Region | Satu region di semua OS dan spek |
+| Region per spek | Satu region + satu spek, untuk semua OS |
+| Region per OS | Satu region + satu OS, untuk semua spek |
+| Region per kombinasi | Satu region + satu spek + satu OS |
+
+Untuk region, pilih **Semua spek (global)** atau satu spek, lalu **Semua OS
+(global)** atau satu OS. Jasa install VPS buyer via SSH tidak memakai region DO;
+layanan tersebut hanya menerima aturan spek dan OS.
+
+Terakhir kirim pesan disable (1–200 karakter, satu baris), misalnya
+`Windows 2022 untuk spek ini sedang maintenance. Pilih OS lain.` Kirim `-` untuk
+pesan default. Aturan baru aktif sesudah pesan disimpan. Opsi tetap tampil di menu
+user; jika dipilih, bot menampilkan pesan tersebut dan tidak melanjutkan pilihan.
+Aturan yang bergantung pada OS diperiksa saat OS dipilih, setelah region.
+
+Aturan disimpan di `vpscatalogs.disableRules` dan berlaku langsung, termasuk pada
+tombol dari sesi yang sudah terbuka. Backend memeriksa kembali sebelum membuat
+order baru. Order yang sudah dibuat tetap memakai snapshot dan alur pembayaran
+sebelumnya. Tidak perlu migrasi; katalog lama dianggap belum memiliki aturan.
+
+Buka aturan untuk **Ubah pesan** atau **Aktifkan kembali**. Menyimpan cakupan yang
+sama mengganti pesan aturan tersebut. Semua aturan yang cocok tetap memblokir;
+pesan dari aturan paling spesifik ditampilkan. Menghapus satu aturan tidak
+meniadakan aturan lain yang cocok. Toggle **Nonaktifkan spek** di menu harga tetap
+berlaku, sekarang opsi itu tetap tampil dan memberi pesan default saat dipilih.
+
 ## Penggantian paket lama
 
 `npm.cmd run vps:reset-catalog` hanya memeriksa database dari `.env` dan menampilkan fingerprint konfigurasi. Untuk reset yang sudah disetujui operator:

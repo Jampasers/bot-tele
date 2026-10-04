@@ -8,6 +8,7 @@ import type { VpsCredentialFilter, VpsUiCredential, VpsUiDependencies } from "..
 import { clearVpsInput, setVpsInput } from "../vps/input.js";
 import { isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "../vps/ui.js";
 import { MAX_VPS_WALLPAPER_BYTES, getVpsWallpaperStatus, resetVpsWallpaper, setVpsWallpaperJpeg } from "../../vps/wallpaper.js";
+import { createVpsDisableAdmin } from "./disable.js";
 
 const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token & akun DO", "vpa_tokens_all_0").row()
   .text("➕ Tambah token", "vpa_addtoken").text("🔎 Cek semua token", "vpa_checkall").row()
@@ -16,6 +17,7 @@ const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token
   .text("💰 Global Jasa Install VPS Buyer", `vpa_global_service_${INSTALL_DIRECT_GLOBAL_PRICE_ID}`).row()
   .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
+  .text("Disable Spek / OS / Region", "vpa_disable_0").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
   .text("🔙 Admin", "adm_home");
@@ -40,6 +42,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   const deps: VpsUiDependencies = { ...vpsService, ...overrides };
   const wallpaperUploads = new Map<string, number>();
   const actorOf = (ctx: Context): string => String(ctx.from!.id);
+  const disableAdmin = createVpsDisableAdmin(deps, input);
   function authorized(handler: (ctx: Context) => Promise<void>): (ctx: Context) => Promise<void> {
     return async ctx => {
       if (ctx.callbackQuery) await ctx.answerCallbackQuery().catch(() => {});
@@ -59,6 +62,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
   }
   async function home(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
+    disableAdmin.clear(actorOf(ctx));
     wallpaperUploads.delete(actorOf(ctx));
     await vpsReply(ctx, `🖥️ Admin VPS DigitalOcean\n\nPemesanan baru: ${deps.enabled() ? "aktif" : "nonaktif (VPS_ENABLED)"}\n\nAtur token toko dan harga dari database. Token buyer hanya berada sementara di memori dan tidak ditampilkan pada admin.\n\nPemeriksaan akun menggunakan GET tanpa membuat droplet percobaan.`, homeKeyboard());
   }
@@ -196,7 +200,8 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
     const catalog = await deps.listCatalog?.();
     if (!catalog) throw new Error("Katalog belum tersedia");
     await vpsReply(ctx, `🧩 Katalog VPS\n\nRegion: ${catalog.regions.length}\nSpek: ${catalog.sizes.length}\nOS: ${catalog.os.length}\n\nEntri baru langsung tersedia di menu pembeli. Atur harga kombinasinya melalui menu harga.`, new InlineKeyboard()
-      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row().text("🔙 Admin VPS", "vpa_home"));
+      .text("➕ Region", "vpa_addregion").text("➕ Spek", "vpa_addsize").row().text("➕ OS", "vpa_addos").row()
+      .text("Disable Spek / OS / Region", "vpa_disable_0").row().text("🔙 Admin VPS", "vpa_home"));
   }
   async function addCatalog(ctx: Context, kind: "region" | "size" | "os"): Promise<void> {
     if (!deps.addCatalogEntry) throw new Error("Catalog unavailable");
@@ -389,6 +394,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const actor = actorOf(ctx);
         clearVpsInput(actor);
         wallpaperUploads.delete(actor);
+        if (await disableAdmin.handle(ctx, data)) return;
         if (data === "vpa_home") { await home(ctx); return; }
         if (data === "vpa_wallpaper") { await wallpaperMenu(ctx); return; }
         if (data === "vpa_wallpaper_set") { await beginWallpaperUpload(ctx); return; }

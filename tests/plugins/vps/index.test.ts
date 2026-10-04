@@ -11,6 +11,7 @@ import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder, VpsUiPlan } from "
 import { defaultVpsCatalog } from "../../../src/vps/catalog.js";
 import { DIRECT_INSTALL_PLAN_ID, catalogPlans, directInstallPlans, planPrice } from "../../../src/vps/catalogPlans.js";
 import { DigitalOceanError } from "../../../src/vps/digitalOcean.js";
+import { validateVpsDisableRule, vpsSelectionDisabled, type VpsDisableRule, type VpsDisableRuleInput } from "../../../src/vps/availability.js";
 
 const ORDER_ID = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const PLAN: VpsUiPlan = { id: "plan-1", name: "RAM 2 GB", serviceType: "install", sizeSlug: "s-1vcpu-2gb", regions: ["sgp1", "fra1"], osPrices: [{ os: "windows2022", label: "Windows Server 2022", price: 43_210 }], enabled: true };
@@ -56,6 +57,7 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   });
   const deps: Partial<VpsUiDependencies> = {
     enabled: () => true, listOs: () => [{ id: "windows2022", label: "Windows Server 2022" }],
+    disabledSelection: async () => null,
     listPlans: async serviceType => serviceType === "purchase" ? [PLAN] : [PLAN, DIRECT_PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
     checkout: async () => ORDER, getOwned: async () => ORDER, listOwned: async () => [ORDER],
     listCredentials: async () => [], ...overrides,
@@ -615,4 +617,117 @@ test("admin sets global prices for each service and can clear combination overri
       assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
     }
   }
+});
+
+function disablePick(calls: ApiCall[], field: string, index: number): string {
+  for (const call of [...calls].reverse()) {
+    const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+    const match = buttons.find(button => button.callback_data?.startsWith("vpa_dpick_") && button.callback_data.endsWith(`_${field}_${index}`));
+    if (match?.callback_data) return match.callback_data;
+  }
+  throw new Error(`Missing disable choice ${field}/${index}`);
+}
+
+test("admin wizard supports spec, both OS scopes and all four region scopes, with editable messages and re-enable", async t => {
+  const before = process.env.ADMIN_ID; process.env.ADMIN_ID = "42";
+  t.after(() => { if (before === undefined) delete process.env.ADMIN_ID; else process.env.ADMIN_ID = before; });
+  const base = defaultVpsCatalog();
+  const scopes = [
+    { target: "size", index: 0, sizeIndex: 2, osIndex: 0 },
+    { target: "os", index: 1, sizeIndex: 0, osIndex: 1 },
+    { target: "os", index: 1, sizeIndex: 3, osIndex: 1 },
+    ...[0, 3].flatMap(sizeIndex => [0, 2].map(osIndex => ({ target: "region", index: 2, sizeIndex, osIndex }))),
+  ];
+  for (const scope of scopes) {
+    let rules: VpsDisableRule[] = [];
+    const { bot, calls } = await harness({
+      listCatalog: async () => ({ ...base, sizes: base.sizes.map(size => ({ slug: size.slug, label: size.ram })), os: base.os.map(os => ({ id: os.key, label: os.name, family: os.family })) }),
+      listDisableRules: async () => rules,
+      saveDisableRule: async (actor, input) => { assert.equal(actor, "42"); const rule = validateVpsDisableRule(input, base); rules = [...rules.filter(old => old.id !== rule.id), rule]; return rule; },
+      removeDisableRule: async (_actor, id) => { rules = rules.filter(rule => rule.id !== id); },
+    }, { admin: true });
+    let n = 1;
+    await bot.handleUpdate(update(n++, "/vpsadmin"));
+    assert.match(JSON.stringify(calls), /vpa_disable_0/);
+    await bot.handleUpdate(update(n++, "vpa_disable_0", true));
+    await bot.handleUpdate(update(n++, "vpa_dnew", true));
+    await bot.handleUpdate(update(n++, disablePick(calls, "service", 0), true));
+    await bot.handleUpdate(update(n++, disablePick(calls, "target", scope.index), true));
+    if (scope.target === "region") await bot.handleUpdate(update(n++, disablePick(calls, "region", 6), true));
+    if (scope.target === "os") await bot.handleUpdate(update(n++, disablePick(calls, "os", scope.osIndex), true));
+    await bot.handleUpdate(update(n++, disablePick(calls, "sizeSlug", scope.sizeIndex), true));
+    if (scope.target === "region") await bot.handleUpdate(update(n++, disablePick(calls, "os", scope.osIndex), true));
+    assert.equal(rules.length, 0, "Saving requires a message");
+    await bot.handleUpdate(update(n++, "x".repeat(201)));
+    assert.equal(rules.length, 0);
+    await bot.handleUpdate(update(n++, "Maintenance <tag> & pilih opsi lain"));
+    assert.equal(rules.length, 1);
+    assert.equal(rules[0]!.target, scope.target);
+    assert.equal(rules[0]!.sizeSlug, scope.sizeIndex === 0 && scope.target !== "size" ? "*" : "s-1vcpu-2gb");
+    assert.equal(rules[0]!.region, scope.target === "region" ? "sgp1" : "*");
+    assert.equal(rules[0]!.os, scope.target === "os" || scope.osIndex === 2 ? "ubuntu24" : "*");
+    const id = rules[0]!.id;
+    await bot.handleUpdate(update(n++, `vpa_drule_${id}`, true));
+    assert.match(replies(calls), /Maintenance <tag> & pilih opsi lain/);
+    await bot.handleUpdate(update(n++, `vpa_dmessage_${id}`, true));
+    await bot.handleUpdate(update(n++, "Pesan baru"));
+    assert.equal(rules.length, 1); assert.equal(rules[0]!.id, id); assert.equal(rules[0]!.message, "Pesan baru");
+    await bot.handleUpdate(update(n++, `vpa_dremove_${id}`, true));
+    assert.equal(rules.length, 0);
+    for (const call of calls) {
+      const buttons = (call.payload.reply_markup as { inline_keyboard?: { callback_data?: string }[][] })?.inline_keyboard?.flat() ?? [];
+      assert.ok(buttons.every(button => !button.callback_data || Buffer.byteLength(button.callback_data) <= 64));
+    }
+  }
+});
+
+test("disabled buyer choices show the custom message, preserve the menu and never reach checkout", async () => {
+  for (const target of ["size", "region", "os"] as const) {
+    let checkedOut = 0;
+    const rule = validateVpsDisableRule({ service: "purchase", target, sizeSlug: target === "size" ? PLAN.sizeSlug : "*",
+      region: target === "region" ? "sgp1" : "*", os: target === "os" ? "windows2022" : "*", message: `${target} sedang maintenance` }, defaultVpsCatalog());
+    const { bot, calls } = await harness({
+      disabledSelection: async selection => vpsSelectionDisabled([rule], selection),
+      checkout: async () => { checkedOut++; return ORDER; },
+    });
+    await bot.handleUpdate(update(1, "vps_buy", true));
+    await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+    if (target !== "size") await bot.handleUpdate(update(3, callback(calls, "vps_region_"), true));
+    if (target === "os") await bot.handleUpdate(update(4, callback(calls, "vps_os_"), true));
+    assert.match(replies(calls), new RegExp(`${target} sedang maintenance`));
+    assert.equal(checkedOut, 0);
+    assert.equal(calls.at(-1)?.method, "sendMessage");
+    assert.match(JSON.stringify(calls.at(-1)), /Ganti Spek/);
+  }
+});
+
+test("new rules block a stale Windows checkout button and re-enable allows the same session to continue", async () => {
+  let rules: VpsDisableRule[] = [], checkedOut = 0;
+  const { bot, calls } = await harness({
+    disabledSelection: async selection => vpsSelectionDisabled(rules, selection),
+    checkout: async () => { checkedOut++; return ORDER; },
+  });
+  await bot.handleUpdate(update(1, "vps_buy", true));
+  await bot.handleUpdate(update(2, callback(calls, "vps_plan_"), true));
+  await bot.handleUpdate(update(3, callback(calls, "vps_region_"), true));
+  await bot.handleUpdate(update(4, callback(calls, "vps_os_"), true));
+  const chrome = callback(calls, "vps_chrome_");
+  rules = [validateVpsDisableRule({ service: "purchase", target: "region", sizeSlug: PLAN.sizeSlug,
+    region: "sgp1", os: "windows2022", message: "Kombinasi ini dinonaktifkan" }, defaultVpsCatalog())];
+  await bot.handleUpdate(update(5, chrome, true));
+  assert.equal(checkedOut, 0); assert.match(replies(calls), /Kombinasi ini dinonaktifkan/);
+  rules = [];
+  await bot.handleUpdate(update(6, chrome, true));
+  assert.equal(checkedOut, 1);
+});
+
+test("nonadmins and rental bots cannot read or mutate disable rules", async () => {
+  let accessed = 0;
+  for (const options of [{ admin: true }, { admin: true, tenant: { tenantId: "rental", rentalId: "one" } }]) {
+    const { bot, calls } = await harness({ listDisableRules: async () => { accessed++; return []; } }, options);
+    await bot.handleUpdate(update(1, "vpa_disable_0", true, 987654));
+    await bot.handleUpdate(update(2, "vpa_dnew", true, 987654));
+    assert.match(replies(calls), /Hanya admin/);
+  }
+  assert.equal(accessed, 0);
 });
