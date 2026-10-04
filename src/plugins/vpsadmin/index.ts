@@ -1,3 +1,4 @@
+import { createAvailabilityMenu } from "./availability.js";
 import { Bot, Context, InlineKeyboard } from "grammy";
 import type { Plugin } from "../../types/Plugin.js";
 import { isAdmin } from "../../core/admin.js";
@@ -15,6 +16,7 @@ const homeKeyboard = (): InlineKeyboard => new InlineKeyboard().text("🔑 Token
   .text("💰 Global Jasa Install DO", `vpa_global_service_${INSTALL_DO_GLOBAL_PRICE_ID}`).row()
   .text("💰 Global Jasa Install VPS Buyer", `vpa_global_service_${INSTALL_DIRECT_GLOBAL_PRICE_ID}`).row()
   .text("🛠 Harga Install VPS Buyer", "vpa_plans_direct_0").row()
+  .text("Ketersediaan VPS", "vpa_availability_0").row()
   .text("🧩 Katalog OS/region/spek", "vpa_catalog").row()
   .text("🖼 Wallpaper Windows", "vpa_wallpaper").row()
   .text("📋 Log Pesanan / Orders", "vpa_orders_all_0").row()
@@ -57,6 +59,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
       await receive(ctx, value);
     } });
   }
+  const availabilityMenu = createAvailabilityMenu(deps, input);
   async function home(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
     wallpaperUploads.delete(actorOf(ctx));
@@ -389,6 +392,7 @@ export function createVpsAdminPlugin(overrides: Partial<VpsUiDependencies> = {})
         const actor = actorOf(ctx);
         clearVpsInput(actor);
         wallpaperUploads.delete(actor);
+        if (await availabilityMenu(ctx, data)) return;
         if (data === "vpa_home") { await home(ctx); return; }
         if (data === "vpa_wallpaper") { await wallpaperMenu(ctx); return; }
         if (data === "vpa_wallpaper_set") { await beginWallpaperUpload(ctx); return; }

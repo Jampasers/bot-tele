@@ -1,3 +1,5 @@
+import { VpsCatalog } from "../../src/models/VpsCatalog.js";
+import { defaultVpsCatalog } from "../../src/vps/catalog.js";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { randomUUID } from "node:crypto";
@@ -58,6 +60,7 @@ function query<T>(load: () => T) {
   };
 }
 function database(t: TestContext, balance = 100_000) {
+  t.mock.method(VpsCatalog, "findById", () => query(() => defaultVpsCatalog()));
   const orders: Row[] = [];
   const users: Row[] = [{ tenantId: "platform", telegramId: "101", balance, totalOrders: 0, appliedVpsPaymentEffectIds: [] }];
   const claims: Row[] = [];
@@ -306,4 +309,20 @@ test("GoBiz authentication and merchant reads pass shutdown cancellation to thei
     controller.abort();
     await assert.rejects(pending, { name: "AbortError" });
   }
+});
+
+test("disable blocks unpaid balance and QRIS orders before payment writes but preserves in-flight recovery", async t => {
+  const db = database(t);
+  t.mock.method(VpsCatalog, "findById", () => query(() => ({ ...defaultVpsCatalog(), disabledRules: { rule: { kind: "os", os: "windows2022", message: "Windows maintenance" } } })));
+  const order = db.addOrder({ snapshot: { price: 25_000, planName: "Basic", size: "s-1vcpu-2gb", os: "windows2022", region: "sgp1" } });
+  await platform(async () => {
+    await assert.rejects(payVpsFromBalance(order._id, "101"), /Windows maintenance/);
+    await assert.rejects(createVpsInvoice(order._id, "101"), /Windows maintenance/);
+    assert.equal(order.paymentStatus, "unpaid");
+    assert.equal(db.users[0]!.balance, 100_000);
+    order.paymentStatus = "paying"; order.paymentMethod = "balance";
+    await payVpsFromBalance(order._id, "101");
+    assert.equal(order.paymentStatus, "paid");
+    assert.equal(db.users[0]!.balance, 75_000);
+  });
 });

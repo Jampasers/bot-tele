@@ -1,3 +1,4 @@
+import { assertSelectionEnabled, listDisableRules, setDisableRule, removeDisableRule } from "./availability.js";
 import { isIP } from "node:net";
 import { VpsOrder, type IVpsOrder } from "../models/VpsOrder.js";
 import { VpsCredential } from "../models/VpsCredential.js";
@@ -56,6 +57,7 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   const os = getOs(input.os);
   const price = plan ? vpsPlanPrice({ ...plan, serviceGlobalPrice: serviceGlobal?.globalPrice ?? null, osPrices: plan.osPrices.map(item => ({ ...item, price: item.price ?? null })) }, input.region, input.os) : undefined;
   if (!plan || !price || !plan.regions.includes(input.region) || !os) throw new Error("Paket, region, atau harga tidak tersedia.");
+  await assertSelectionEnabled({ size: plan.sizeSlug, os: input.os, region: input.region });
   const directPlan = directInstallPlans(catalog).some(item => item.id === plan._id) || plan._id === DIRECT_INSTALL_PLAN_ID;
   if (Boolean(input.direct) !== directPlan) throw new Error("Sumber VPS tidak sesuai paket.");
   const size = catalog.sizes.find(item => item.slug === plan.sizeSlug);
@@ -187,6 +189,7 @@ async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
 
 export const vpsService: VpsUiDependencies = {
   enabled: vpsEnabled,
+  assertSelectionEnabled, listDisableRules, setDisableRule, removeDisableRule,
   listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name, family: os.family })),
   async listCatalog() {
     assertVpsPlatform();
