@@ -594,7 +594,7 @@ export class VpsWorker {
                   region: order.snapshot.region,
                   totalPrice,
                   ...(method ? { method } : {}),
-                  hidePaymentDetails: order.paymentMethod === "invite",
+                  ...(order.paymentMethod === "invite" ? { serviceValue: order.snapshot.price } : {}),
                   buyer: buyerInfo,
                   date: completedAt,
                 }));

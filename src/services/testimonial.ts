@@ -42,7 +42,7 @@ export interface VpsTestimonialData {
   region?: string | undefined;
   totalPrice: number;
   method?: string | undefined;
-  hidePaymentDetails?: boolean | undefined;
+  serviceValue?: number | undefined;
   buyer: BuyerInfo;
   date?: Date | undefined;
 }
@@ -460,8 +460,8 @@ export class TestimonialService {
       const serviceLabel = isPurchase ? "VPS DigitalOcean" : "Jasa Install OS";
       const regionLine = data.region ? `📍 <b>Region:</b> <code>${escapeHtml(data.region)}</code>\n` : "";
       const osLine = data.os ? `💿 <b>Sistem Operasi:</b> <code>${safeOs}</code>\n` : "";
-      const paymentLines = data.hidePaymentDetails
-        ? ""
+      const paymentLines = data.serviceValue !== undefined
+        ? `💰 <b>Harga Layanan:</b> <b>${formatPrice(data.serviceValue)}</b>\n`
         : `💰 <b>Total Transaksi:</b> <b>${formatPrice(data.totalPrice)}</b>\n` +
           `💳 <b>Metode Pembayaran:</b> <code>${escapeHtml(data.method || "Saldo / QRIS")}</code>\n`;
 
@@ -487,7 +487,7 @@ export class TestimonialService {
 
       // ── Generate Receipt Card Image ────────────────────────────────────────
       let receiptBuffer: Buffer | null = null;
-      if (!data.hidePaymentDetails) {
+      if (data.serviceValue === undefined) {
         try {
           receiptBuffer = await ReceiptService.generateReceiptBuffer({
             orderId: data.orderId,
