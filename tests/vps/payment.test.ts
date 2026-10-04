@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { User } from "../../src/models/User.js";
 import { VpsOrder, type IVpsOrder } from "../../src/models/VpsOrder.js";
 import { VpsInstallInvite } from "../../src/models/VpsInstallInvite.js";
-import { claimInstallInvite, createInstallInvite, requireInstallInvite, revokeInstallInvite, VpsInstallInviteError } from "../../src/vps/installInvites.js";
+import { claimInstallInvite, createInstallInvite, requireInstallInvite, revokeInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "../../src/vps/installInvites.js";
 import { ActivityLogService } from "../../src/services/activityLog.js";
 import { TestimonialService } from "../../src/services/testimonial.js";
 import { VpsCatalog } from "../../src/models/VpsCatalog.js";
@@ -121,6 +121,43 @@ function database(t: TestContext, balance = 100_000) {
   return { orders, invites, users, claims, audit, addOrder, addInvite, failPaid: () => { failPaidOnce = true; }, failRefunded: () => { failRefundedOnce = true; } };
 }
 const platform = <T>(fn: () => Promise<T>) => runWithTenant(platformContext(), fn);
+
+test("claimed invite recovery enforces buyer, source, expiry, revocation and unused status", async t => {
+  const db = database(t);
+  for (const [patch, available] of [
+    [{ expiresAt: null }, true],
+    [{ recipientId: null }, true],
+    [{ sourceMode: "direct" }, true],
+    [{ sourceMode: "digitalocean" }, false],
+    [{ expiresAt: new Date(0) }, false],
+    [{ revokedAt: new Date() }, false],
+    [{ redeemedAt: new Date() }, false],
+    [{ claimedBy: null }, false],
+    [{ claimedBy: "102" }, false],
+    [{ recipientId: "102" }, false],
+    [{ tenantId: "rental" }, false],
+  ] as const) {
+    db.invites.length = 0;
+    const invite = db.addInvite(randomUUID(), patch);
+    const found = await platform(() => findClaimedInstallInvite("101", "direct"));
+    assert.equal(found?.id ?? null, available ? invite._id : null);
+  }
+  await assert.rejects(runWithTenant({ tenantId: "rental", rentalId: "rental" }, () => findClaimedInstallInvite("101")), /main bot/);
+});
+
+test("claimed invitations block stale balance and QRIS buttons before charging an ordinary install order", async t => {
+  const db = database(t);
+  db.addInvite();
+  const order = db.addOrder({ service: "install", sourceUsername: "root" });
+  await assert.rejects(platform(() => payVpsFromBalance(order._id, "101")), VpsInstallInviteError);
+  await assert.rejects(platform(() => createVpsInvoice(order._id, "101")), VpsInstallInviteError);
+  assert.equal(order.paymentStatus, "unpaid"); assert.equal(order.paymentMethod, null);
+  assert.equal(order.paymentInvoice, undefined); assert.equal(db.users[0]!.balance, 100000); assert.equal(db.audit.length, 0);
+  // Buying a VPS from the store is still a separate paid service.
+  const purchase = db.addOrder({ service: "purchase" });
+  const result = await platform(() => payVpsFromBalance(purchase._id, "101"));
+  assert.equal(result.status, "paid"); assert.equal(db.users[0]!.balance, 75000);
+});
 
 test("permanent invitations allow either installer without expiry and still enforce recipient and revocation", async t => {
   const db = database(t, 0);

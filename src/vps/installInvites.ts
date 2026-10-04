@@ -49,6 +49,16 @@ export async function claimInstallInvite(actor: string, id: string): Promise<Vps
   if (!invite) throw unavailable();
   return dto(invite);
 }
+/** Recover an unused claimed invitation independently of the in-memory wizard. */
+export async function findClaimedInstallInvite(actor: string, sourceMode?: "digitalocean" | "direct"): Promise<VpsUiInstallInvite | null> {
+  assertVpsPlatform();
+  if (!/^[1-9]\d{0,19}$/.test(actor)) throw unavailable();
+  const invite = await VpsInstallInvite.findOne({ tenantId: "platform", claimedBy: actor, redeemedAt: null, revokedAt: null,
+    ...(sourceMode ? { sourceMode: { $in: ["any", sourceMode] } } : {}),
+    $and: [{ $or: [{ recipientId: null }, { recipientId: actor }] }, { $or: [{ expiresAt: null }, { expiresAt: { $gt: new Date() } }] }],
+  }).sort({ createdAt: 1, _id: 1 }).lean();
+  return invite ? dto(invite) : null;
+}
 export async function requireInstallInvite(actor: string, id: string, orderId: string, sourceMode: "digitalocean" | "direct"): Promise<IVpsInstallInvite> {
   const invite = await VpsInstallInvite.findOne({ ...scope(id, actor), claimedBy: actor, orderId }).lean();
   if (!invite || (invite.sourceMode !== "any" && invite.sourceMode !== sourceMode)

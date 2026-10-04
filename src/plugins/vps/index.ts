@@ -66,18 +66,19 @@ export function vpsOrderText(order: VpsUiOrder): string {
   const direct = order.serviceType === "install" && order.sourceMode === "direct";
   const chrome = order.installChrome ? "\nChrome: + Chrome (gratis)" : "";
   const free = order.paymentMethod === "invite" ? "\nMetode: Undangan Gratis" : "";
+  const payment = order.paymentMethod === "invite" ? "Gratis (undangan)" : order.paymentStatus;
   if (direct) {
-    return `🛠️ Jasa Install Windows\n\nOrder: ${order._id}\nSumber: VPS milik buyer (Direct SSH)\nOS: ${order.os}${chrome}\nHarga jasa: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP VPS: ${order.ip || "belum tersedia"}`
+    return `🛠️ Jasa Install Windows\n\nOrder: ${order._id}\nSumber: VPS milik buyer (Direct SSH)\nOS: ${order.os}${chrome}\nHarga jasa: ${vpsPrice(order.price)}\nPembayaran: ${payment}\nProses: ${order.stage}\nIP VPS: ${order.ip || "belum tersedia"}`
       + free + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "");
   }
-  return `🖥️ ${serviceLabel(order.serviceType)}\n\nOrder: ${order._id}\nPaket: ${order.planName}\nSpek: ${order.sizeSlug}\nOS: ${order.os}\nRegion: ${order.region}\n${order.serviceType === "install" ? "Harga jasa" : "Harga checkout"}: ${vpsPrice(order.price)}\nPembayaran: ${order.paymentStatus}\nProses: ${order.stage}\nIP publik: ${order.ip || "belum tersedia"}`
+  return `🖥️ ${serviceLabel(order.serviceType)}\n\nOrder: ${order._id}\nPaket: ${order.planName}\nSpek: ${order.sizeSlug}\nOS: ${order.os}\nRegion: ${order.region}\n${order.serviceType === "install" ? "Harga jasa" : "Harga checkout"}: ${vpsPrice(order.price)}\nPembayaran: ${payment}\nProses: ${order.stage}\nIP publik: ${order.ip || "belum tersedia"}`
     + (order.vcpus !== undefined && order.memory !== undefined && order.disk !== undefined ? `\nCPU: ${order.vcpus} vCPU · RAM: ${order.memory} MB · Disk: ${order.disk} GB` : "")
     + (order.evidence ? `\nHasil pemeriksaan: ${order.evidence}` : "")
     + (order.provisionAttempt ? `\nPercobaan VPS: ${order.provisionAttempt}/3 · SSH: ${order.sshAttempts ?? 0}/3` : "")
     + chrome
     + free
     + (order.needsToken || order.stage === "needs_token" ? "\n\nToken sementara tidak tersedia. Kirim ulang token akun/team yang sama untuk melanjutkan order ini." : "")
-    + (order.serviceType === "install" ? `\n\n${feeNotice}` : "");
+    + (order.serviceType === "install" ? `\n\n${order.paymentMethod === "invite" ? inviteNotice : feeNotice}` : "");
 }
 
 export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plugin {
@@ -200,10 +201,14 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   async function showInstallSources(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
     dropDraft(actorOf(ctx));
-    await vpsReply(ctx, "🛠 Jasa Install\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Storage VPS dicek otomatis sebelum instalasi, minimal 50 GB.", new InlineKeyboard()
-      .text("🌊 Buat VPS di akun DO saya", "vps_install_do").row()
+    const invite = await deps.findClaimedInstallInvite(actorOf(ctx));
+    const keyboard = new InlineKeyboard();
+    if (invite) keyboard.text("Lanjut undangan gratis", `vps_invite_${invite.id}`).row();
+    keyboard.text("🌊 Buat VPS di akun DO saya", "vps_install_do").row()
       .text("🖥 Install Windows di VPS saya", "vps_install_direct").row()
-      .text("🔙 Kembali", "vps_home"));
+      .text("🔙 Kembali", "vps_home");
+    const notice = invite ? `\n\nUndangan gratis sudah diklaim untuk ${invite.sourceMode === "any" ? "semua installer" : invite.sourceMode === "direct" ? "VPS Buyer via SSH" : "Install dari DO"}. Pilih sumber yang sesuai untuk melanjutkan gratis.` : "";
+    await vpsReply(ctx, `🛠 Jasa Install${notice}\n\nPilih kondisi VPS kamu:\n\n🌊 DigitalOcean saya\nBot membuat VPS baru di akun/team DigitalOcean kamu. Biaya DigitalOcean tetap ditagihkan oleh DO ke akun kamu.\n\n🖥 VPS saya sudah ada\nInstall Windows langsung ke VPS milik kamu via SSH. Storage VPS dicek otomatis sebelum instalasi, minimal 50 GB.`, keyboard);
   }
   async function showDirectOs(ctx: Context, draft: Draft, notice?: string): Promise<void> {
     if (!draft.plan) throw new Error("Paket install belum tersedia.");
@@ -251,6 +256,13 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     clearVpsInput(actor);
     dropDraft(actor);
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
+    if (serviceType === "install" && !invite) {
+      invite = await deps.findClaimedInstallInvite(actor, direct ? "direct" : "digitalocean") ?? undefined;
+      if (invite) {
+        const existing = await deps.getOwned(actor, invite.orderId);
+        if (existing) { await showOrder(ctx, existing._id); return; }
+      }
+    }
     const listedPlans = await deps.listPlans(serviceType, true);
     const plans = serviceType === "install"
       ? listedPlans.filter(plan => direct ? plan.sourceMode === "direct" : plan.sourceMode !== "direct" && plan.id !== DIRECT_INSTALL_PLAN_ID)

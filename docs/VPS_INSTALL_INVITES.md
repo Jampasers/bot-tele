@@ -9,7 +9,8 @@ diklaim satu orang. Bagikan link yang dibuat bot. Daftar undangan menampilkan
 status dan menyediakan tombol **Cabut undangan** sebelum digunakan.
 
 User membuka link, menekan **Buka undangan gratis**, memilih sumber VPS,
-spek/region/OS dan opsi Chrome seperti order biasa. Harga jasa tampil gratis.
+spek/region/OS untuk DO, atau langsung Windows dan akses SSH untuk VPS Buyer,
+serta opsi Chrome seperti order biasa. Harga jasa tampil gratis.
 Setelah checkout, user menekan **Mulai install gratis** untuk menjalankan
 instalasi. Biaya VPS/DigitalOcean tetap ditanggung user. Undangan berlaku untuk
 Jasa Install saja, mengikuti harga yang sudah tersedia dan aturan disable
@@ -17,7 +18,11 @@ katalog; tidak dapat dipakai untuk membeli VPS dari akun toko.
 
 Satu link terikat ke satu user saat diklaim dan satu ID order sejak dibuat.
 Membuka ulang link mengarah ke order yang sama. Bot restart tidak menghapus
-undangan; token DO tetap sementara sehingga user mungkin perlu mengirim ulang.
+undangan. Setelah diklaim, membuka menu Jasa Install biasa otomatis memakai
+undangan yang belum digunakan dan sesuai sumber VPS. User tidak perlu membuka
+link lagi setelah kembali ke menu atau bot restart. Menu juga menyediakan
+**Lanjut undangan gratis**; checkout memakai ID order yang sama. Token DO tetap
+sementara sehingga user mungkin perlu mengirim ulang.
 Link kedaluwarsa atau dicabut tidak dapat memulai instalasi baru. Undangan
 yang sudah digunakan tidak bisa dicabut, dan order yang telah aktif tetap jalan.
 Untuk melihat order lama gunakan Riwayat Pesanan jika link sudah kedaluwarsa.

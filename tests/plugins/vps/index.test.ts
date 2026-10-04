@@ -60,6 +60,7 @@ async function harness(overrides: Partial<VpsUiDependencies> = {}, options: { ad
   const deps: Partial<VpsUiDependencies> = {
     enabled: () => true, listOs: () => [{ id: "windows2022", label: "Windows Server 2022" }],
     listAvailabilityRules: async () => [],
+    findClaimedInstallInvite: async () => null,
     listPlans: async serviceType => serviceType === "purchase" ? [PLAN] : [PLAN, DIRECT_PLAN], clearBuyerToken: () => {}, acceptBuyerToken: async () => ({ accountId: "team-test" }),
     checkout: async () => ORDER, getOwned: async () => ORDER, listOwned: async () => [ORDER],
     listCredentials: async () => [], ...overrides,
@@ -177,6 +178,62 @@ test("invitation source restrictions and invalid invitations are explained witho
   const invalid = await harness({ claimInstallInvite: async () => { throw new VpsInstallInviteError("Undangan kedaluwarsa"); } });
   await invalid.bot.handleUpdate(update(1, `vps_invite_${INVITE.id}`, true));
   assert.match(replies(invalid.calls), /Undangan kedaluwarsa/);
+});
+
+test("claimed invitations survive returning home and restarting the wizard through ordinary installer menus", async () => {
+  for (const direct of [true, false]) {
+    let claimed = false, order: VpsUiOrder | null = null, checkouts = 0;
+    let selected: Parameters<VpsUiDependencies["checkout"]>[0] | undefined;
+    const deps: Partial<VpsUiDependencies> = {
+      claimInstallInvite: async () => { claimed = true; return INVITE; },
+      findClaimedInstallInvite: async (actor, source) => {
+        assert.equal(actor, "42");
+        assert.ok(source === undefined || source === (direct ? "direct" : "digitalocean"));
+        return claimed ? INVITE : null;
+      },
+      getOwned: async (_actor, id) => id === INVITE.orderId ? order : null,
+      checkout: async input => {
+        checkouts++; selected = structuredClone(input);
+        order = { ...ORDER, sourceMode: direct ? "direct" : "digitalocean", price: 0, paymentMethod: "invite" };
+        return order;
+      },
+    };
+    const first = await harness(deps);
+    await first.bot.handleUpdate(update(1, `vps_invite_${INVITE.id}`, true));
+    await first.bot.handleUpdate(update(2, "vps_home", true));
+    // New plugin instance simulates a process restart; only the DB claim survives.
+    const { bot, calls } = await harness(deps);
+    let id = 10;
+    await bot.handleUpdate(update(++id, "vps_install", true));
+    assert.match(JSON.stringify(calls.at(-1)), /Lanjut undangan gratis/);
+    await bot.handleUpdate(update(++id, `vps_install_${direct ? "direct" : "do"}`, true));
+    assert.match(replies(calls), /jasa install GRATIS/);
+    if (!direct) {
+      await bot.handleUpdate(update(++id, "offline-buyer-token-123456789"));
+      await bot.handleUpdate(update(++id, callback(calls, "vps_plan_"), true));
+      await bot.handleUpdate(update(++id, callback(calls, "vps_region_"), true));
+    }
+    await bot.handleUpdate(update(++id, callback(calls, "vps_os_"), true));
+    if (direct) {
+      await bot.handleUpdate(update(++id, "192.0.2.10"));
+      await bot.handleUpdate(update(++id, "root"));
+      await bot.handleUpdate(update(++id, "synthetic-password"));
+    }
+    await bot.handleUpdate(update(++id, callback(calls, "vps_chrome_"), true));
+    assert.equal(selected?.requestId, INVITE.orderId); assert.equal(selected?.installInviteId, INVITE.id);
+    assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
+    assert.doesNotMatch(JSON.stringify(calls), /vps_balance_|vps_qris_/);
+    await bot.handleUpdate(update(++id, `vps_install_${direct ? "direct" : "do"}`, true));
+    assert.equal(checkouts, 1); assert.match(JSON.stringify(calls.at(-1)), /Mulai install gratis/);
+  }
+});
+
+test("free order details describe free activation instead of an unpaid installation fee", () => {
+  for (const sourceMode of ["direct", "digitalocean"] as const) {
+    const text = vpsOrderText({ ...ORDER, sourceMode, price: 0, paymentMethod: "invite" });
+    assert.match(text, /Pembayaran: Gratis \(undangan\)/);
+    assert.doesNotMatch(text, /Pembayaran: unpaid|Pembayaran ke toko/);
+  }
 });
 
 test("admin disable wizard covers every scope, custom messages, reenable and message edits", async t => {

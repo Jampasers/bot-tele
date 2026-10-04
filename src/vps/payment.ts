@@ -8,7 +8,7 @@ import { claimSettlement, matchesSettlement, reservePaymentAmount } from "../pay
 import { ActivityLogService } from "../services/activityLog.js";
 import { TestimonialService } from "../services/testimonial.js";
 import { assertVpsOrderAcceptsNewPayment, assertVpsSelectionAvailable } from "./availability.js";
-import { consumeInstallInvite, requireInstallInvite, VpsInstallInviteError } from "./installInvites.js";
+import { consumeInstallInvite, requireInstallInvite, findClaimedInstallInvite, VpsInstallInviteError } from "./installInvites.js";
 import { getVpsCatalog } from "./catalog.js";
 import { VpsPlan } from "../models/VpsPlan.js";
 
@@ -39,6 +39,14 @@ async function loadOrder(orderId: string, buyerId?: string): Promise<IVpsOrder> 
     throw new Error("Nominal snapshot pesanan VPS tidak valid.");
   }
   return order;
+}
+
+async function preventClaimedInviteCharge(order: IVpsOrder): Promise<void> {
+  // Existing payment intents must settle normally. Block untouched stale paid
+  // wizards after claiming an invitation, before a debit or invoice is created.
+  if (order.service !== "install" || order.paymentStatus !== "unpaid" || order.paymentMethod) return;
+  const invite = await findClaimedInstallInvite(order.buyerId, order.sourceUsername ? "direct" : "digitalocean");
+  if (invite) throw new VpsInstallInviteError("Kamu punya undangan gratis yang sudah diklaim. Buka menu Jasa Install lagi untuk melanjutkan tanpa pembayaran.");
 }
 
 async function claimMethod(order: IVpsOrder, method: "balance" | "qris" | "invite"): Promise<IVpsOrder> {
@@ -158,6 +166,7 @@ async function applyWalletEffect(order: IVpsOrder, kind: "debit" | "refund", amo
 export async function payVpsFromBalance(orderId: string, buyerId: string): Promise<VpsBalanceResult> {
   let order = await loadOrder(orderId, buyerId);
   if (order.paymentMethod === "invite" || order.installInviteId) throw new VpsInstallInviteError("Order undangan gratis tidak memakai saldo atau QRIS.");
+  await preventClaimedInviteCharge(order);
   await assertVpsOrderAcceptsNewPayment(order);
   const wallet = await User.findOne({ telegramId: buyerId, tenantId: PLATFORM_TENANT_ID }).select("balance").lean();
   if (order.paymentStatus === "paid") return { status: "paid", orderId, remainingBalance: wallet?.balance ?? 0 };
@@ -184,6 +193,7 @@ export async function payVpsFromBalance(orderId: string, buyerId: string): Promi
 export async function createVpsInvoice(orderId: string, buyerId: string) {
   let order = await loadOrder(orderId, buyerId);
   if (order.paymentMethod === "invite" || order.installInviteId) throw new VpsInstallInviteError("Order undangan gratis tidak memakai saldo atau QRIS.");
+  await preventClaimedInviteCharge(order);
   await assertVpsOrderAcceptsNewPayment(order);
   order = await claimMethod(order, "qris");
   if (order.paymentStatus === "paid") throw new Error("Pesanan VPS sudah dibayar.");

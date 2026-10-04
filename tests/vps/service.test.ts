@@ -25,11 +25,12 @@ function fixture(overrides: Partial<IVpsOrder> = {}): IVpsOrder {
     passwordEncrypted: "unused-ciphertext", ...overrides }).toObject();
 }
 function query<T>(read: () => T) {
-  const q = { lean: async () => structuredClone(read()), select: (_selection: string) => q };
+  const q = { lean: async () => structuredClone(read()), select: (_selection: string) => q, sort: (_sort: unknown) => q };
   return q;
 }
 function env(t: TestContext): void {
   t.mock.method(VpsCatalog, "findById", () => query(() => defaultVpsCatalog()));
+  t.mock.method(VpsInstallInvite, "findOne", () => query(() => null));
   const before = { enabled: process.env.VPS_ENABLED, key: process.env.CREDENTIAL_ENCRYPTION_KEY };
   process.env.VPS_ENABLED = "true"; process.env.CREDENTIAL_ENCRYPTION_KEY = "ab".repeat(32);
   t.after(() => { for (const [name, value] of [["VPS_ENABLED", before.enabled], ["CREDENTIAL_ENCRYPTION_KEY", before.key]] as const) { if (value === undefined) delete process.env[name]; else process.env[name] = value; } buyerTokens.clear(); });
@@ -75,6 +76,25 @@ test("buyer token vault isolates buyer/order, expires absolutely, cannot seriali
     vault.clear(); assert.equal(vault.get("101", "order-one"), undefined);
   });
   await assert.rejects(runWithTenant({ tenantId: "rental-one", rentalId: "rental-one" }, async () => vault.put("101", "order-one", "not-accepted-token", "team:one")), /main bot/);
+});
+
+test("checkout recovers a claimed invite from its reserved order and rejects stale paid wizards", async t => {
+  env(t);
+  const id = randomUUID(), inviteId = "b".repeat(32);
+  const invite = { _id: inviteId, tenantId: "platform", claimedBy: "101", recipientId: "101", orderId: id, sourceMode: "direct",
+    redeemedAt: null, revokedAt: null, expiresAt: null };
+  let saved: IVpsOrder | null = null;
+  t.mock.method(VpsInstallInvite, "findOne", () => query(() => invite));
+  t.mock.method(VpsOrder, "findOne", () => query(() => saved));
+  t.mock.method(VpsPlan, "findOne", () => query(() => ({ ...directInstallPlan(defaultVpsCatalog()), globalPrice: 15000 })));
+  t.mock.method(VpsOrder, "create", async input => { saved = new VpsOrder(input).toObject(); return { toObject: () => saved }; });
+  const input = { actorTelegramId: "101", chatId: "101", requestId: id, serviceType: "install" as const, planId: DIRECT_INSTALL_PLAN_ID,
+    os: "windows2022", region: "external", direct: { ip: "192.0.2.10", username: "root", password: "offline" } };
+  await assert.rejects(platform(() => vpsService.checkout({ ...input, requestId: randomUUID() })), VpsInstallInviteError);
+  assert.equal(saved, null);
+  const result = await platform(() => vpsService.checkout(input));
+  assert.equal(result.price, 0); assert.equal(result.paymentMethod, "invite");
+  assert.equal(saved!.installInviteId, inviteId); assert.equal(saved!.snapshot.price, 15000);
 });
 
 test("token recovery rejects a different team or buyer and resumes the existing order without persisting the token", async t => {
