@@ -1,3 +1,5 @@
+import type { VpsDisableRule, VpsDisableRuleInput, VpsSelection } from "../../vps/availability.js";
+
 /** sizeSlug → Set of regionSlugs that support that size on a specific DO account. */
 export type AvailabilityMap = Map<string, Set<string>>;
 /** Sanitized UI contracts. Tokens and decrypted passwords never occur in order/list DTOs. */
@@ -73,6 +75,10 @@ export interface VpsUiDependencies {
   listCatalog?(): Promise<{ regions: { slug: string; name: string; country: string }[]; sizes: { slug: string; label: string }[]; os: { id: string; label: string; family: "linux" | "windows" }[] }>;
   addCatalogEntry?(actor: string, input: { kind: "region" | "size" | "os"; value: string[] }): Promise<void>;
   listPlans(serviceType?: VpsServiceType, includeDisabled?: boolean): Promise<VpsUiPlan[]>;
+  disabledSelection?(selection: VpsSelection & { planId: string }): Promise<string | null>;
+  listDisableRules?(actor: string): Promise<VpsDisableRule[]>;
+  saveDisableRule?(actor: string, rule: VpsDisableRuleInput): Promise<VpsDisableRule>;
+  removeDisableRule?(actor: string, id: string): Promise<void>;
   acceptBuyerToken(actor: string, orderId: string, token: string): Promise<{ accountId: string }>;
   clearBuyerToken(actor: string, orderId: string): void;
   /**
@@ -107,4 +113,3 @@ export interface VpsUiDependencies {
   adminCancelOrder?(actor: string, orderId: string): Promise<{ status: "cancelled" | "refunded" }>;
   adminResolveOrder?(actor: string, orderId: string, resolution: "ready" | "failed"): Promise<void>;
 }
-

@@ -12,6 +12,7 @@ import { assertVpsAdmin, assertVpsEnabled, assertVpsPlatform, buyerTokens, vpsEn
 import { addCredential, checkAllCredentials, checkCredential, credentialDto, deleteCredential, listCredentials, providerForCredential, releaseCapacityTicket } from "./credentials.js";
 import { payVpsFromBalance, createVpsInvoice, checkVpsPayment, refundVpsOrder } from "./payment.js";
 import type { AvailabilityMap, VpsUiDependencies, VpsUiOrder } from "../plugins/vps/contracts.js";
+import { DEFAULT_VPS_DISABLE_MESSAGE, validateVpsDisableRule, vpsSelectionDisabled, VpsSelectionDisabledError, type VpsSelection } from "./availability.js";
 
 const validId = (id: string): boolean => /^[a-f0-9-]{36}$/.test(id);
 export async function ownedOrder(actor: string, orderId: string, includeSecret = false): Promise<IVpsOrder | null> {
@@ -43,13 +44,26 @@ async function acceptBuyerToken(actor: string, orderId: string, token: string): 
   } });
   return { accountId: account.identity };
 }
+async function disabledSelection(selection: VpsSelection & { planId: string }): Promise<string | null> {
+  assertVpsPlatform();
+  const catalog = await getVpsCatalog();
+  const disabled = vpsSelectionDisabled(catalog.disableRules ?? [], selection);
+  if (disabled) return disabled;
+  const plan = await VpsPlan.findOne({ _id: selection.planId, tenantId: "platform", serviceType: selection.serviceType }).lean();
+  return plan?.enabled === false ? DEFAULT_VPS_DISABLE_MESSAGE : null;
+}
 async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Promise<VpsUiOrder> {
   assertVpsEnabled();
   if (!validId(input.requestId) || !/^\d{1,20}$/.test(input.actorTelegramId) || input.chatId !== input.actorTelegramId) throw new Error("Checkout hanya melalui chat pribadi.");
   const existing = await ownedOrder(input.actorTelegramId, input.requestId);
   if (existing) return orderDto(existing);
   const catalog = await getVpsCatalog();
-  const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType, enabled: true }).lean();
+  const plan = await VpsPlan.findOne({ _id: input.planId, tenantId: "platform", serviceType: input.serviceType }).lean();
+  const selection = { planId: input.planId, serviceType: input.serviceType, sourceMode: input.direct ? "direct" as const : "digitalocean" as const, sizeSlug: plan?.sizeSlug ?? "", os: input.os, region: input.region };
+  if (plan) {
+    const disabled = vpsSelectionDisabled(catalog.disableRules ?? [], selection) ?? (plan.enabled === false ? DEFAULT_VPS_DISABLE_MESSAGE : null);
+    if (disabled) throw new VpsSelectionDisabledError(disabled);
+  }
   const serviceGlobal = plan?.serviceType === "install"
     ? await VpsPlan.findOne({ _id: input.direct ? INSTALL_DIRECT_GLOBAL_PRICE_ID : INSTALL_DO_GLOBAL_PRICE_ID, tenantId: "platform" }).lean()
     : null;
@@ -92,6 +106,9 @@ async function checkout(input: Parameters<VpsUiDependencies["checkout"]>[0]): Pr
   if (input.serviceType === "purchase" && !client) throw new Error("Akun VPS belum tersedia.");
   const selected = client ? await client.validateSelection({ os: input.os, region: input.region, size: plan.sizeSlug }) : { os: { image: os.image }, size: { vcpus: 0, memory: 0, disk: 0 } };
   const password = generatePassword();
+  // Provider validation can take time; re-read rules and the spec toggle before creating a new order.
+  const disabled = await disabledSelection(selection);
+  if (disabled) throw new VpsSelectionDisabledError(disabled);
   try {
     const order = await VpsOrder.create({ _id: input.requestId, tenantId: "platform", buyerId: input.actorTelegramId, chatId: input.chatId,
       service: input.serviceType, accountId, sourceUsername, sourcePasswordEncrypted, publicIp: input.direct?.ip ?? null, createName: `bt-vps-${input.requestId}`,
@@ -187,6 +204,30 @@ async function fetchPlatformAvailability(): Promise<AvailabilityMap | null> {
 
 export const vpsService: VpsUiDependencies = {
   enabled: vpsEnabled,
+  disabledSelection,
+  async listDisableRules(actor) {
+    assertVpsAdmin(actor);
+    return (await getVpsCatalog()).disableRules ?? [];
+  },
+  async saveDisableRule(actor, input) {
+    assertVpsAdmin(actor);
+    const rule = validateVpsDisableRule(input, await getVpsCatalog());
+    await VpsCatalog.updateOne({ _id: "platform" }, { $setOnInsert: defaultVpsCatalog() }, { upsert: true, runValidators: true });
+    // One pipeline replaces or appends a scope atomically, preserving other admins' rules.
+    const result = await VpsCatalog.updateOne({ _id: "platform", $or: [
+      { "disableRules.id": rule.id }, { "disableRules.199": { $exists: false } },
+    ] }, [{ $set: { disableRules: { $concatArrays: [
+      { $filter: { input: { $ifNull: ["$disableRules", []] }, as: "rule", cond: { $ne: ["$$rule.id", rule.id] } } },
+      { $literal: [rule] },
+    ] }, updatedAt: new Date() } }], { updatePipeline: true });
+    if (!result.matchedCount) throw new Error("Maksimal 200 aturan disable. Aktifkan kembali salah satu aturan dahulu.");
+    return rule;
+  },
+  async removeDisableRule(actor, id) {
+    assertVpsAdmin(actor);
+    if (!/^[a-f0-9]{24}$/.test(id)) throw new Error("Aturan disable tidak valid.");
+    await VpsCatalog.updateOne({ _id: "platform" }, { $pull: { disableRules: { id } } });
+  },
   listOs: () => Object.values(OS_CATALOG).map(os => ({ id: os.key, label: os.name, family: os.family })),
   async listCatalog() {
     assertVpsPlatform();

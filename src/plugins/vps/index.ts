@@ -8,6 +8,7 @@ import { getOs } from "../../vps/installer.js";
 import { DIRECT_INSTALL_PLAN_ID, planPrice } from "../../vps/catalogPlans.js";
 import { formatRegion, formatSize, isVpsPlatform, vpsDate, vpsPrice, vpsReply } from "./ui.js";
 import { DigitalOceanError } from "../../vps/digitalOcean.js";
+import { DEFAULT_VPS_DISABLE_MESSAGE, VpsSelectionDisabledError } from "../../vps/availability.js";
 
 interface Draft {
   id: string;
@@ -100,6 +101,10 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       }
       try { await handler(ctx); }
       catch (err) {
+        if (err instanceof VpsSelectionDisabledError) {
+          await ctx.reply(err.message, { reply_markup: homeKeyboard() }).catch(() => {});
+          return;
+        }
         const ref = randomUUID();
         if (err instanceof Error && err.message === "Expired VPS selection") {
           console.warn("[VPS_SESSION_EXPIRED]", ref);
@@ -151,7 +156,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function choosePlan(ctx: Context, draft: Draft, offset = 0): Promise<void> {
     const keyboard = new InlineKeyboard();
-    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(sizeLabel(plan), `vps_plan_${draft.id}_${index + offset}`).row());
+    draft.plans.slice(offset, offset + 10).forEach((plan, index) => keyboard.text(`${plan.enabled ? "" : "🚫 "}${sizeLabel(plan)}`, `vps_plan_${draft.id}_${index + offset}`).row());
     if (offset) keyboard.text("← Sebelumnya", `vps_page_${draft.id}_${Math.max(0, offset - 10)}`);
     if (offset + 10 < draft.plans.length) keyboard.text("Berikutnya →", `vps_page_${draft.id}_${offset + 10}`);
     keyboard.row();
@@ -161,6 +166,19 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
       : draft.serviceType === "install" ? feeNotice : "";
     const stepLabel = draft.directMode ? "Pilih spek VPS milik kamu (minimal 1 core, RAM 2 GB, storage 50 GB):" : draft.serviceType === "install" ? "(Langkah 2/5) Pilih spek VPS yang akan dibuat:" : "(Langkah 1/3) Pilih paket spek VPS:";
     await vpsReply(ctx, `${serviceLabel(draft.serviceType)}\n\n${draft.accountId ? `Akun/team: ${draft.accountId}\n\n` : ""}${draft.plans.length ? stepLabel : "Belum ada paket aktif. Hubungi admin."}${notice ? `\n\n${notice}` : ""}`, keyboard);
+  }
+  async function rejectDisabled(ctx: Context, draft: Draft, plan: VpsUiPlan, selection: { os?: string; region?: string } = {}): Promise<boolean> {
+    const message = deps.disabledSelection
+      ? await deps.disabledSelection({ planId: plan.id, serviceType: draft.serviceType, sourceMode: draft.directMode ? "direct" : "digitalocean", sizeSlug: plan.sizeSlug, ...selection })
+      : plan.enabled ? null : DEFAULT_VPS_DISABLE_MESSAGE;
+    if (!message) return false;
+    const keyboard = new InlineKeyboard();
+    if (draft.plan && draft.region) keyboard.text("Ganti OS", `vps_backos_${draft.id}`).row();
+    if (draft.plan && !draft.directMode) keyboard.text("Ganti Region", `vps_backregion_${draft.id}`).row();
+    keyboard.text("Ganti Spek", `vps_page_${draft.id}_0`).text("Batal", "vps_home");
+    // Reply preserves the current choices so another option can be selected immediately.
+    await ctx.reply(message, { reply_markup: keyboard });
+    return true;
   }
   async function showInstallSources(ctx: Context): Promise<void> {
     clearVpsInput(actorOf(ctx));
@@ -216,7 +234,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
     clearVpsInput(actor);
     dropDraft(actor);
     for (const [owner, draft] of drafts) if (draft.expiresAt <= Date.now()) dropDraft(owner);
-    const listedPlans = await deps.listPlans(serviceType);
+    const listedPlans = await deps.listPlans(serviceType, true);
     const plans = serviceType === "install"
       ? listedPlans.filter(plan => direct ? plan.sourceMode === "direct" : plan.sourceMode !== "direct" && plan.id !== DIRECT_INSTALL_PLAN_ID)
       : listedPlans;
@@ -275,6 +293,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
   }
   async function checkout(ctx: Context, draft: Draft): Promise<void> {
     if (!draft.plan || !draft.os || !draft.region) throw new Error("Incomplete selection");
+    if (!draft.order && await rejectDisabled(ctx, draft, draft.plan, { os: draft.os, region: draft.region })) return;
     if (!planPrice(draft.plan, draft.region, draft.os)) {
       await vpsReply(ctx, draft.directMode
         ? "Harga jasa untuk OS ini belum diatur admin. Belum ada tagihan yang dibuat."
@@ -354,6 +373,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           if (selection[1] === "plan") {
             const plan = draft.plans[index];
             if (!plan) throw new Error("Unknown plan");
+            if (await rejectDisabled(ctx, draft, plan)) return;
             draft.plan = plan;
             delete draft.region; delete draft.os;
             if (draft.directMode) {
@@ -378,6 +398,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           } else if (selection[1] === "region") {
             const region = draft.plan?.regions[index];
             if (!region || !draft.plan) throw new Error("Unknown region");
+            if (await rejectDisabled(ctx, draft, draft.plan, { region, ...(draft.os ? { os: draft.os } : {}) })) return;
             draft.region = region;
             if (draft.os) {
               await checkout(ctx, draft);
@@ -391,6 +412,7 @@ export function createVpsPlugin(overrides: Partial<VpsUiDependencies> = {}): Plu
           } else {
             const os = draft.plan ? pricedOs(draft.plan, draft.region, Boolean(draft.directMode))[index] : undefined;
             if (!os || !draft.plan) throw new Error("Unknown OS");
+            if (await rejectDisabled(ctx, draft, draft.plan, { os: os.os, ...(draft.region ? { region: draft.region } : {}) })) return;
             if (os.price === null) {
               if (draft.directMode) {
                 await showDirectOs(ctx, draft, `❌ ${os.label} belum tersedia karena harga jasa belum diatur.`);
