@@ -127,6 +127,7 @@ test("direct SSH readiness checks sudo without waiting on an existing VPS's clou
 const transFixture = `#!/bin/bash
 set -eu
 os_dir="$PWD/os"
+confhome="$PWD/conf"
 win_dir=Windows
 use_gpo=false
 distro=fixture
@@ -135,6 +136,7 @@ sync() { :; }
 reboot() { :; }
 error_and_exit() { printf '%s\\n' "$*" >&2; exit 1; }
 get_path_in_correct_case() { printf '%s\\n' "$1"; }
+download() { printf '@echo off\\n' > "$2"; }
 bats=
 cat << 'EOF_NETWORK' > "$os_dir/windows-set-netconf-eth0.bat"
 @echo off
@@ -143,6 +145,7 @@ EOF_NETWORK
 bats="$bats windows-set-netconf-eth0.bat"
 if $use_gpo; then
     bats="$bats windows-del-gpo.bat"
+    download $confhome/windows-del-gpo.bat $os_dir/windows-del-gpo.bat
 fi
 printf '%s\\n' "$bats"
 printf '%s\\n' "$win_dir" > "$PWD/win-dir.txt"
@@ -211,7 +214,7 @@ async function emitWindowsFiles(t: TestContext, installChrome: boolean, wallpape
 for (const installChrome of [false, true]) {
     test(`generated setup puts critical RDP bootstrap before cosmetic tasks${installChrome ? " with Chrome" : ""}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, true);
-        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-set-wallpaper.bat"]);
+        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-set-wallpaper.bat", "windows-del-gpo.bat"]);
         const batch = readFileSync(path.join(directory, "os", "windows-fix-rdp.bat"), "utf8");
         assert.match(batch, /fDenyTSConnections/);
         assert.match(batch, /if not exist "%SystemRoot%\\bot-tele-password-ready"/);
@@ -248,11 +251,40 @@ for (const installChrome of [false, true]) {
 
     test(`missing wallpaper preserves network setup and Chrome=${installChrome}`, { skip: scriptSkip }, async t => {
         const { directory, batches } = await emitWindowsFiles(t, installChrome, false);
-        assert.deepEqual(batches, ["windows-fix-rdp.bat"]);
+        assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-del-gpo.bat"]);
         assert.equal(existsSync(path.join(directory, "os", "windows-set-wallpaper.bat")), false);
         assert.equal(existsSync(path.join(directory, "os", "danka-wallpaper.ps1")), false);
     });
 }
+
+test("generalized/OOBE images register LocalGPO and keep a SetupComplete fallback", { skip: scriptSkip }, async t => {
+    const { directory, batches } = await emitWindowsFiles(t, false, false);
+    assert.deepEqual(batches, ["windows-fix-rdp.bat", "windows-del-gpo.bat"]);
+    const setupComplete = path.join(directory, "os", "Windows", "Setup", "Scripts", "SetupComplete.cmd");
+    assert.ok(existsSync(setupComplete), "OOBE images must keep SetupComplete as a fallback");
+    const setup = readFileSync(setupComplete, "utf8");
+    assert.match(setup, /windows-fix-rdp\.bat/);
+    assert.match(setup, /windows-del-gpo\.bat/);
+    assert.ok(setup.indexOf("windows-fix-rdp.bat") < setup.indexOf("windows-del-gpo.bat"), "RDP bootstrap must run before GPO cleanup");
+    const cleanup = readFileSync(path.join(directory, "os", "windows-del-gpo.bat"), "utf8");
+    assert.match(cleanup, /^@if not exist "%SystemRoot%\\bot-tele-rdp-ready" exit \/b 1/m);
+    const patchedScript = readFileSync(path.join(directory, "trans.sh"), "utf8");
+    assert.match(patchedScript, /_bot_tele_setupcomplete_fallback=true/);
+    assert.match(patchedScript, /OOBE\/generalized Windows: enabling LocalGPO bootstrap with SetupComplete fallback/);
+});
+
+test("complete Windows images keep the ordinary LocalGPO path without adding SetupComplete", { skip: scriptSkip }, async t => {
+    const directory = temporaryDirectory(t);
+    const fixture = transFixture.replace("use_gpo=false", "use_gpo=true");
+    const patched = patchFixture(directory, await installerPatch(directory, false, false), fixture);
+    assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
+    const emitted = spawnSync(bash!, ["--noprofile", "--norc", "trans.sh"], {
+        cwd: directory, encoding: "utf8", timeout: 10_000, windowsHide: true,
+        env: { ...process.env, BOT_TELE_CONFIG_ROOT: path.join(directory, "configs", "bot-tele") },
+    });
+    assert.equal(emitted.status, 0, `${emitted.stdout}\n${emitted.stderr}`);
+    assert.equal(existsSync(path.join(directory, "os", "Windows", "Setup", "Scripts", "SetupComplete.cmd")), false);
+});
 
 test("Windows CMD adapter lookup selects the MAC match and active hardware fallback", {
     skip: scriptSkip || (process.platform !== "win32" && "Native CMD adapter regression requires Windows"),
@@ -569,9 +601,7 @@ test("LocalGPO startup registration merges into an empty SOFTWARE hive and prese
     skip: !python ? "Python 3 is required" : !hivexregedit ? "hivexregedit is required for the offline registry regression" : false,
 }, async t => {
     const directory = temporaryDirectory(t);
-    const fixture = transFixture.replace('    bats="$bats windows-del-gpo.bat"',
-        '    bats="$bats windows-del-gpo.bat"\n    download $confhome/windows-del-gpo.bat $os_dir/windows-del-gpo.bat');
-    const patched = patchFixture(directory, await installerPatch(directory, false, false), fixture);
+    const patched = patchFixture(directory, await installerPatch(directory, false, false));
     assert.equal(patched.status, 0, `${patched.stdout}\n${patched.stderr}`);
     const registry = readFileSync(path.join(directory, "trans.sh"), "utf8")
         .match(/cat > "\$_gpo_reg" <<'EOF_BOT_GPO_REG'\r?\n([\s\S]*?)\r?\nEOF_BOT_GPO_REG/)?.[1];

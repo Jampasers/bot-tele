@@ -1071,9 +1071,34 @@ EOF_BOT_GPO_REG
             apk del hivex-perl >/dev/null 2>&1 || true
             echo "[PATCH] LocalGPO startup bootstrap registry registration complete"
         fi''')
+        new_lines.append(r'''        if $_bot_tele_setupcomplete_fallback; then
+            setup_complete=$(get_path_in_correct_case "$os_dir/Windows/Setup/Scripts/SetupComplete.cmd")
+            mkdir -p "$(dirname "$setup_complete")"
+            setup_complete_mod=$(mktemp)
+            for bat in $bats; do
+                echo "if exist %SystemDrive%\\\\$bat (call %SystemDrive%\\\\$bat)" >> "$setup_complete_mod"
+            done
+            if [ -f "$setup_complete" ]; then
+                cat "$setup_complete" >> "$setup_complete_mod"
+            fi
+            unix2dos "$setup_complete_mod"
+            cat "$setup_complete_mod" > "$setup_complete"
+            rm -f "$setup_complete_mod"
+            echo "[PATCH] SetupComplete fallback registered for generalized/OOBE Windows" >&2
+        fi''')
         continue
     if not gpo_found and line.strip() == 'if $use_gpo; then':
         gpo_found = True
+        new_lines.append(r'''    # Generalized/OOBE images normally rely only on SetupComplete, which can
+    # be delayed until interactive setup finishes. Keep that fallback, but also
+    # register the same idempotent bootstrap through LocalGPO so network,
+    # Administrator password and RDP can become ready on first machine startup.
+    _bot_tele_setupcomplete_fallback=false
+    if ! $use_gpo; then
+        _bot_tele_setupcomplete_fallback=true
+        use_gpo=true
+        echo "[PATCH] OOBE/generalized Windows: enabling LocalGPO bootstrap with SetupComplete fallback" >&2
+    fi''')
 ${wallpaperB64 ? "        new_lines.append(wallpaper_copy_code)\n        new_lines.append(wallpaper_bat_code)\n" : ""}
 ${input.installChrome === true ? "        new_lines.append(chrome_bat_code)\n" : ""}
         new_lines.append(r'''    bats="$bats windows-fix-rdp.bat"
