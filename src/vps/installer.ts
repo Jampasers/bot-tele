@@ -1076,7 +1076,7 @@ EOF_BOT_GPO_REG
             mkdir -p "$(dirname "$setup_complete")"
             setup_complete_mod=$(mktemp)
             for bat in $bats; do
-                echo "if exist %SystemDrive%\\$bat (call %SystemDrive%\\$bat)" >> "$setup_complete_mod"
+                echo "if exist %SystemDrive%\\\\$bat (call %SystemDrive%\\\\$bat)" >> "$setup_complete_mod"
             done
             if [ -f "$setup_complete" ]; then
                 cat "$setup_complete" >> "$setup_complete_mod"
