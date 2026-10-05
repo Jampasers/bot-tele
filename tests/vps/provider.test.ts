@@ -136,10 +136,10 @@ test("DO delete timeout remains uncertain and permission errors cannot confirm d
     assert.equal(calls, 1);
 });
 
-test("OS reference catalog preserves Linux and four Windows bootstrap choices", () => {
+test("OS reference catalog preserves Linux and ten Windows bootstrap choices", () => {
     assert.equal(Object.values(OS_CATALOG).filter((os) => os.family === "linux").length, 14);
     const win = Object.values(OS_CATALOG).filter((os) => os.family === "windows");
-    assert.equal(win.length, 4); assert.ok(win.every((os) => os.image === "ubuntu-24-04-x64"));
+    assert.equal(win.length, 10); assert.ok(win.every((os) => os.image === "ubuntu-24-04-x64"));
     assert.equal(getOs("__proto__"), undefined);
 });
 
