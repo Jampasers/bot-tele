@@ -229,7 +229,7 @@ test("service menu derives DO specs plus a separate buyer-owned install service"
   assert.ok(direct);
   assert.equal(direct.sizeSlug, "external-vps");
   assert.deepEqual(direct.regions, ["external"]);
-  assert.deepEqual(direct.osPrices.map(os => os.os), ["windows2012r2", "windows2016", "windows2019", "windows2022"]);
+  assert.deepEqual(direct.osPrices.map(os => os.os), ["windows2012r2", "windows2016", "windows2019", "windows2022", "windows2025", "windows10", "windows10atlas", "windows10ghost", "windows11atlas", "windows11ghost"]);
 });
 
 test("catalog checkout without an exact configured price cannot create order or contact DigitalOcean", async t => {
